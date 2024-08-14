@@ -1,0 +1,58 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2024-08-14 13:58:57.474776",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "slack_bot_token",
+  "slack_app_token",
+  "attendance_channel_id"
+ ],
+ "fields": [
+  {
+   "fieldname": "slack_bot_token",
+   "fieldtype": "Password",
+   "in_list_view": 1,
+   "label": "SLACK_BOT_TOKEN",
+   "reqd": 1
+  },
+  {
+   "fieldname": "slack_app_token",
+   "fieldtype": "Password",
+   "in_list_view": 1,
+   "label": "SLACK_APP_TOKEN",
+   "reqd": 1
+  },
+  {
+   "fieldname": "attendance_channel_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "ATTENDANCE_CHANNEL_ID",
+   "reqd": 1
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "issingle": 1,
+ "links": [],
+ "modified": "2024-08-14 14:04:12.263091",
+ "modified_by": "Administrator",
+ "module": "Slack Connector",
+ "name": "Slack Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

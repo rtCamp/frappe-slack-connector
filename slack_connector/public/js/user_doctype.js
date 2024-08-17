@@ -1,6 +1,6 @@
 frappe.ui.form.on("User", {
   refresh: function (frm) {
-    frm.add_custom_button(__("Connect Slack"), function () {
+    frm.add_custom_button(__("Authorize Slack"), function () {
       frm.events.connect_slack(frm);
     });
   },

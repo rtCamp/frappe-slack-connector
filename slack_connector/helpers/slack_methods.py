@@ -55,6 +55,7 @@ def get_slack_users() -> dict:
     """
     Get all users from Slack and return a dictionary of email and username
     """
+    # FIXME: Make this paginated for bigger payloads
     result = slack_app.client.users_list(limit=1000)
     users = result.get("members", {})
 
@@ -65,3 +66,11 @@ def get_slack_users() -> dict:
             continue
         user_dict[email] = user["id"]
     return user_dict
+
+
+def get_slack_user_id(user_email: str) -> str:
+    """
+    Get the Slack user ID for the given user email
+    """
+    slack_user = slack_app.client.users_lookupByEmail(email=user_email)
+    return slack_user["user"]["id"]

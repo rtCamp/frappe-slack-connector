@@ -15,6 +15,7 @@ def _setup_slack_app() -> None:
     SLACK_APP_TOKEN = settings.get_password("slack_app_token")
     SLACK_CHANNEL_ID = settings.get_password("attendance_channel_id")
     slack_app = App(token=SLACK_BOT_TOKEN)
+    # FIXME: return the slack app here
 
 
 _setup_slack_app()

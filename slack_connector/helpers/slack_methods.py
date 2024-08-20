@@ -72,5 +72,6 @@ def get_slack_user_id(user_email: str) -> str:
     """
     Get the Slack user ID for the given user email
     """
+    # FIXME: Rewrite the function to get the user's slack ID from user meta then slack api
     slack_user = slack_app.client.users_lookupByEmail(email=user_email)
     return slack_user["user"]["id"]

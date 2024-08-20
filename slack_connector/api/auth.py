@@ -1,6 +1,7 @@
 import frappe
 
 from slack_connector.helpers.slack_app import slack_app
+
 # from slack_connector.helpers.slack_methods import get_employee_company_email
 from slack_connector.helpers.user_meta import update_user_meta
 
@@ -10,9 +11,11 @@ def connect_slack(user_email: str) -> None:
     company_email = user_email  # get_employee_company_email(user_email)
     slack_user = slack_app.client.users_lookupByEmail(email=company_email)
     slack_id = slack_user["user"]["id"]
+    slack_name = slack_user["user"]["name"]
     update_user_meta(
         {
             "custom_username": slack_id,
+            "custom_slack_username": slack_name,
         },
         user=user_email,
     )

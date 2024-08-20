@@ -1,4 +1,5 @@
 import frappe
+from frappe.utils import today
 
 from slack_connector.helpers.slack_app import slack_app
 from slack_connector.helpers.user_meta import update_user_meta
@@ -75,3 +76,26 @@ def get_slack_user_id(user_email: str) -> str:
     # FIXME: Rewrite the function to get the user's slack ID from user meta then slack api
     slack_user = slack_app.client.users_lookupByEmail(email=user_email)
     return slack_user["user"]["id"]
+
+
+def get_employees_on_leave() -> list:
+    """
+    Get all employees on leave today
+    """
+    current_date = today()
+
+    # Query Leave Application doctype
+    leave_applications = frappe.get_all(
+        "Leave Application",
+        filters={"from_date": ("<=", current_date), "to_date": (">=", current_date)},
+        fields=[
+            "employee",
+            "employee_name",
+            "leave_type",
+            "from_date",
+            "to_date",
+            "status",
+        ],
+    )
+
+    return leave_applications

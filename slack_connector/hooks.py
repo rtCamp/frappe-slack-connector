@@ -134,23 +134,13 @@ doc_events = {
 # Scheduled Tasks
 # ---------------
 
-# scheduler_events = {
-# 	"all": [
-# 		"slack_connector.tasks.all"
-# 	],
-# 	"daily": [
-# 		"slack_connector.tasks.daily"
-# 	],
-# 	"hourly": [
-# 		"slack_connector.tasks.hourly"
-# 	],
-# 	"weekly": [
-# 		"slack_connector.tasks.weekly"
-# 	],
-# 	"monthly": [
-# 		"slack_connector.tasks.monthly"
-# 	],
-# }
+scheduler_events = {
+    "all": ["slack_connector.override.leave_application.attendance_channel"],
+    # "daily": ["slack_connector.tasks.daily"],
+    # "hourly": ["slack_connector.tasks.hourly"],
+    # "weekly": ["slack_connector.tasks.weekly"],
+    # "monthly": ["slack_connector.tasks.monthly"],
+}
 
 # Testing
 # -------

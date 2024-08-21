@@ -4,6 +4,11 @@ from slack_connector.helpers.slack_app import slack_app
 from slack_connector.helpers.slack_methods import get_employees_on_leave
 
 
+def submit(doc, method):
+    attendance_channel()
+    frappe.throw("Testing Attendance Channel Notification")
+
+
 def after_insert(doc, method):
     approver_slack = frappe.db.get_value(
         "User Meta", {"user": doc.leave_approver}, "custom_username"

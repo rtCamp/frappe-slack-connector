@@ -128,7 +128,6 @@ doctype_js = {
 doc_events = {
     "Leave Application": {
         "after_insert": "slack_connector.override.leave_application.after_insert",
-        "before_submit": "slack_connector.override.leave_application.submit",
     },
 }
 
@@ -136,7 +135,7 @@ doc_events = {
 # ---------------
 
 scheduler_events = {
-    # "all": ["slack_connector.override.leave_application.attendance_channel"],
+    "all": ["slack_connector.api.attendance_summary.attendance_channel"],
     # "daily": ["slack_connector.tasks.daily"],
     # "hourly": ["slack_connector.tasks.hourly"],
     # "weekly": ["slack_connector.tasks.weekly"],

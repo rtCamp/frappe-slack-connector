@@ -12,7 +12,7 @@ def connect_slack(user_email: str) -> None:
     slack_name = slack_user["name"]
     update_user_meta(
         {
-            "custom_username": slack_id,
+            "custom_slack_userid": slack_id,
             "custom_slack_username": slack_name,
         },
         user=user_email,

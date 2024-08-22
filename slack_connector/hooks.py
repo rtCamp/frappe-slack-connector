@@ -36,6 +36,25 @@ doctype_js = {
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
 
+# Fixtures
+# ----------
+fixtures = [
+    {
+        "dt": "Custom Field",
+        "filters": [
+            [
+                "name",
+                "in",
+                [
+                    "User Meta-custom_slack_userid",
+                    "User Meta-custom_slack_username",
+                ],
+            ]
+        ],
+    },
+]
+
+
 # Svg Icons
 # ------------------
 # include app icons in desk

@@ -13,7 +13,7 @@ def sync_slack_data():
         for email, slack_details in slack_users.items():
             update_user_meta(
                 {
-                    "custom_username": slack_details["id"],
+                    "custom_slack_userid": slack_details["id"],
                     "custom_slack_username": slack_details["name"],
                 },
                 user=email,

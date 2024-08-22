@@ -105,9 +105,9 @@ class SlackIntegration:
                 if user_email
                 else get_user_meta(employee_id=employee_id)
             )
-            if user_meta and user_meta.custom_username:
+            if user_meta and user_meta.custom_slack_userid:
                 return {
-                    "id": user_meta.custom_username,
+                    "id": user_meta.custom_slack_userid,
                     "name": user_meta.custom_slack_username,
                 }
         slack_email = user_meta.user if user_meta else user_email

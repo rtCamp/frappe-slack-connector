@@ -20,4 +20,28 @@ frappe.ui.form.on("Slack Settings", {
       },
     });
   },
+
+  test_slack_channel: function (frm) {
+    frappe.call({
+      method: "slack_connector.api.test_slack_channel.test_channel",
+      args: { channel_id: frm.doc.attendance_channel_id },
+      callback: function (response) {
+        if (!response.exc) {
+          frappe.msgprint({
+            title: __("Success"),
+            message: __(
+              `Sent test message to the Slack channel: ${frm.doc.attendance_channel_id}`,
+            ),
+            indicator: "green",
+          });
+        } else {
+          frappe.msgprint({
+            title: __("Error"),
+            message: __("Slack channel is invalid."),
+            indicator: "red",
+          });
+        }
+      },
+    });
+  },
 });

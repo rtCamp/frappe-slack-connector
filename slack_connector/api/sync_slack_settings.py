@@ -38,5 +38,5 @@ def sync_slack_data():
         )
 
     except Exception as e:
-        frappe.log_error(f"Error syncing Slack data: {str(e)}")
+        frappe.log_error(title="Error syncing Slack data", message=str(e))
         frappe.throw("Error syncing Slack data")

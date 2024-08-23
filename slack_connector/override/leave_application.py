@@ -8,7 +8,7 @@ def after_insert(doc, method):
     try:
         approver_slack = slack.get_slack_user_id(user_email=doc.leave_approver)
     except Exception as e:
-        frappe.log_error(f"Error fetching approver slack id: {str(e)}")
+        frappe.log_error(title="Error fetching approver slack id", message=str(e))
         approver_slack = None
     if approver_slack is None:
         return

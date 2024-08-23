@@ -30,5 +30,5 @@ def get_employee_company_email(user_email: str = None):
             return None
 
     except Exception as e:
-        frappe.log_error(f"Error fetching employee company email: {str(e)}")
+        frappe.log_error(title="Error fetching employee company email", message=str(e))
         return None

@@ -51,26 +51,46 @@ def format_leave_application_blocks(
     """
     blocks = [
         {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": ":memo: New Leave Application",
+                "emoji": True,
+            },
+        },
+        {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"*You have a new Leave Application request:*\n_Requested by:_ {employee_name}",
+                "text": f"{employee_name} has submitted a new leave request.",
             },
         },
         {"type": "divider"},
         {
             "type": "section",
             "fields": [
-                {"type": "mrkdwn", "text": f"*Type:* {leave_type}"},
+                {"type": "mrkdwn", "text": f"*Leave Type:*\n:rocket: {leave_type}"},
                 {
                     "type": "mrkdwn",
-                    "text": f"*When:* Submitted {leave_submission_date}",
+                    "text": f"*Submitted On:*\n:clock3: {leave_submission_date}",
                 },
-                {"type": "mrkdwn", "text": f"*From:* {from_date}"},
-                {"type": "mrkdwn", "text": f"*Reason:* {reason}"},
-                {"type": "mrkdwn", "text": f"*To:* {to_date}"},
             ],
         },
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*From:*\n:date: {from_date}"},
+                {"type": "mrkdwn", "text": f"*To:*\n:date: {to_date}"},
+            ],
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Reason:*\n>{reason if reason else 'No reason provided'}",
+            },
+        },
+        {"type": "divider"},
         {
             "type": "actions",
             "elements": [
@@ -78,14 +98,35 @@ def format_leave_application_blocks(
                     "type": "button",
                     "text": {"type": "plain_text", "emoji": True, "text": "Approve"},
                     "style": "primary",
-                    "value": "click_me_123",
+                    "value": "approve_leave",
+                    "action_id": "approve_leave",
                 },
                 {
                     "type": "button",
                     "text": {"type": "plain_text", "emoji": True, "text": "Reject"},
                     "style": "danger",
-                    "value": "click_me_123",
+                    "value": "reject_leave",
+                    "action_id": "reject_leave",
                 },
+                # {
+                #     "type": "button",
+                #     "text": {
+                #         "type": "plain_text",
+                #         "emoji": True,
+                #         "text": "View Details",
+                #     },
+                #     "value": "view_details",
+                #     "action_id": "view_leave_details",
+                # },
+            ],
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": "Please review and take action on this leave request.",
+                }
             ],
         },
     ]

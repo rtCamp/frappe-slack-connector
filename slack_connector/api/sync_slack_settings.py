@@ -7,6 +7,10 @@ from slack_connector.slack.app import SlackIntegration
 @frappe.whitelist()
 def sync_slack_data():
     frappe.msgprint("Syncing Slack data...")
+    frappe.enqueue(sync_slack_job, queue="long")
+
+
+def sync_slack_job():
     try:
         slack = SlackIntegration()
         slack_users = slack.get_slack_users()
@@ -19,7 +23,9 @@ def sync_slack_data():
                 user=email,
                 upsert=False,
             )
-        frappe.msgprint("Slack data synced successfully")
+        frappe.msgprint(
+            "Slack data synced successfully", realtime=True, indicator="green"
+        )
 
         # Check and display employees not found in Slack
         employees = frappe.get_all(
@@ -35,8 +41,9 @@ def sync_slack_data():
             f"Employees not found in Slack: {', '.join(unset_employees)}",
             title="Warning",
             indicator="orange",
+            realtime=True,
         )
 
     except Exception as e:
         frappe.log_error(title="Error syncing Slack data", message=str(e))
-        frappe.throw("Error syncing Slack data")
+        frappe.msgprint("Error syncing Slack data", realtime=True, indicator="red")

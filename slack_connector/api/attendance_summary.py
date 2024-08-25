@@ -1,4 +1,5 @@
 import frappe
+from frappe import _
 
 from slack_connector.db.leave_application import get_employees_on_leave
 from slack_connector.db.user_meta import get_user_meta
@@ -8,6 +9,10 @@ from slack_connector.slack.app import SlackIntegration
 
 @frappe.whitelist()
 def attendance_channel() -> None:
+    frappe.enqueue(attendance_channel_bg, queue="short")
+
+
+def attendance_channel_bg() -> None:
     slack = SlackIntegration()
     announcement = ""
     users_on_leave = get_employees_on_leave()
@@ -25,14 +30,22 @@ def attendance_channel() -> None:
             f"{', (Unapproved)' if user_application.status != 'Approved' else ''}_"
         )
 
-    slack.slack_app.client.chat_postMessage(
-        channel=slack.SLACK_CHANNEL_ID,
-        blocks=format_attendance_blocks(
-            date_string=standard_date_fmt(frappe.utils.nowdate()),
-            employee_count=len(users_on_leave),
-            leave_details_mrkdwn=announcement,
-        ),
-    )
+    try:
+        slack.slack_app.client.chat_postMessage(
+            channel=slack.SLACK_CHANNEL_ID,
+            blocks=format_attendance_blocks(
+                date_string=standard_date_fmt(frappe.utils.nowdate()),
+                employee_count=len(users_on_leave),
+                leave_details_mrkdwn=announcement,
+            ),
+        )
+    except Exception as e:
+        frappe.log_error(title="Error posting message to Slack", message=str(e))
+        frappe.msgprint(
+            title=_("Error posting message to Slack"),
+            msg=_("Please check the channel ID and try again."),
+            realtime=True,
+        )
 
 
 def format_attendance_blocks(

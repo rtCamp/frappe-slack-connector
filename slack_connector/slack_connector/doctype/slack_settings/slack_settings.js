@@ -33,7 +33,7 @@ frappe.ui.form.on("Slack Settings", {
           frappe.msgprint({
             title: __("Success"),
             message: __(
-              `Sent test message to the Slack channel: ${frm.doc.attendance_channel_id}`,
+              `Sent test message to the Slack channel: <strong>#${frm.doc.attendance_channel_id}</strong>`,
             ),
             indicator: "green",
           });
@@ -55,7 +55,9 @@ frappe.ui.form.on("Slack Settings", {
         if (!response.exc) {
           frappe.msgprint({
             title: __("Success"),
-            message: __(`Sent Attendance to #${frm.doc.attendance_channel_id}`),
+            message: __(
+              `Sent Attendance to <strong>#${frm.doc.attendance_channel_id}</strong>`,
+            ),
             indicator: "green",
           });
         } else {

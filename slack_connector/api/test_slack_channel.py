@@ -11,12 +11,8 @@ def test_channel(channel_id):
         slack.slack_app.client.chat_postMessage(
             channel=channel_id,
             text=(
-                "_This is a test message from ERPNext. "
-                "You will see list of people on leave daily_\n"
-                "_Example:_\n"
-                "*People on Leave Today*\n"
-                "_Employee1_ is on leave from _20-08-2024_ to _22-08-2024_ (Approved)\n"
-                "_Employee2_ is on leave from _25-08-2024_ to _27-08-2024_ (Open)"
+                "*This is a test message from ERPNext.*\n"
+                "_You will see list of people on leave daily_\n"
             ),
         )
     except Exception as e:

@@ -4,6 +4,9 @@ import frappe
 def update_user_meta(
     user_meta_object: dict, user: str | None = None, upsert: bool = True
 ) -> object:
+    """
+    Update the User Meta document for the given user.
+    """
     if user is None:
         user = frappe.session.user
     user_meta = frappe.db.get_value(
@@ -28,6 +31,9 @@ def update_user_meta(
 
 
 def get_user_meta(*, user_id: str = None, employee_id: str = None) -> dict | None:
+    """
+    Get the User Meta document for the given user or employee.
+    """
     if not user_id and not employee_id:
         raise ValueError("Either user_id or employee_id is required")
     if user_id and employee_id:

@@ -1,10 +1,23 @@
 import frappe
+from frappe.model.document import Document
 
 from slack_connector.helpers.standard_date import standard_date_fmt
 from slack_connector.slack.app import SlackIntegration
 
 
 def after_insert(doc, method):
+    """
+    Send a slack message to the leave approver when a new leave application
+    is submitted
+    """
+    frappe.enqueue(
+        send_leave_notification_bg,
+        queue="short",
+        doc=doc,
+    )
+
+
+def send_leave_notification_bg(doc: Document = None):
     """
     Send a slack message to the leave approver when a new leave application
     is submitted

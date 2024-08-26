@@ -17,7 +17,7 @@ def after_insert(doc, method):
     )
 
 
-def send_leave_notification_bg(doc: Document = None):
+def send_leave_notification_bg(doc: Document):
     """
     Send a slack message to the leave approver when a new leave application
     is submitted

@@ -5,8 +5,14 @@
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
+  "slack_app_section",
   "slack_bot_token",
   "slack_app_token",
+  "column_break_judr",
+  "slack_client_id",
+  "slack_client_secret",
+  "workspace_section",
+  "send_attendance_updates",
   "attendance_channel_id",
   "test_slack_channel"
  ],
@@ -15,21 +21,21 @@
    "fieldname": "slack_bot_token",
    "fieldtype": "Password",
    "in_list_view": 1,
-   "label": "SLACK_BOT_TOKEN",
+   "label": "Bot Auth Token",
    "reqd": 1
   },
   {
    "fieldname": "slack_app_token",
    "fieldtype": "Password",
    "in_list_view": 1,
-   "label": "SLACK_APP_TOKEN",
-   "reqd": 1
+   "label": "App Token"
   },
   {
+   "description": "The name of the Slack channel where you have to send the attendance summary mesage",
    "fieldname": "attendance_channel_id",
    "fieldtype": "Data",
    "in_list_view": 1,
-   "label": "ATTENDANCE_CHANNEL_ID",
+   "label": "Attendance Channel ID",
    "reqd": 1
   },
   {
@@ -37,12 +43,42 @@
    "fieldname": "test_slack_channel",
    "fieldtype": "Button",
    "label": "Test Channel"
+  },
+  {
+   "fieldname": "slack_app_section",
+   "fieldtype": "Section Break",
+   "label": "Slack App"
+  },
+  {
+   "fieldname": "column_break_judr",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "slack_client_id",
+   "fieldtype": "Data",
+   "label": "Client ID"
+  },
+  {
+   "fieldname": "slack_client_secret",
+   "fieldtype": "Password",
+   "label": "Client Secret"
+  },
+  {
+   "fieldname": "workspace_section",
+   "fieldtype": "Section Break",
+   "label": "Workspace"
+  },
+  {
+   "default": "1",
+   "fieldname": "send_attendance_updates",
+   "fieldtype": "Check",
+   "label": "Send attendance updates"
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2024-08-22 17:21:21.558671",
+ "modified": "2024-08-26 18:47:57.015853",
  "modified_by": "Administrator",
  "module": "Slack Connector",
  "name": "Slack Settings",

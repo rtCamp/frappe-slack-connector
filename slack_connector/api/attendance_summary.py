@@ -25,9 +25,10 @@ def attendance_channel_bg() -> None:
             else user_application.employee_name
         )
         announcement += (
-            f"\n{slack_name} "
-            f"_{'Half Day' if user_application.half_day else 'Full Day'}"
-            f"{', (Unapproved)' if user_application.status != 'Approved' else ''}_"
+            f"\n{':last_quarter_moon:' if user_application.half_day else ':full_moon:'}  "
+            f"{slack_name} "
+            f"_{'until ' + standard_date_fmt(user_application.to_date) if user_application.from_date != user_application.to_date else '' } "
+            f"{'(Unapproved)' if user_application.status != 'Approved' else ''}_"
         )
 
     try:
@@ -52,28 +53,13 @@ def format_attendance_blocks(
     date_string: str, employee_count: int, leave_details_mrkdwn: str
 ) -> list:
     blocks = [
-        # {
-        #     "type": "image",
-        #     "image_url": "https://api.slack.com/img/blocks/bkb_template_images/notifications.png",
-        #     "alt_text": "Calendar illustration",
-        # },
         {
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": ":calendar: Daily Leave Notification",
+                "text": f":calendar: {employee_count} {('employee' if employee_count <= 1 else 'employees')} on leave today",
                 "emoji": True,
             },
-        },
-        {
-            "type": "section",
-            "fields": [
-                {"type": "mrkdwn", "text": f"*Date:*\n{date_string}"},
-                {
-                    "type": "mrkdwn",
-                    "text": f"*On Leave:*\n{employee_count} {('employee' if employee_count <= 1 else 'employees')}",
-                },
-            ],
         },
         {"type": "divider"},
         {
@@ -88,7 +74,7 @@ def format_attendance_blocks(
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": ":information_source: _Full Day :full_moon: and Half Day :last_quarter_moon: leaves are marked accordingly_",
+                    "text": "_Full Day :full_moon: and Half Day :last_quarter_moon: leaves are marked accordingly_",
                 }
             ],
         },
@@ -99,39 +85,9 @@ def format_attendance_blocks(
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": "For any queries, please contact HR department.",
+                    "text": "Thank you for your attention :pray:",
                 }
             ],
-        },
-    ]
-
-    return blocks
-
-
-def format_attendance_blocks_minimalistic(
-    date_string: str, employee_count: int, leave_details_mrkdwn: str
-) -> list:
-    blocks = [
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": (
-                    f"*Daily Leave Notification*\n\n"
-                    f"Today: {date_string}\n{employee_count} {('employee' if employee_count <= 1 else 'employees')}"
-                ),
-            },
-            "accessory": {
-                "type": "image",
-                "image_url": "https://api.slack.com/img/blocks/bkb_template_images/notifications.png",
-                "alt_text": "calendar thumbnail",
-            },
-        },
-        {"type": "divider"},
-        {"type": "section", "text": {"type": "mrkdwn", "text": "*On leave today:*"}},
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": leave_details_mrkdwn},
         },
     ]
 

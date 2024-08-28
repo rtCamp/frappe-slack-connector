@@ -1,5 +1,6 @@
 import frappe
 from frappe import _
+from frappe.utils import getdate, today
 
 from slack_connector.db.leave_application import get_employees_on_leave
 from slack_connector.db.user_meta import get_user_meta
@@ -24,8 +25,12 @@ def attendance_channel_bg() -> None:
             if user_slack
             else user_application.employee_name
         )
+
+        # Configure which emoji to use for full day, half days (first and second half)
+        leave_day_emoji = get_leave_day_emoji(user_application)
+
         announcement += (
-            f"\n{':last_quarter_moon:' if user_application.half_day else ':full_moon:'}  "
+            f"\n{leave_day_emoji} "
             f"{slack_name} "
             f"_{'until ' + standard_date_fmt(user_application.to_date) if user_application.from_date != user_application.to_date else '' } "
             f"{'(Unapproved)' if user_application.status != 'Approved' else ''}_"
@@ -47,6 +52,22 @@ def attendance_channel_bg() -> None:
             msg=_("Please check the channel ID and try again."),
             realtime=True,
         )
+
+
+def get_leave_day_emoji(user_application: dict) -> str:
+    leave_day_emoji = ":full_moon:"  # Default to full day
+
+    if user_application.half_day:
+        half_day_date = getdate(user_application.half_day_date)
+        current_date = getdate(today())
+
+        if half_day_date == current_date:
+            if user_application.custom_first_halfsecond_half == "First Half":
+                leave_day_emoji = ":first_quarter_moon:"
+            else:
+                leave_day_emoji = ":last_quarter_moon:"
+
+    return leave_day_emoji
 
 
 def format_attendance_blocks(

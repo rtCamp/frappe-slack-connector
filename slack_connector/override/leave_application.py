@@ -30,24 +30,28 @@ def send_leave_notification_bg(doc: Document):
         approver_slack = None
     if approver_slack is None:
         return
-    user_slack = slack.get_slack_user_id(employee_id=doc.employee)
-    mention = f"<@{user_slack}>" if user_slack else doc.employee_name
 
-    # TODO: Add CC users (override from `rtcamp` app)
-    # if hasattr(doc, "custom_notify_users"):
-    #     alert_message += f"CC: {', '.join([user_doc.user for user_doc in doc.custom_notify_users])}\n"
+    try:
+        user_slack = slack.get_slack_user_id(employee_id=doc.employee)
+        mention = f"<@{user_slack}>" if user_slack else doc.employee_name
 
-    slack.slack_app.client.chat_postMessage(
-        channel=approver_slack,
-        blocks=format_leave_application_blocks(
-            employee_name=mention,
-            leave_type=doc.leave_type,
-            leave_submission_date=standard_date_fmt(doc.creation),
-            from_date=standard_date_fmt(doc.from_date),
-            to_date=standard_date_fmt(doc.to_date),
-            reason=doc.description,
-        ),
-    )
+        # TODO: Add CC users (override from `rtcamp` app)
+        # if hasattr(doc, "custom_notify_users"):
+        #     alert_message += f"CC: {', '.join([user_doc.user for user_doc in doc.custom_notify_users])}\n"
+
+        slack.slack_app.client.chat_postMessage(
+            channel=approver_slack,
+            blocks=format_leave_application_blocks(
+                employee_name=mention,
+                leave_type=doc.leave_type,
+                leave_submission_date=standard_date_fmt(doc.creation),
+                from_date=standard_date_fmt(doc.from_date),
+                to_date=standard_date_fmt(doc.to_date),
+                reason=doc.description,
+            ),
+        )
+    except Exception as e:
+        frappe.log_error(title="Error posting message to Slack", message=str(e))
 
 
 def format_leave_application_blocks(

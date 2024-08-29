@@ -134,7 +134,16 @@ class SlackIntegration:
         slack_email = user_meta.user if user_meta else user_email
         if not slack_email:
             return None
-        slack_user = self.slack_app.client.users_lookupByEmail(email=slack_email)
+
+        try:
+            slack_user = self.slack_app.client.users_lookupByEmail(email=slack_email)
+        except Exception as e:
+            frappe.log_error(
+                title="Error fetching Slack user",
+                message=f"User Email: {slack_email}, Error: {str(e)}",
+            )
+            return None
+
         return {
             "id": slack_user.get("user", {}).get("id"),
             "name": slack_user.get("user", {}).get("name"),

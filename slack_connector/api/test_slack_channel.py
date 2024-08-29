@@ -1,6 +1,7 @@
 import frappe
 from frappe import _
 
+from slack_connector.helpers.error import generate_error_log
 from slack_connector.slack.app import SlackIntegration
 
 
@@ -25,12 +26,13 @@ def test_channel(channel_id: str = None):
             ),
         )
     except Exception as e:
-        frappe.log_error(title="Error posting message to Slack", message=str(e))
-        frappe.throw(
-            title=_("Error posting message to Slack"),
-            msg=_("Please check the channel ID and try again."),
-        )
         frappe.response.http_status_code = 500
         frappe.response.message = _(
             "An error occurred while connecting testing channel"
+        )
+        generate_error_log(
+            title=_("Error posting message to Slack"),
+            message=_("Please check the channel ID and try again."),
+            exception=e,
+            msgprint=True,
         )

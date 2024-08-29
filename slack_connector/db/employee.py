@@ -1,5 +1,7 @@
 import frappe
 
+from slack_connector.helpers.error import generate_error_log
+
 
 def get_employee_company_email(user_email: str = None):
     """
@@ -29,9 +31,12 @@ def get_employee_company_email(user_email: str = None):
             # If an Employee record is found, return the company_email
             return employee[0].company_email
         else:
-            frappe.log_error(f"No Employee record found for user {user_email}")
+            generate_error_log(f"No Employee record found for user {user_email}")
             return None
 
     except Exception as e:
-        frappe.log_error(title="Error fetching employee company email", message=str(e))
+        generate_error_log(
+            title="Error fetching employee company email",
+            exception=e,
+        )
         return None

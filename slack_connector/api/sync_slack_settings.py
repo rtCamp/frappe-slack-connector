@@ -1,6 +1,7 @@
 import frappe
 
 from slack_connector.db.user_meta import update_user_meta
+from slack_connector.helpers.error import generate_error_log
 from slack_connector.slack.app import SlackIntegration
 
 
@@ -52,5 +53,9 @@ def sync_slack_job():
         )
 
     except Exception as e:
-        frappe.log_error(title="Error syncing Slack data", message=str(e))
-        frappe.msgprint("Error syncing Slack data", realtime=True, indicator="red")
+        generate_error_log(
+            title="Error syncing Slack data",
+            exception=e,
+            msgprint=True,
+            realtime=True,
+        )

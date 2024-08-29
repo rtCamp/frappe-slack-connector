@@ -3,6 +3,7 @@ from frappe import _
 
 from slack_connector.db.leave_application import get_employees_on_leave
 from slack_connector.db.user_meta import get_user_meta
+from slack_connector.helpers.error import generate_error_log
 from slack_connector.helpers.standard_date import standard_date_fmt
 from slack_connector.slack.app import SlackIntegration
 
@@ -55,10 +56,11 @@ def attendance_channel_bg() -> None:
             ),
         )
     except Exception as e:
-        frappe.log_error(title="Error posting message to Slack", message=str(e))
-        frappe.msgprint(
+        generate_error_log(
             title=_("Error posting message to Slack"),
-            msg=_("Please check the channel ID and try again."),
+            message=_("Please check the channel ID and try again."),
+            exception=e,
+            msgprint=True,
             realtime=True,
         )
 

@@ -2,6 +2,7 @@ import frappe
 from slack_bolt import App
 
 from slack_connector.db.user_meta import get_user_meta
+from slack_connector.helpers.error import generate_error_log
 
 ####################################################################
 #                                                                  #
@@ -25,8 +26,10 @@ class SlackIntegration:
 
         # Still not set, raise an error
         if not self.__check_slack_config():
-            frappe.log_error("Slack Config not set in the Slack Settings")
-            frappe.throw("Slack Config not set in the Slack Settings")
+            generate_error_log(
+                title="Slack Config not set in the Slack Settings",
+                msgprint=True,
+            )
         self.slack_app = App(token=self.SLACK_BOT_TOKEN)
 
     def __check_slack_config(self) -> bool:
@@ -80,7 +83,10 @@ class SlackIntegration:
                     break  # No more users to fetch
 
             except Exception as e:
-                frappe.log_error(title="Error fetching Slack users", message={str(e)})
+                generate_error_log(
+                    title="Error fetching Slack users",
+                    exception=e,
+                )
                 break  # Exit the loop if there's an error
 
         return user_dict
@@ -138,9 +144,10 @@ class SlackIntegration:
         try:
             slack_user = self.slack_app.client.users_lookupByEmail(email=slack_email)
         except Exception as e:
-            frappe.log_error(
+            generate_error_log(
                 title="Error fetching Slack user",
-                message=f"User Email: {slack_email}, Error: {str(e)}",
+                message=f"User Email: {slack_email}",
+                exception=e,
             )
             return None
 

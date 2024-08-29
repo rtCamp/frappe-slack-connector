@@ -2,6 +2,7 @@ import frappe
 from frappe import _
 
 from slack_connector.db.user_meta import update_user_meta
+from slack_connector.helpers.error import generate_error_log
 from slack_connector.slack.app import SlackIntegration
 
 
@@ -20,9 +21,7 @@ def connect_slack(user_email: str = None) -> None:
         slack_user = slack.get_slack_user(user_email, check_meta=False)
         if not slack_user:
             frappe.response.http_status_code = 404
-            frappe.response.message = _(
-                "Slack user not found for the given email"
-            )
+            frappe.response.message = _("Slack user not found for the given email")
             return
 
         slack_id = slack_user["id"]
@@ -42,8 +41,9 @@ def connect_slack(user_email: str = None) -> None:
 
         frappe.response.message = _("Slack user connected successfully")
     except Exception as e:
-        frappe.log_error(title="Error connecting Slack user", message=str(e))
-        frappe.response.http_status_code = 500
-        frappe.response.message = _(
-            "An error occurred while connecting Slack user"
+        generate_error_log(
+            title="Error connecting Slack user",
+            exception=e,
         )
+        frappe.response.http_status_code = 500
+        frappe.response.message = _("An error occurred while connecting Slack user")

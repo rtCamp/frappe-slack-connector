@@ -1,6 +1,7 @@
 import frappe
 from frappe.model.document import Document
 
+from slack_connector.helpers.error import generate_error_log
 from slack_connector.helpers.standard_date import standard_date_fmt
 from slack_connector.slack.app import SlackIntegration
 
@@ -26,7 +27,10 @@ def send_leave_notification_bg(doc: Document):
     try:
         approver_slack = slack.get_slack_user_id(user_email=doc.leave_approver)
     except Exception as e:
-        frappe.log_error(title="Error fetching approver slack id", message=str(e))
+        generate_error_log(
+            title="Error fetching approver slack id",
+            exception=e,
+        )
         approver_slack = None
     if approver_slack is None:
         return
@@ -51,7 +55,10 @@ def send_leave_notification_bg(doc: Document):
             ),
         )
     except Exception as e:
-        frappe.log_error(title="Error posting message to Slack", message=str(e))
+        generate_error_log(
+            title="Error posting message to Slack",
+            exception=e,
+        )
 
 
 def format_leave_application_blocks(

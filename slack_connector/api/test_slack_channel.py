@@ -4,8 +4,13 @@ from frappe import _
 from slack_connector.slack.app import SlackIntegration
 
 
-@frappe.whitelist()
-def test_channel(channel_id):
+@frappe.whitelist(allow_guest=True)
+def test_channel(channel_id: str = None):
+    if channel_id is None:
+        frappe.local.response.http_status_code = 400
+        frappe.local.response.message = _("Channel ID is required")
+        return
+
     slack = SlackIntegration()
     try:
         slack.slack_app.client.chat_postMessage(
@@ -20,4 +25,8 @@ def test_channel(channel_id):
         frappe.throw(
             title=_("Error posting message to Slack"),
             msg=_("Please check the channel ID and try again."),
+        )
+        frappe.local.response.http_status_code = 500
+        frappe.local.response.message = _(
+            "An error occurred while connecting testing channel"
         )

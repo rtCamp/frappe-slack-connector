@@ -11,8 +11,8 @@ def test_channel(channel_id: str = None):
     Sends a test message to the given channel ID
     """
     if channel_id is None:
-        frappe.local.response.http_status_code = 400
-        frappe.local.response.message = _("Channel ID is required")
+        frappe.response.http_status_code = 400
+        frappe.response.message = _("Channel ID is required")
         return
 
     slack = SlackIntegration()
@@ -30,7 +30,7 @@ def test_channel(channel_id: str = None):
             title=_("Error posting message to Slack"),
             msg=_("Please check the channel ID and try again."),
         )
-        frappe.local.response.http_status_code = 500
-        frappe.local.response.message = _(
+        frappe.response.http_status_code = 500
+        frappe.response.message = _(
             "An error occurred while connecting testing channel"
         )

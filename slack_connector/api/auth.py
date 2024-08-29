@@ -11,16 +11,16 @@ def connect_slack(user_email: str = None) -> None:
     Connect the Slack user to the given user email
     """
     if user_email is None:
-        frappe.local.response.http_status_code = 400
-        frappe.local.response.message = _("User email is required")
+        frappe.response.http_status_code = 400
+        frappe.response.message = _("User email is required")
         return
 
     try:
         slack = SlackIntegration()
         slack_user = slack.get_slack_user(user_email, check_meta=False)
         if not slack_user:
-            frappe.local.response.http_status_code = 404
-            frappe.local.response.message = _(
+            frappe.response.http_status_code = 404
+            frappe.response.message = _(
                 "Slack user not found for the given email"
             )
             return
@@ -40,10 +40,10 @@ def connect_slack(user_email: str = None) -> None:
             indicator="green",
         )
 
-        frappe.local.response.message = _("Slack user connected successfully")
+        frappe.response.message = _("Slack user connected successfully")
     except Exception as e:
         frappe.log_error(title="Error connecting Slack user", message=str(e))
-        frappe.local.response.http_status_code = 500
-        frappe.local.response.message = _(
+        frappe.response.http_status_code = 500
+        frappe.response.message = _(
             "An error occurred while connecting Slack user"
         )

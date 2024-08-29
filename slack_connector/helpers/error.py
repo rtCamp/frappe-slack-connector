@@ -12,14 +12,15 @@ def generate_error_log(
     """
     Generate an error log with the given title and message
     """
-    if exception:
-        message = f"{message}\nException:\n{str(exception)}"
-    frappe.log_error(title=title, message=message)
+    frappe.log_error(
+        title=title,
+        message=f"{message}\nException:\n{str(exception)}" if exception else message,
+    )
 
     if msgprint:
         frappe.msgprint(
             title=title,
-            message=message,
+            msg=message,
             indicator="red",
             realtime=realtime,
         )

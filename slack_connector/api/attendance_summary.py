@@ -9,10 +9,17 @@ from slack_connector.slack.app import SlackIntegration
 
 @frappe.whitelist()
 def attendance_channel() -> None:
+    """
+    Server script to post the attendance summary to the Slack channel
+    Enqueues the background job to post the message
+    """
     frappe.enqueue(attendance_channel_bg, queue="short")
 
 
 def attendance_channel_bg() -> None:
+    """
+    Background job to post the attendance summary to the Slack channel
+    """
     slack = SlackIntegration()
     leave_groups = {"Full Day": [], "First-Half": [], "Second-Half": []}
     users_on_leave = get_employees_on_leave()
@@ -57,6 +64,9 @@ def attendance_channel_bg() -> None:
 
 
 def get_leave_type(user_application: dict) -> str:
+    """
+    Get the leave type based on the user's leave application
+    """
     if not user_application.half_day:
         return "Full Day"
     elif user_application.custom_first_halfsecond_half == "First Half":
@@ -66,6 +76,9 @@ def get_leave_type(user_application: dict) -> str:
 
 
 def format_leave_groups(leave_groups: dict) -> str:
+    """
+    Format the leave groups into a readable text for posting to Slack
+    """
     formatted_text = ""
     emojis = {"Full Day": "", "First-Half": "", "Second-Half": ""}
 
@@ -89,6 +102,9 @@ def format_attendance_blocks(
     employee_count: int,
     leave_details_mrkdwn: str,
 ) -> list:
+    """
+    Format the attendance summary into Slack blocks
+    """
     if employee_count == 0:
         return [
             {

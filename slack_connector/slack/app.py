@@ -3,6 +3,15 @@ from slack_bolt import App
 
 from slack_connector.db.user_meta import get_user_meta
 
+####################################################################
+#                                                                  #
+# Slack Integration                                                #
+# -----------------------------------------------------------------#
+# This class is used to interact with the Slack API                #
+# and a few helper functions                                       #
+#                                                                  #
+####################################################################
+
 
 class SlackIntegration:
     def __init__(self):

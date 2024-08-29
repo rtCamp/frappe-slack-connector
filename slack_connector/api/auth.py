@@ -5,8 +5,11 @@ from slack_connector.db.user_meta import update_user_meta
 from slack_connector.slack.app import SlackIntegration
 
 
-@frappe.whitelist(allow_guest=True)
+@frappe.whitelist()
 def connect_slack(user_email: str = None) -> None:
+    """
+    Connect the Slack user to the given user email
+    """
     if user_email is None:
         frappe.local.response.http_status_code = 400
         frappe.local.response.message = _("User email is required")

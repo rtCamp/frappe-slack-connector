@@ -2,6 +2,9 @@ import frappe
 
 
 def get_employee_company_email(user_email: str = None):
+    """
+    Get the company email for the given user email
+    """
     # If no user is provided, get the current user
     if not user_email:
         user_email = frappe.session.user_email

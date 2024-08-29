@@ -4,8 +4,12 @@ from frappe import _
 from slack_connector.slack.app import SlackIntegration
 
 
-@frappe.whitelist(allow_guest=True)
+@frappe.whitelist()
 def test_channel(channel_id: str = None):
+    """
+    Test the connection to the Slack channel
+    Sends a test message to the given channel ID
+    """
     if channel_id is None:
         frappe.local.response.http_status_code = 400
         frappe.local.response.message = _("Channel ID is required")

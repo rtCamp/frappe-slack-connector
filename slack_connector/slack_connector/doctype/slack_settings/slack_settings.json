@@ -42,7 +42,7 @@
    "depends_on": "eval:doc.attendance_channel_id && doc.attendance_channel_id.length > 0",
    "fieldname": "test_slack_channel",
    "fieldtype": "Button",
-   "label": "Test Channel"
+   "label": "Send Test Message"
   },
   {
    "fieldname": "slack_app_section",
@@ -78,7 +78,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2024-08-26 18:47:57.015853",
+ "modified": "2024-08-28 01:34:54.952719",
  "modified_by": "Administrator",
  "module": "Slack Connector",
  "name": "Slack Settings",

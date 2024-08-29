@@ -7,9 +7,6 @@ frappe.ui.form.on("Slack Settings", {
       frm.add_custom_button(__("Sync Slack Data"), () => {
         frm.events.sync_slack_data(frm);
       });
-      frm.add_custom_button(__("Send Attendance"), () => {
-        frm.events.send_attendance(frm);
-      });
     }
   },
   sync_slack_data: function (frm) {
@@ -34,29 +31,6 @@ frappe.ui.form.on("Slack Settings", {
             title: __("Success"),
             message: __(
               `Sent test message to the Slack channel: <strong>#${frm.doc.attendance_channel_id}</strong>`,
-            ),
-            indicator: "green",
-          });
-        } else {
-          frappe.msgprint({
-            title: __("Error"),
-            message: __("Slack channel is invalid."),
-            indicator: "red",
-          });
-        }
-      },
-    });
-  },
-
-  send_attendance: function (frm) {
-    frappe.call({
-      method: "slack_connector.api.attendance_summary.attendance_channel",
-      callback: function (response) {
-        if (!response.exc) {
-          frappe.msgprint({
-            title: __("Success"),
-            message: __(
-              `Sent Attendance to <strong>#${frm.doc.attendance_channel_id}</strong>`,
             ),
             indicator: "green",
           });

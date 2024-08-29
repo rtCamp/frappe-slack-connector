@@ -30,29 +30,50 @@ class SlackIntegration:
             if slack_attr.startswith("SLACK_")
         )
 
-    def get_slack_users(self, limit: int = 1000) -> dict:
+    def get_slack_users(self, limit: int = 500) -> dict:
         """
         Get all users from Slack and return a dictionary of email and username
+        This function uses pagination to handle large numbers of users
         """
-        # TODO: Make this paginated for bigger payloads
-        result = self.slack_app.client.users_list(limit=limit)
-        users = result.get("members", {})
-
         user_dict = {}
-        for user in users:
-            email = user.get("profile", {}).get("email")
-            if (
-                email is None
-                or user["deleted"]
-                or user["is_bot"]
-                or user["is_app_user"]
-            ):
-                continue
-            user_dict[email] = {
-                "id": user["id"],
-                "name": user["name"],
-                "real_name": user["real_name"],
-            }
+        cursor = None
+
+        while True:
+            try:
+                # Make API call with cursor if it exists
+                if cursor:
+                    result = self.slack_app.client.users_list(
+                        limit=limit, cursor=cursor
+                    )
+                else:
+                    result = self.slack_app.client.users_list(limit=limit)
+
+                users = result.get("members", [])
+
+                for user in users:
+                    email = user.get("profile", {}).get("email")
+                    if (
+                        email is None
+                        or user["deleted"]
+                        or user["is_bot"]
+                        or user["is_app_user"]
+                    ):
+                        continue
+                    user_dict[email] = {
+                        "id": user["id"],
+                        "name": user["name"],
+                        "real_name": user["real_name"],
+                    }
+
+                # Check if there are more users to fetch
+                cursor = result.get("response_metadata", {}).get("next_cursor")
+                if not cursor:
+                    break  # No more users to fetch
+
+            except Exception as e:
+                frappe.log_error(title="Error fetching Slack users", message={str(e)})
+                break  # Exit the loop if there's an error
+
         return user_dict
 
     def get_slack_user(

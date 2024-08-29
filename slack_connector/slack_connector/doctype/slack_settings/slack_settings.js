@@ -12,12 +12,6 @@ frappe.ui.form.on("Slack Settings", {
   sync_slack_data: function (frm) {
     frappe.call({
       method: "slack_connector.api.sync_slack_settings.sync_slack_data",
-      callback: function (r) {
-        if (r && !r.exc) {
-          frappe.msgprint(__("Syncing Slack Details"));
-          frm.refresh();
-        }
-      },
     });
   },
 

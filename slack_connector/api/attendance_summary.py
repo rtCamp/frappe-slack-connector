@@ -1,6 +1,5 @@
 import frappe
 from frappe import _
-from frappe.utils import getdate, today
 
 from slack_connector.db.leave_application import get_employees_on_leave
 from slack_connector.db.user_meta import get_user_meta
@@ -15,7 +14,7 @@ def attendance_channel() -> None:
 
 def attendance_channel_bg() -> None:
     slack = SlackIntegration()
-    announcement = ""
+    leave_groups = {"Full Day": [], "First-Half": [], "Second-Half": []}
     users_on_leave = get_employees_on_leave()
 
     for user_application in users_on_leave:
@@ -26,15 +25,18 @@ def attendance_channel_bg() -> None:
             else user_application.employee_name
         )
 
-        # Configure which emoji to use for full day, half days (first and second half)
-        leave_day_emoji = get_leave_day_emoji(user_application)
+        leave_type = get_leave_type(user_application)
+        leave_info = {
+            "name": slack_name,
+            "until_date": (
+                user_application.to_date
+                if user_application.from_date != user_application.to_date
+                else None
+            ),
+        }
+        leave_groups[leave_type].append(leave_info)
 
-        announcement += (
-            f"\n{leave_day_emoji} "
-            f"{slack_name} "
-            f"_{'until ' + standard_date_fmt(user_application.to_date) if user_application.from_date != user_application.to_date else '' } "
-            f"{'(Unapproved)' if user_application.status != 'Approved' else ''}_"
-        )
+    leave_details_mrkdwn = format_leave_groups(leave_groups)
 
     try:
         slack.slack_app.client.chat_postMessage(
@@ -42,7 +44,7 @@ def attendance_channel_bg() -> None:
             blocks=format_attendance_blocks(
                 date_string=standard_date_fmt(frappe.utils.nowdate()),
                 employee_count=len(users_on_leave),
-                leave_details_mrkdwn=announcement,
+                leave_details_mrkdwn=leave_details_mrkdwn,
             ),
         )
     except Exception as e:
@@ -54,61 +56,66 @@ def attendance_channel_bg() -> None:
         )
 
 
-def get_leave_day_emoji(user_application: dict) -> str:
-    leave_day_emoji = ":full_moon:"  # Default to full day
+def get_leave_type(user_application: dict) -> str:
+    if not user_application.half_day:
+        return "Full Day"
+    elif user_application.custom_first_halfsecond_half == "First Half":
+        return "First-Half"
+    else:
+        return "Second-Half"
 
-    if user_application.half_day:
-        half_day_date = getdate(user_application.half_day_date)
-        current_date = getdate(today())
 
-        if half_day_date == current_date:
-            if user_application.custom_first_halfsecond_half == "First Half":
-                leave_day_emoji = ":first_quarter_moon:"
-            else:
-                leave_day_emoji = ":last_quarter_moon:"
+def format_leave_groups(leave_groups: dict) -> str:
+    formatted_text = ""
+    emojis = {"Full Day": "", "First-Half": "", "Second-Half": ""}
 
-    return leave_day_emoji
+    for leave_type, employees in leave_groups.items():
+        if employees:
+            formatted_text += f"*{emojis[leave_type]} {leave_type}*\n"
+            for index, employee in enumerate(employees, start=1):
+                formatted_text += f"  {index}. {employee['name']}"
+                if employee["until_date"]:
+                    formatted_text += (
+                        f" _until {standard_date_fmt(employee['until_date'])}_"
+                    )
+                formatted_text += "\n"
+            formatted_text += "\n"
+
+    return formatted_text.strip()
 
 
 def format_attendance_blocks(
-    date_string: str, employee_count: int, leave_details_mrkdwn: str
+    date_string: str,
+    employee_count: int,
+    leave_details_mrkdwn: str,
 ) -> list:
+    if employee_count == 0:
+        return [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": ":sunny: No rtCampers are on leave today",
+                    "emoji": True,
+                },
+            }
+        ]
+
     blocks = [
         {
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f":calendar: {employee_count} {('employee' if employee_count <= 1 else 'employees')} on leave today",
+                "text": f":palm_tree: {employee_count} rtCamper{('' if employee_count <= 1 else 's')} on leave today",
                 "emoji": True,
             },
         },
-        {"type": "divider"},
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": ":busts_in_silhouette: *Employees on Leave:*",
+                "text": leave_details_mrkdwn,
             },
-        },
-        {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": "_Full Day :full_moon: and Half Day :last_quarter_moon: leaves are marked accordingly_",
-                }
-            ],
-        },
-        {"type": "section", "text": {"type": "mrkdwn", "text": leave_details_mrkdwn}},
-        {"type": "divider"},
-        {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": "Thank you for your attention :pray:",
-                }
-            ],
         },
     ]
 

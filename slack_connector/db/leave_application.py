@@ -19,6 +19,9 @@ def get_employees_on_leave() -> list:
             "from_date",
             "to_date",
             "status",
+            "half_day",
+            "half_day_date",
+            "custom_first_halfsecond_half",
         ],
     )
 

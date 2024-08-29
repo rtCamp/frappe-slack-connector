@@ -5,39 +5,30 @@ from slack_connector.db.user_meta import get_user_meta
 
 
 class SlackIntegration:
-    SLACK_BOT_TOKEN = None
-    SLACK_APP_TOKEN = None
-    SLACK_CHANNEL_ID = None
-
     def __init__(self):
-        self.slack_app = self.__setup_slack_app()
+        """
+        Initialize the Slack Integration instance
+        """
+        settings = frappe.get_single("Slack Settings")
+        self.SLACK_BOT_TOKEN = settings.get_password("slack_bot_token")
+        self.SLACK_APP_TOKEN = settings.get_password("slack_app_token")
+        self.SLACK_CHANNEL_ID = settings.get_password("attendance_channel_id")
 
-    @classmethod
-    def __check_slack_config(cls) -> bool:
+        # Still not set, raise an error
+        if not self.__check_slack_config():
+            frappe.log_error("Slack Config not set in the Slack Settings")
+            frappe.throw("Slack Config not set in the Slack Settings")
+        self.slack_app = App(token=self.SLACK_BOT_TOKEN)
+
+    def __check_slack_config(self) -> bool:
         """
         Check if the Slack configuration is set up
         """
         return all(
-                getattr(cls, slack_attr) is not None
-                for slack_attr in cls.__dict__.keys()
-                if slack_attr.startswith("SLACK_")
+            getattr(self, slack_attr) is not None
+            for slack_attr in self.__dict__.keys()
+            if slack_attr.startswith("SLACK_")
         )
-
-    @classmethod
-    def __setup_slack_app(cls) -> App:
-        """
-        Store the configuration in the class and return the Slack App instance
-        """
-        if not cls.__check_slack_config():
-            settings = frappe.get_single("Slack Settings")
-            cls.SLACK_BOT_TOKEN = settings.get_password("slack_bot_token")
-            cls.SLACK_APP_TOKEN = settings.get_password("slack_app_token")
-            cls.SLACK_CHANNEL_ID = settings.get_password("attendance_channel_id")
-            # Still not set, raise an error
-            if not cls.__check_slack_config():
-                frappe.log_error("Slack Config not set in the Slack Settings")
-                frappe.throw("Slack Config not set in the Slack Settings")
-        return App(token=cls.SLACK_BOT_TOKEN)
 
     def get_slack_users(self, limit: int = 1000) -> dict:
         """

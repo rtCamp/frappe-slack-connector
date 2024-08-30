@@ -2,6 +2,7 @@ import frappe
 from frappe import _
 
 from slack_connector.helpers.error import generate_error_log
+from slack_connector.helpers.http_response import send_http_response
 from slack_connector.slack.app import SlackIntegration
 
 
@@ -12,9 +13,7 @@ def test_channel(channel_id: str = None):
     Sends a test message to the given channel ID
     """
     if channel_id is None:
-        frappe.response.http_status_code = 400
-        frappe.response.message = _("Channel ID is required")
-        return
+        return send_http_response(_("Channel ID is required"), status_code=400)
 
     slack = SlackIntegration()
     try:
@@ -26,9 +25,9 @@ def test_channel(channel_id: str = None):
             ),
         )
     except Exception as e:
-        frappe.response.http_status_code = 500
-        frappe.response.message = _(
-            "An error occurred while connecting testing channel"
+        send_http_response(
+            _("An error occurred while testing channel"),
+            status_code=500,
         )
         generate_error_log(
             title=_("Error posting message to Slack"),

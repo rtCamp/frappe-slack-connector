@@ -154,8 +154,8 @@ doc_events = {
 # ---------------
 
 scheduler_events = {
-    # "all": ["slack_connector.api.attendance_summary.attendance_channel"],
-    "daily": ["slack_connector.api.attendance_summary.attendance_channel"],
+    "all": ["slack_connector.api.attendance_summary.attendance_channel"],
+    # "daily": ["slack_connector.api.attendance_summary.attendance_channel"],
     # "hourly": ["slack_connector.tasks.hourly"],
     # "weekly": ["slack_connector.tasks.weekly"],
     # "monthly": ["slack_connector.tasks.monthly"],

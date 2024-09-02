@@ -1,5 +1,7 @@
 import frappe
+from erpnext.setup.doctype.holiday_list.holiday_list import is_holiday
 from frappe import _
+from frappe.utils import get_time
 
 from slack_connector.db.leave_application import get_employees_on_leave
 from slack_connector.db.user_meta import get_user_meta
@@ -13,11 +15,33 @@ def attendance_channel() -> None:
     """
     Server script to post the attendance summary to the Slack channel
     Enqueues the background job to post the message
+    Conditions:
+     - Check send attendance updates is enabled
+     - Check if the current date is a working day (weekends, holidays)
+     - Check if current date notification is sent
+     - If not, send the notification, set the updated date in Slack Settings
     """
-    frappe.enqueue(attendance_channel_bg, queue="short")
+    slack_settings = frappe.get_single("Slack Settings")
+    if (
+        slack_settings.send_attendance_updates != 1
+        or is_holiday(frappe.utils.nowdate())
+        or (
+            slack_settings.last_attendance_date is not None
+            and slack_settings.last_attendance_date == frappe.utils.nowdate()
+        )
+        or frappe.utils.now_datetime().time() < get_time(slack_settings.attendance_time)
+    ):
+        return
+
+    # Send the attendance summary to the Slack channel
+    send_notification()
+
+    # Update the last attendance date
+    slack_settings.last_attendance_date = frappe.utils.nowdate()
+    slack_settings.save(ignore_permissions=True)
 
 
-def attendance_channel_bg() -> None:
+def send_notification() -> None:
     """
     Background job to post the attendance summary to the Slack channel
     """

@@ -14,7 +14,10 @@
   "workspace_section",
   "send_attendance_updates",
   "attendance_channel_id",
-  "test_slack_channel"
+  "test_slack_channel",
+  "column_break_tjcf",
+  "attendance_time",
+  "last_attendance_date"
  ],
  "fields": [
   {
@@ -73,12 +76,28 @@
    "fieldname": "send_attendance_updates",
    "fieldtype": "Check",
    "label": "Send attendance updates"
+  },
+  {
+   "fieldname": "column_break_tjcf",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "last_attendance_date",
+   "fieldtype": "Date",
+   "hidden": 1,
+   "label": "Last Attendance Date"
+  },
+  {
+   "default": "08:00:00",
+   "fieldname": "attendance_time",
+   "fieldtype": "Time",
+   "label": "Time"
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2024-08-28 01:34:54.952719",
+ "modified": "2024-09-02 16:56:23.483272",
  "modified_by": "Administrator",
  "module": "Slack Connector",
  "name": "Slack Settings",

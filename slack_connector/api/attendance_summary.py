@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import frappe
 from erpnext.setup.doctype.holiday_list.holiday_list import is_holiday
 from frappe import _
@@ -22,9 +24,13 @@ def attendance_channel() -> None:
      - If not, send the notification, set the updated date in Slack Settings
     """
     slack_settings = frappe.get_single("Slack Settings")
+
+    current_date = frappe.utils.nowdate()
+    current_day = datetime.strptime(current_date, "%Y-%m-%d").weekday()
     if (
         slack_settings.send_attendance_updates != 1
-        or is_holiday(frappe.utils.nowdate())
+        or current_day > 4  # sat = 5, sun = 6
+        or is_holiday(current_date)
         or (
             slack_settings.last_attendance_date is not None
             and slack_settings.last_attendance_date == frappe.utils.nowdate()

@@ -5,37 +5,106 @@
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
+  "slack_app_section",
   "slack_bot_token",
+  "slack_signing_token",
   "slack_app_token",
-  "attendance_channel_id"
+  "column_break_judr",
+  "slack_client_id",
+  "slack_client_secret",
+  "workspace_section",
+  "send_attendance_updates",
+  "attendance_channel_id",
+  "test_slack_channel",
+  "column_break_tjcf",
+  "attendance_time",
+  "last_attendance_date"
  ],
  "fields": [
   {
    "fieldname": "slack_bot_token",
    "fieldtype": "Password",
    "in_list_view": 1,
-   "label": "SLACK_BOT_TOKEN",
+   "label": "Bot Auth Token",
    "reqd": 1
   },
   {
    "fieldname": "slack_app_token",
    "fieldtype": "Password",
    "in_list_view": 1,
-   "label": "SLACK_APP_TOKEN",
-   "reqd": 1
+   "label": "App Token"
   },
   {
+   "description": "The name of the Slack channel where you have to send the attendance summary mesage",
    "fieldname": "attendance_channel_id",
    "fieldtype": "Data",
    "in_list_view": 1,
-   "label": "ATTENDANCE_CHANNEL_ID",
+   "label": "Attendance Channel ID",
+   "reqd": 1
+  },
+  {
+   "depends_on": "eval:doc.attendance_channel_id && doc.attendance_channel_id.length > 0",
+   "fieldname": "test_slack_channel",
+   "fieldtype": "Button",
+   "label": "Send Test Message"
+  },
+  {
+   "fieldname": "slack_app_section",
+   "fieldtype": "Section Break",
+   "label": "Slack App"
+  },
+  {
+   "fieldname": "column_break_judr",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "slack_client_id",
+   "fieldtype": "Data",
+   "label": "Client ID"
+  },
+  {
+   "fieldname": "slack_client_secret",
+   "fieldtype": "Password",
+   "label": "Client Secret"
+  },
+  {
+   "fieldname": "workspace_section",
+   "fieldtype": "Section Break",
+   "label": "Workspace"
+  },
+  {
+   "default": "1",
+   "fieldname": "send_attendance_updates",
+   "fieldtype": "Check",
+   "label": "Send attendance updates"
+  },
+  {
+   "fieldname": "column_break_tjcf",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "last_attendance_date",
+   "fieldtype": "Date",
+   "hidden": 1,
+   "label": "Last Attendance Date"
+  },
+  {
+   "default": "08:00:00",
+   "fieldname": "attendance_time",
+   "fieldtype": "Time",
+   "label": "Time"
+  },
+  {
+   "fieldname": "slack_signing_token",
+   "fieldtype": "Password",
+   "label": "Signing Token",
    "reqd": 1
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2024-08-14 14:04:12.263091",
+ "modified": "2024-09-04 14:01:18.859947",
  "modified_by": "Administrator",
  "module": "Slack Connector",
  "name": "Slack Settings",

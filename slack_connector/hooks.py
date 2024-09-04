@@ -28,10 +28,32 @@ app_license = "mit"
 # page_js = {"page" : "public/js/file.js"}
 
 # include js in doctype views
-# doctype_js = {"doctype" : "public/js/doctype.js"}
+doctype_js = {
+    "User Meta": "public/js/user_meta.js",
+    "User": "public/js/user_doctype.js",
+}
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
+
+# Fixtures
+# ----------
+fixtures = [
+    {
+        "dt": "Custom Field",
+        "filters": [
+            [
+                "name",
+                "in",
+                [
+                    "User Meta-custom_slack_userid",
+                    "User Meta-custom_slack_username",
+                ],
+            ]
+        ],
+    },
+]
+
 
 # Svg Icons
 # ------------------
@@ -122,34 +144,22 @@ app_license = "mit"
 # ---------------
 # Hook on document methods and events
 
-# doc_events = {
-# 	"*": {
-# 		"on_update": "method",
-# 		"on_cancel": "method",
-# 		"on_trash": "method"
-# 	}
-# }
+doc_events = {
+    "Leave Application": {
+        "after_insert": "slack_connector.override.leave_application.after_insert",
+    },
+}
 
 # Scheduled Tasks
 # ---------------
 
-# scheduler_events = {
-# 	"all": [
-# 		"slack_connector.tasks.all"
-# 	],
-# 	"daily": [
-# 		"slack_connector.tasks.daily"
-# 	],
-# 	"hourly": [
-# 		"slack_connector.tasks.hourly"
-# 	],
-# 	"weekly": [
-# 		"slack_connector.tasks.weekly"
-# 	],
-# 	"monthly": [
-# 		"slack_connector.tasks.monthly"
-# 	],
-# }
+scheduler_events = {
+    "all": ["slack_connector.api.attendance_summary.attendance_channel"],
+    # "daily": ["slack_connector.api.attendance_summary.attendance_channel"],
+    # "hourly": ["slack_connector.tasks.hourly"],
+    # "weekly": ["slack_connector.tasks.weekly"],
+    # "monthly": ["slack_connector.tasks.monthly"],
+}
 
 # Testing
 # -------
@@ -226,4 +236,3 @@ app_license = "mit"
 # default_log_clearing_doctypes = {
 # 	"Logging DocType Name": 30  # days to retain logs
 # }
-

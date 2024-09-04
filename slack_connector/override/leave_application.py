@@ -46,6 +46,7 @@ def send_leave_notification_bg(doc: Document):
         slack.slack_app.client.chat_postMessage(
             channel=approver_slack,
             blocks=format_leave_application_blocks(
+                leave_id=doc.name,
                 employee_name=mention,
                 leave_type=doc.leave_type,
                 leave_submission_date=standard_date_fmt(doc.creation),
@@ -62,6 +63,7 @@ def send_leave_notification_bg(doc: Document):
 
 
 def format_leave_application_blocks(
+    leave_id: str,
     employee_name: str,
     leave_type: str,
     leave_submission_date: str,
@@ -117,35 +119,27 @@ def format_leave_application_blocks(
         {"type": "divider"},
         {
             "type": "actions",
+            "block_id": "leave_actions_block",
             "elements": [
                 {
                     "type": "button",
                     "text": {"type": "plain_text", "emoji": True, "text": "Approve"},
                     "style": "primary",
-                    "value": "approve_leave",
-                    "action_id": "approve_leave",
+                    "value": leave_id,
+                    "action_id": "leave_approve",
                 },
                 {
                     "type": "button",
                     "text": {"type": "plain_text", "emoji": True, "text": "Reject"},
                     "style": "danger",
-                    "value": "reject_leave",
-                    "action_id": "reject_leave",
+                    "value": leave_id,
+                    "action_id": "leave_reject",
                 },
-                # {
-                #     "type": "button",
-                #     "text": {
-                #         "type": "plain_text",
-                #         "emoji": True,
-                #         "text": "View Details",
-                #     },
-                #     "value": "view_details",
-                #     "action_id": "view_leave_details",
-                # },
             ],
         },
         {
             "type": "context",
+            "block_id": "footer_block",
             "elements": [
                 {
                     "type": "mrkdwn",

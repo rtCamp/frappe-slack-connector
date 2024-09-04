@@ -23,6 +23,7 @@ class SlackIntegration:
         self.SLACK_BOT_TOKEN = settings.get_password("slack_bot_token")
         self.SLACK_APP_TOKEN = settings.get_password("slack_app_token")
         self.SLACK_CHANNEL_ID = settings.get_password("attendance_channel_id")
+        self.SLACK_SIGNATURE = settings.get_password("slack_signing_token")
 
         # Still not set, raise an error
         if not self.__check_slack_config():
@@ -155,6 +156,67 @@ class SlackIntegration:
             "id": slack_user.get("user", {}).get("id"),
             "name": slack_user.get("user", {}).get("name"),
         }
+
+    def verify_slack_request(
+        self,
+        signature: str,
+        timestamp: str,
+        req_data: str,
+        payload: str,
+        throw_exc: bool = True,
+    ) -> dict | None:
+        import hashlib
+        import hmac
+        import json
+        import time
+
+        # Verify the timestamp to prevent replay attacks
+        if abs(time.time() - int(timestamp)) > 60 * 5:
+            generate_error_log(
+                title="Slack Timestamp verification failed",
+                msgprint="Request is too old",
+            )
+            if throw_exc:
+                frappe.throw("Request is too old", frappe.PermissionError)
+
+        # Create the signature base string
+        sig_basestring = f"v0:{timestamp}:{req_data}"
+
+        # Compute the hash using your Slack signing secret
+        request_signature = (
+            "v0="
+            + hmac.new(
+                self.SLACK_SIGNATURE.encode(), sig_basestring.encode(), hashlib.sha256
+            ).hexdigest()
+        )
+
+        # Compare the computed signature with the received signature
+        if not hmac.compare_digest(request_signature, signature):
+            generate_error_log(
+                title="Slack Signature verification failed", message="Slack Event"
+            )
+            if throw_exc:
+                frappe.throw("Invalid request signature", frappe.PermissionError)
+
+        # Extract the payload
+        if not payload:
+            generate_error_log(title="No payload found", message="Slack Event")
+            if throw_exc:
+                frappe.throw("No payload found", frappe.PermissionError)
+
+        # Parse the payload
+        try:
+            data = json.loads(payload)
+            return data
+        except Exception as e:
+            generate_error_log(
+                title="Error parsing Slack payload",
+                message=payload,
+                exception=e,
+            )
+            if throw_exc:
+                frappe.throw("Error parsing payload", frappe.PermissionError)
+            return None
 
     def get_slack_user_id(self, *args, **kwargs) -> str | None:
         """

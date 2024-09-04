@@ -26,3 +26,25 @@ def get_employees_on_leave() -> list:
     )
 
     return leave_applications
+
+
+def approve_leave(leave_id: str) -> str:
+    """
+    Approve the leave application
+    """
+    # Logic to approve the leave request
+    leave_request = frappe.get_doc("Leave Application", leave_id)
+    leave_request.status = "Approved"
+    leave_request.save(ignore_permissions=True)
+    leave_request.submit()
+
+
+def reject_leave(leave_id: str) -> str:
+    """
+    Reject the leave application
+    """
+    # Logic to reject the leave request
+    leave_request = frappe.get_doc("Leave Application", leave_id)
+    leave_request.status = "Rejected"
+    leave_request.save(ignore_permissions=True)
+    leave_request.submit()

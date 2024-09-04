@@ -7,6 +7,7 @@
  "field_order": [
   "slack_app_section",
   "slack_bot_token",
+  "slack_signing_token",
   "slack_app_token",
   "column_break_judr",
   "slack_client_id",
@@ -92,12 +93,18 @@
    "fieldname": "attendance_time",
    "fieldtype": "Time",
    "label": "Time"
+  },
+  {
+   "fieldname": "slack_signing_token",
+   "fieldtype": "Password",
+   "label": "Signing Token",
+   "reqd": 1
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2024-09-02 16:56:23.483272",
+ "modified": "2024-09-04 14:01:18.859947",
  "modified_by": "Administrator",
  "module": "Slack Connector",
  "name": "Slack Settings",

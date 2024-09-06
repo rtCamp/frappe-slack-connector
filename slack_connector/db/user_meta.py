@@ -1,5 +1,7 @@
 import frappe
 
+from slack_connector.helpers.error import generate_error_log
+
 
 def update_user_meta(
     user_meta_object: dict, user: str | None = None, upsert: bool = True
@@ -34,16 +36,24 @@ def get_user_meta(*, user_id: str = None, employee_id: str = None) -> dict | Non
     """
     Get the User Meta document for the given user or employee.
     """
-    if not user_id and not employee_id:
-        raise ValueError("Either user_id or employee_id is required")
-    if user_id and employee_id:
-        raise ValueError("Only one of user_id or employee_id is required")
+    try:
+        if not user_id and not employee_id:
+            raise ValueError("Either user_id or employee_id is required")
+        if user_id and employee_id:
+            raise ValueError("Only one of user_id or employee_id is required")
 
-    user_meta = None
-    if user_id:
-        user_meta = frappe.get_doc("User Meta", {"user": user_id})
-    else:
-        employee_email = frappe.get_value("Employee", employee_id, "user_id")
-        if employee_email:
-            user_meta = frappe.get_doc("User Meta", {"user": employee_email})
-    return user_meta
+        user_meta = None
+        if user_id:
+            user_meta = frappe.get_doc("User Meta", {"user": user_id})
+        else:
+            employee_email = frappe.get_value("Employee", employee_id, "user_id")
+            if employee_email:
+                user_meta = frappe.get_doc("User Meta", {"user": employee_email})
+        return user_meta
+    except Exception as e:
+        generate_error_log(
+            title="Error getting User Meta",
+            message="Please check the user ID or employee ID and try again.",
+            exception=e,
+        )
+        return None

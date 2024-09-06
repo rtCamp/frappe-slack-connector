@@ -22,35 +22,56 @@ def sync_slack_job():
     try:
         slack = SlackIntegration()
         slack_users = slack.get_slack_users()
+
+        # Check Users in Slack but not in ERPNext
+        users_not_found = []
         for email, slack_details in slack_users.items():
-            update_user_meta(
-                {
-                    "custom_slack_userid": slack_details["id"],
-                    "custom_slack_username": slack_details["name"],
-                },
-                user=email,
-                upsert=False,
-            )
+            try:
+                update_user_meta(
+                    {
+                        "custom_slack_userid": slack_details["id"],
+                        "custom_slack_username": slack_details["name"],
+                    },
+                    user=email,
+                )
+            except Exception as e:
+                users_not_found.append((email, str(e)))
+
         frappe.msgprint(
             "Slack data synced successfully", realtime=True, indicator="green"
         )
 
-        # Check and display employees not found in Slack
+        # Check and display employees in ERPNext but not in Slack
         employees = frappe.get_all(
             "Employee",
             filters={"status": "Active"},
             fields=["user_id", "employee_name"],
         )
+
         unset_employees = []
         for employee in employees:
             if slack_users.get(employee.user_id) is None:
                 unset_employees.append(employee.employee_name)
-        frappe.msgprint(
-            f"Employees not found in Slack: {', '.join(unset_employees)}",
-            title="Warning",
-            indicator="orange",
-            realtime=True,
-        )
+
+        if users_not_found:
+            frappe.msgprint(
+                f"Users not found in ERPNext: {', '.join(user[0] for user in users_not_found)}",
+                title="Warning",
+                indicator="orange",
+                realtime=True,
+            )
+            generate_error_log(
+                title="Users not found in ERPNext",
+                message="\n".join(user[1] for user in users_not_found),
+            )
+
+        if unset_employees:
+            generate_error_log(
+                title="Employees not found in Slack",
+                message=f"Users not found in Slack: {', '.join(unset_employees)}",
+                realtime=True,
+                msgprint=True,
+            )
 
     except Exception as e:
         generate_error_log(

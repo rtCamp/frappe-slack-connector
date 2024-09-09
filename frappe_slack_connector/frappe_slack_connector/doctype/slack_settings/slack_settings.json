@@ -106,7 +106,7 @@
  "links": [],
  "modified": "2024-09-04 14:01:18.859947",
  "modified_by": "Administrator",
- "module": "Slack Connector",
+ "module": "Frappe Slack Connector",
  "name": "Slack Settings",
  "owner": "Administrator",
  "permissions": [

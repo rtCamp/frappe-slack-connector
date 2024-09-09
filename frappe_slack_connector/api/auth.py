@@ -1,10 +1,10 @@
 import frappe
 from frappe import _
 
-from slack_connector.db.user_meta import update_user_meta
-from slack_connector.helpers.error import generate_error_log
-from slack_connector.helpers.http_response import send_http_response
-from slack_connector.slack.app import SlackIntegration
+from frappe_slack_connector.db.user_meta import update_user_meta
+from frappe_slack_connector.helpers.error import generate_error_log
+from frappe_slack_connector.helpers.http_response import send_http_response
+from frappe_slack_connector.slack.app import SlackIntegration
 
 
 @frappe.whitelist()

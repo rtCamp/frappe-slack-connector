@@ -11,13 +11,13 @@ frappe.ui.form.on("Slack Settings", {
   },
   sync_slack_data: function (frm) {
     frappe.call({
-      method: "slack_connector.api.sync_slack_settings.sync_slack_data",
+      method: "frappe_slack_connector.api.sync_slack_settings.sync_slack_data",
     });
   },
 
   test_slack_channel: function (frm) {
     frappe.call({
-      method: "slack_connector.api.test_slack_channel.test_channel",
+      method: "frappe_slack_connector.api.test_slack_channel.test_channel",
       args: { channel_id: frm.doc.attendance_channel_id },
       callback: function (response) {
         if (!response.exc) {

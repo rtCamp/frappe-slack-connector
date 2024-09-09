@@ -6,7 +6,7 @@ frappe.ui.form.on("User", {
   },
   connect_slack: function (frm) {
     frappe.call({
-      method: "slack_connector.api.auth.connect_slack",
+      method: "frappe_slack_connector.api.auth.connect_slack",
       args: { user_email: frappe.session.user_email },
       callback: function (response) {
         if (!response.exc) {

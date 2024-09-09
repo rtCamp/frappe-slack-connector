@@ -1,9 +1,9 @@
 import frappe
 from frappe import _
 
-from slack_connector.db.leave_application import approve_leave, reject_leave
-from slack_connector.helpers.error import generate_error_log
-from slack_connector.slack.app import SlackIntegration
+from frappe_slack_connector.db.leave_application import approve_leave, reject_leave
+from frappe_slack_connector.helpers.error import generate_error_log
+from frappe_slack_connector.slack.app import SlackIntegration
 
 
 @frappe.whitelist(allow_guest=True)

@@ -1,8 +1,8 @@
 import frappe
 from slack_bolt import App
 
-from slack_connector.db.user_meta import get_user_meta
-from slack_connector.helpers.error import generate_error_log
+from frappe_slack_connector.db.user_meta import get_user_meta
+from frappe_slack_connector.helpers.error import generate_error_log
 
 ####################################################################
 #                                                                  #

@@ -59,7 +59,7 @@ def send_notification() -> None:
         user_slack = get_user_meta(employee_id=user_application.get("employee"))
         slack_name = (
             f"<@{user_slack.custom_slack_userid}>"
-            if user_slack
+            if user_slack and user_slack.custom_slack_userid
             else user_application.employee_name
         )
 

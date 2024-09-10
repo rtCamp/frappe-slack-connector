@@ -1,6 +1,6 @@
 import frappe
 
-from slack_connector.helpers.error import generate_error_log
+from frappe_slack_connector.helpers.error import generate_error_log
 
 
 def update_user_meta(

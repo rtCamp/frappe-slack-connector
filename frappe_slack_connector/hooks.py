@@ -1,5 +1,5 @@
-app_name = "slack_connector"
-app_title = "Slack Connector"
+app_name = "frappe_slack_connector"
+app_title = "Frappe Slack Connector"
 app_publisher = "rtCamp"
 app_description = "The app is used to integrate Slack into Frappe site"
 app_email = "sys@rtcamp.com"
@@ -10,15 +10,15 @@ app_license = "mit"
 # ------------------
 
 # include js, css files in header of desk.html
-# app_include_css = "/assets/slack_connector/css/slack_connector.css"
-# app_include_js = "/assets/slack_connector/js/slack_connector.js"
+# app_include_css = "/assets/frappe_slack_connector/css/frappe_slack_connector.css"
+# app_include_js = "/assets/frappe_slack_connector/js/frappe_slack_connector.js"
 
 # include js, css files in header of web template
-# web_include_css = "/assets/slack_connector/css/slack_connector.css"
-# web_include_js = "/assets/slack_connector/js/slack_connector.js"
+# web_include_css = "/assets/frappe_slack_connector/css/frappe_slack_connector.css"
+# web_include_js = "/assets/frappe_slack_connector/js/frappe_slack_connector.js"
 
 # include custom scss in every website theme (without file extension ".scss")
-# website_theme_scss = "slack_connector/public/scss/website"
+# website_theme_scss = "frappe_slack_connector/public/scss/website"
 
 # include js, css files in header of web form
 # webform_include_js = {"doctype": "public/js/doctype.js"}
@@ -58,7 +58,7 @@ fixtures = [
 # Svg Icons
 # ------------------
 # include app icons in desk
-# app_include_icons = "slack_connector/public/icons.svg"
+# app_include_icons = "frappe_slack_connector/public/icons.svg"
 
 # Home Pages
 # ----------
@@ -82,43 +82,43 @@ fixtures = [
 
 # add methods and filters to jinja environment
 # jinja = {
-# 	"methods": "slack_connector.utils.jinja_methods",
-# 	"filters": "slack_connector.utils.jinja_filters"
+# 	"methods": "frappe_slack_connector.utils.jinja_methods",
+# 	"filters": "frappe_slack_connector.utils.jinja_filters"
 # }
 
 # Installation
 # ------------
 
-# before_install = "slack_connector.install.before_install"
-# after_install = "slack_connector.install.after_install"
+# before_install = "frappe_slack_connector.install.before_install"
+# after_install = "frappe_slack_connector.install.after_install"
 
 # Uninstallation
 # ------------
 
-# before_uninstall = "slack_connector.uninstall.before_uninstall"
-# after_uninstall = "slack_connector.uninstall.after_uninstall"
+# before_uninstall = "frappe_slack_connector.uninstall.before_uninstall"
+# after_uninstall = "frappe_slack_connector.uninstall.after_uninstall"
 
 # Integration Setup
 # ------------------
 # To set up dependencies/integrations with other apps
 # Name of the app being installed is passed as an argument
 
-# before_app_install = "slack_connector.utils.before_app_install"
-# after_app_install = "slack_connector.utils.after_app_install"
+# before_app_install = "frappe_slack_connector.utils.before_app_install"
+# after_app_install = "frappe_slack_connector.utils.after_app_install"
 
 # Integration Cleanup
 # -------------------
 # To clean up dependencies/integrations with other apps
 # Name of the app being uninstalled is passed as an argument
 
-# before_app_uninstall = "slack_connector.utils.before_app_uninstall"
-# after_app_uninstall = "slack_connector.utils.after_app_uninstall"
+# before_app_uninstall = "frappe_slack_connector.utils.before_app_uninstall"
+# after_app_uninstall = "frappe_slack_connector.utils.after_app_uninstall"
 
 # Desk Notifications
 # ------------------
 # See frappe.core.notifications.get_notification_config
 
-# notification_config = "slack_connector.notifications.get_notification_config"
+# notification_config = "frappe_slack_connector.notifications.get_notification_config"
 
 # Permissions
 # -----------
@@ -146,7 +146,7 @@ fixtures = [
 
 doc_events = {
     "Leave Application": {
-        "after_insert": "slack_connector.override.leave_application.after_insert",
+        "after_insert": "frappe_slack_connector.override.leave_application.after_insert",
     },
 }
 
@@ -154,30 +154,30 @@ doc_events = {
 # ---------------
 
 scheduler_events = {
-    "all": ["slack_connector.api.attendance_summary.attendance_channel"],
-    # "daily": ["slack_connector.api.attendance_summary.attendance_channel"],
-    # "hourly": ["slack_connector.tasks.hourly"],
-    # "weekly": ["slack_connector.tasks.weekly"],
-    # "monthly": ["slack_connector.tasks.monthly"],
+    "all": ["frappe_slack_connector.api.attendance_summary.attendance_channel"],
+    # "daily": ["frappe_slack_connector.api.attendance_summary.attendance_channel"],
+    # "hourly": ["frappe_slack_connector.tasks.hourly"],
+    # "weekly": ["frappe_slack_connector.tasks.weekly"],
+    # "monthly": ["frappe_slack_connector.tasks.monthly"],
 }
 
 # Testing
 # -------
 
-# before_tests = "slack_connector.install.before_tests"
+# before_tests = "frappe_slack_connector.install.before_tests"
 
 # Overriding Methods
 # ------------------------------
 #
 # override_whitelisted_methods = {
-# 	"frappe.desk.doctype.event.event.get_events": "slack_connector.event.get_events"
+# 	"frappe.desk.doctype.event.event.get_events": "frappe_slack_connector.event.get_events"
 # }
 #
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,
 # along with any modifications made in other Frappe apps
 # override_doctype_dashboards = {
-# 	"Task": "slack_connector.task.get_dashboard_data"
+# 	"Task": "frappe_slack_connector.task.get_dashboard_data"
 # }
 
 # exempt linked doctypes from being automatically cancelled
@@ -191,13 +191,13 @@ scheduler_events = {
 
 # Request Events
 # ----------------
-# before_request = ["slack_connector.utils.before_request"]
-# after_request = ["slack_connector.utils.after_request"]
+# before_request = ["frappe_slack_connector.utils.before_request"]
+# after_request = ["frappe_slack_connector.utils.after_request"]
 
 # Job Events
 # ----------
-# before_job = ["slack_connector.utils.before_job"]
-# after_job = ["slack_connector.utils.after_job"]
+# before_job = ["frappe_slack_connector.utils.before_job"]
+# after_job = ["frappe_slack_connector.utils.after_job"]
 
 # User Data Protection
 # --------------------
@@ -227,7 +227,7 @@ scheduler_events = {
 # --------------------------------
 
 # auth_hooks = [
-# 	"slack_connector.auth.validate"
+# 	"frappe_slack_connector.auth.validate"
 # ]
 
 # Automatically update python controller files with type annotations for this app.

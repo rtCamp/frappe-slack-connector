@@ -5,11 +5,11 @@ from erpnext.setup.doctype.holiday_list.holiday_list import is_holiday
 from frappe import _
 from frappe.utils import get_time
 
-from slack_connector.db.leave_application import get_employees_on_leave
-from slack_connector.db.user_meta import get_user_meta
-from slack_connector.helpers.error import generate_error_log
-from slack_connector.helpers.standard_date import standard_date_fmt
-from slack_connector.slack.app import SlackIntegration
+from frappe_slack_connector.db.leave_application import get_employees_on_leave
+from frappe_slack_connector.db.user_meta import get_user_meta
+from frappe_slack_connector.helpers.error import generate_error_log
+from frappe_slack_connector.helpers.standard_date import standard_date_fmt
+from frappe_slack_connector.slack.app import SlackIntegration
 
 
 @frappe.whitelist()
@@ -59,7 +59,7 @@ def send_notification() -> None:
         user_slack = get_user_meta(employee_id=user_application.get("employee"))
         slack_name = (
             f"<@{user_slack.custom_slack_userid}>"
-            if user_slack
+            if user_slack and user_slack.custom_slack_userid
             else user_application.employee_name
         )
 

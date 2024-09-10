@@ -1,9 +1,9 @@
 import frappe
 from frappe.model.document import Document
 
-from slack_connector.helpers.error import generate_error_log
-from slack_connector.helpers.standard_date import standard_date_fmt
-from slack_connector.slack.app import SlackIntegration
+from frappe_slack_connector.helpers.error import generate_error_log
+from frappe_slack_connector.helpers.standard_date import standard_date_fmt
+from frappe_slack_connector.slack.app import SlackIntegration
 
 
 def after_insert(doc, method):

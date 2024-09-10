@@ -1,8 +1,8 @@
 import frappe
 from slack_bolt import App
 
-from slack_connector.db.user_meta import get_user_meta
-from slack_connector.helpers.error import generate_error_log
+from frappe_slack_connector.db.user_meta import get_user_meta
+from frappe_slack_connector.helpers.error import generate_error_log
 
 ####################################################################
 #                                                                  #
@@ -112,6 +112,7 @@ class SlackIntegration:
         # If from API, directly fetch from Slack
         if from_api:
             if employee_id:
+                # FIXME: Possible NoneType Error
                 email = get_user_meta(employee_id=employee_id).user
             else:
                 email = user_email
@@ -119,6 +120,7 @@ class SlackIntegration:
 
         # If not from user meta but employee_id is provided, fetch user email first
         if not check_meta and employee_id:
+            # FIXME: Possible NoneType Error
             user_email = get_user_meta(employee_id=employee_id).user
             slack_user = self.slack_app.client.users_lookupByEmail(email=user_email)
             return {

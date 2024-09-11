@@ -1,9 +1,20 @@
+import json
+
 import frappe
 from frappe import _
 
-from frappe_slack_connector.db.leave_application import approve_leave, reject_leave
 from frappe_slack_connector.helpers.error import generate_error_log
+from frappe_slack_connector.helpers.http_response import send_http_response
 from frappe_slack_connector.slack.app import SlackIntegration
+from frappe_slack_connector.slack.interactions.approve_leave import (
+    handler as approve_leave_handler,
+)
+from frappe_slack_connector.slack.interactions.submit_leave import (
+    half_day_checkbox_handler,
+)
+from frappe_slack_connector.slack.interactions.submit_leave import (
+    handler as submit_leave_handler,
+)
 
 
 @frappe.whitelist(allow_guest=True)
@@ -11,65 +22,56 @@ def event():
     slack = SlackIntegration()
 
     try:
-        payload = slack.verify_slack_request(
-            signature=frappe.request.headers.get("X-Slack-Signature"),
-            timestamp=frappe.request.headers.get("X-Slack-Request-Timestamp"),
-            req_data=frappe.request.get_data(as_text=True),
-            payload=frappe.request.form.get("payload"),
-            throw_exc=False,
-        )
+        try:
+            slack.verify_slack_request(
+                signature=frappe.request.headers.get("X-Slack-Signature"),
+                timestamp=frappe.request.headers.get("X-Slack-Request-Timestamp"),
+                req_data=frappe.request.get_data(as_text=True),
+            )
+        except Exception as e:
+            generate_error_log(
+                title="Error verifying Slack request",
+                exception=e,
+            )
+            return send_http_response(
+                message="Invalid request",
+                status_code=403,
+            )
 
+        payload = frappe.request.form.get("payload")
         if not payload:
             generate_error_log(
-                title="Error verifying request",
+                title="Error processing Slack Interaction",
                 message="Payload not found",
             )
-            return
+            return send_http_response(
+                message="Payload not found",
+                status_code=400,
+            )
 
-        # Check the user who sent the request
-        user_id = payload.get("user", {}).get("id")
-        if not user_id:
-            generate_error_log("User ID not found in payload", msgprint=True)
+        payload = json.loads(payload)
+        event_type = payload.get("type")
 
-        action_id = payload["actions"][0]["action_id"]
-        leave_id = payload["actions"][0]["value"]
+        if event_type == "block_actions":
+            block_id = payload["actions"][0]["block_id"]
 
-        # Process the action based on action_id
-        if action_id == "leave_approve":
-            approve_leave(leave_id)
-        elif action_id == "leave_reject":
-            reject_leave(leave_id)
+            if block_id == "half_day_checkbox":
+                half_day_checkbox_handler(slack, payload)
+            else:
+                approve_leave_handler(slack, payload)
+
+        elif event_type == "view_submission":
+            submit_leave_handler(slack, payload)
+
         else:
-            frappe.throw(_("Unknown action"))
-
-        blocks = payload["message"]["blocks"]
-
-        status_text = (
-            "Approved :white_check_mark:"
-            if action_id == "leave_approve"
-            else "Rejected :x:"
-        )
-
-        # Replace the actions block with a status update
-        for i, block in enumerate(blocks):
-            if block.get("block_id") == "leave_actions_block":
-                blocks[i] = {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"*Status:* {status_text}",
-                    },
-                }
-            elif block.get("block_id") == "footer_block":
-                # delete the footer block
-                blocks.pop(i)
-
-        # Update the message with the new blocks
-        slack.slack_app.client.chat_update(
-            channel=payload["channel"]["id"],
-            ts=payload["container"]["message_ts"],
-            blocks=blocks,
-        )
+            generate_error_log(
+                title="Unknown event type",
+                message=event_type,
+            )
+            return send_http_response(
+                message="Unknown event type",
+                status_code=400,
+            )
 
     except Exception as e:
         generate_error_log("Error handling the event", exception=e)

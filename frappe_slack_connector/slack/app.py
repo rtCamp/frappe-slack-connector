@@ -164,12 +164,9 @@ class SlackIntegration:
         signature: str,
         timestamp: str,
         req_data: str,
-        payload: str,
-        throw_exc: bool = True,
-    ) -> dict | None:
+    ) -> None:
         import hashlib
         import hmac
-        import json
         import time
 
         # Verify the timestamp to prevent replay attacks
@@ -178,8 +175,7 @@ class SlackIntegration:
                 title="Slack Timestamp verification failed",
                 msgprint="Request is too old",
             )
-            if throw_exc:
-                frappe.throw("Request is too old", frappe.PermissionError)
+            frappe.throw("Request is too old", frappe.PermissionError)
 
         # Create the signature base string
         sig_basestring = f"v0:{timestamp}:{req_data}"
@@ -197,28 +193,7 @@ class SlackIntegration:
             generate_error_log(
                 title="Slack Signature verification failed", message="Slack Event"
             )
-            if throw_exc:
-                frappe.throw("Invalid request signature", frappe.PermissionError)
-
-        # Extract the payload
-        if not payload:
-            generate_error_log(title="No payload found", message="Slack Event")
-            if throw_exc:
-                frappe.throw("No payload found", frappe.PermissionError)
-
-        # Parse the payload
-        try:
-            data = json.loads(payload)
-            return data
-        except Exception as e:
-            generate_error_log(
-                title="Error parsing Slack payload",
-                message=payload,
-                exception=e,
-            )
-            if throw_exc:
-                frappe.throw("Error parsing payload", frappe.PermissionError)
-            return None
+            frappe.throw("Invalid request signature", frappe.PermissionError)
 
     def get_slack_user_id(self, *args, **kwargs) -> str | None:
         """

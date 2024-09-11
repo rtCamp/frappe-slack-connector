@@ -1,5 +1,5 @@
 import frappe
-from frappe import _
+from frappe import _, clear_messages
 from hrms.hr.doctype.leave_application.leave_application import get_leave_approver
 
 from frappe_slack_connector.db.user_meta import get_employeeid_from_slackid
@@ -68,9 +68,7 @@ def handler(slack: SlackIntegration, payload: dict):
             )
 
         leave_application.save(ignore_permissions=True)
-        frappe.db.commit()
 
-        frappe.local.response = {}
         generate_error_log("debug", message=frappe.local.response)
 
         # Send a confirmation message to the user
@@ -78,6 +76,10 @@ def handler(slack: SlackIntegration, payload: dict):
             channel=user_info["id"],
             text=f"Your leave application has been submitted successfully. Application ID: {leave_application.name}",
         )
+
+        clear_messages() # This will remove the extra messages which frappe adds while saving the leave, as slack need empty object in response.
+
+        frappe.db.commit()
 
     except Exception as e:
         generate_error_log(

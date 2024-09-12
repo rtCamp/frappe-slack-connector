@@ -7,7 +7,6 @@ from hrms.hr.doctype.leave_application.leave_application import get_leave_approv
 from werkzeug.wrappers import Response
 
 from frappe_slack_connector.db.user_meta import get_employeeid_from_slackid
-from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
 from frappe_slack_connector.helpers.str_utils import strip_html_tags
 from frappe_slack_connector.slack.app import SlackIntegration
@@ -99,11 +98,6 @@ def handler(slack: SlackIntegration, payload: dict):
         )
 
     except Exception as e:
-        generate_error_log(
-            "Slack Leave Application Error",
-            message="Error Submitting request",
-            exception=e,
-        )
         response = {
             "response_action": "push",
             "view": {

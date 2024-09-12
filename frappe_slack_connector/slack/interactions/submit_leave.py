@@ -124,15 +124,6 @@ def handler(slack: SlackIntegration, payload: dict):
                             "text": f"*Error Details:*\n```{strip_html_tags(str(e))}```",
                         },
                     },
-                    {
-                        "type": "context",
-                        "elements": [
-                            {
-                                "type": "mrkdwn",
-                                "text": "If this error persists, please contact the support team.",
-                            }
-                        ],
-                    },
                 ],
             },
         }

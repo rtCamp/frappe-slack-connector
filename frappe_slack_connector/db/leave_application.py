@@ -28,7 +28,7 @@ def get_employees_on_leave() -> list:
     return leave_applications
 
 
-def approve_leave(leave_id: str) -> str:
+def approve_leave(leave_id: str) -> None:
     """
     Approve the leave application
     """
@@ -39,7 +39,7 @@ def approve_leave(leave_id: str) -> str:
     leave_request.submit()
 
 
-def reject_leave(leave_id: str) -> str:
+def reject_leave(leave_id: str) -> None:
     """
     Reject the leave application
     """

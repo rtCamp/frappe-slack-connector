@@ -42,9 +42,11 @@ def handler(slack: SlackIntegration, payload: dict):
             half_day_period = view_state["half_day_period"]["half_day_period_select"][
                 "selected_option"
             ]["value"]
-            half_day_date = view_state["half_day_date"]["half_day_date_picker"][
-                "selected_date"
-            ]
+            half_day_date = (
+                view_state["half_day_date"]["half_day_date_picker"]["selected_date"]
+                if view_state.get("half_day_date")
+                else start_date
+            )
 
         # Get the employee based on the Slack user ID
         employee = get_employeeid_from_slackid(user_info["id"])

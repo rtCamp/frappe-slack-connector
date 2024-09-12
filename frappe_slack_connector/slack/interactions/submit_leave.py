@@ -1,14 +1,15 @@
 import frappe
 from frappe import _, clear_messages
+from frappe.utils import get_url_to_form
 from hrms.hr.doctype.leave_application.leave_application import get_leave_approver
 
 from frappe_slack_connector.db.user_meta import get_employeeid_from_slackid
 from frappe_slack_connector.helpers.error import generate_error_log
+from frappe_slack_connector.helpers.standard_date import standard_date_fmt
 from frappe_slack_connector.slack.app import SlackIntegration
 
 
 def handler(slack: SlackIntegration, payload: dict):
-    generate_error_log("Approve Leave Handler", message=payload)
     if not payload:
         frappe.throw(_("No payload found"), frappe.ValidationError)
     try:
@@ -68,18 +69,26 @@ def handler(slack: SlackIntegration, payload: dict):
             )
 
         leave_application.save(ignore_permissions=True)
-
-        generate_error_log("debug", message=frappe.local.response)
+        frappe.db.commit()
+        # This will remove the extra messages which frappe adds
+        # while saving the leave, as slack need empty object in response.
+        clear_messages()
 
         # Send a confirmation message to the user
         slack.slack_app.client.chat_postMessage(
             channel=user_info["id"],
-            text=f"Your leave application has been submitted successfully. Application ID: {leave_application.name}",
+            blocks=format_leave_submission_blocks(
+                leave_id=leave_application.name,
+                employee_name=employee,
+                leave_link=get_url_to_form("Leave Application", leave_application.name),
+                leave_type=leave_type,
+                leave_submission_date=leave_application.creation,
+                from_date=start_date,
+                user_slack=user_info["id"],
+                to_date=end_date,
+                reason=reason,
+            ),
         )
-
-        clear_messages() # This will remove the extra messages which frappe adds while saving the leave, as slack need empty object in response.
-
-        frappe.db.commit()
 
     except Exception as e:
         generate_error_log(
@@ -87,6 +96,83 @@ def handler(slack: SlackIntegration, payload: dict):
             message="Error Submitting request",
             exception=e,
         )
+
+
+def format_leave_submission_blocks(
+    *,
+    leave_id: str,
+    employee_name: str,
+    leave_type: str,
+    leave_submission_date: str,
+    user_slack: str,
+    from_date: str,
+    to_date: str,
+    reason: str,
+    leave_link: str = "#",
+) -> list:
+    """
+    Format the blocks for the leave application message
+    """
+    blocks = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": ":memo: Leave Requested",
+                "emoji": True,
+            },
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"Hey <@{user_slack}>!\n_Your leave <{leave_link}|{leave_id}> request has been submitted._",
+            },
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*Leave Type:*\n:rocket: {leave_type}"},
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Submitted On:*\n:clock3: {standard_date_fmt(leave_submission_date)}",
+                },
+            ],
+        },
+        {
+            "type": "section",
+            "fields": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"*From:*\n:calendar: {standard_date_fmt(from_date)}",
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*To:*\n:calendar: {standard_date_fmt(to_date)}",
+                },
+            ],
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Reason:*\n>{reason}",
+            },
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "action_id": "ignore_leave_view",
+                    "text": {"type": "plain_text", "text": "View", "emoji": True},
+                    "url": leave_link,
+                }
+            ],
+        },
+    ]
+    return blocks
 
 
 def half_day_checkbox_handler(slack: SlackIntegration, payload: dict):

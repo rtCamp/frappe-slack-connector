@@ -54,8 +54,14 @@ def event():
 
         if event_type == "block_actions":
             block_id = payload["actions"][0]["block_id"]
+            action_id = payload["actions"][0]["action_id"]
 
-            if block_id == "half_day_checkbox":
+            # Ignore the action if starts with ignore
+            # Start the action_id in the block to "ignore" if the
+            # action payload is not required
+            if action_id.startswith("ignore"):
+                return
+            elif block_id == "half_day_checkbox":
                 half_day_checkbox_handler(slack, payload)
             else:
                 approve_leave_handler(slack, payload)

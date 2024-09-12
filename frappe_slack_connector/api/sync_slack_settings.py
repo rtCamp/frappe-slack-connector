@@ -13,7 +13,6 @@ def sync_slack_data():
     """
     frappe.msgprint("Syncing Slack data...")
     frappe.enqueue(sync_slack_job, queue="long")
-    sync_slack_job()
 
 
 def sync_slack_job():

@@ -1,11 +1,15 @@
+import json
+
 import frappe
 from frappe import _, clear_messages
 from frappe.utils import get_url_to_form
 from hrms.hr.doctype.leave_application.leave_application import get_leave_approver
+from werkzeug.wrappers import Response
 
 from frappe_slack_connector.db.user_meta import get_employeeid_from_slackid
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
+from frappe_slack_connector.helpers.str_utils import strip_html_tags
 from frappe_slack_connector.slack.app import SlackIntegration
 
 
@@ -97,6 +101,44 @@ def handler(slack: SlackIntegration, payload: dict):
             "Slack Leave Application Error",
             message="Error Submitting request",
             exception=e,
+        )
+        response = {
+            "response_action": "push",
+            "view": {
+                "type": "modal",
+                "title": {"type": "plain_text", "text": "Error"},
+                "blocks": [
+                    {
+                        "type": "header",
+                        "text": {
+                            "type": "plain_text",
+                            "text": ":warning: Error submitting leave request",
+                            "emoji": True,
+                        },
+                    },
+                    {"type": "divider"},
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*Error Details:*\n```{strip_html_tags(str(e))}```",
+                        },
+                    },
+                    {
+                        "type": "context",
+                        "elements": [
+                            {
+                                "type": "mrkdwn",
+                                "text": "If this error persists, please contact the support team.",
+                            }
+                        ],
+                    },
+                ],
+            },
+        }
+        return Response(
+            json.dumps(response),
+            content_type="application/json",
         )
 
 

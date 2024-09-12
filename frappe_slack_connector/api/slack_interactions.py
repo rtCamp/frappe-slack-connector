@@ -62,12 +62,12 @@ def event():
             if action_id.startswith("ignore"):
                 return
             elif block_id == "half_day_checkbox":
-                half_day_checkbox_handler(slack, payload)
+                return half_day_checkbox_handler(slack, payload)
             else:
-                approve_leave_handler(slack, payload)
+                return approve_leave_handler(slack, payload)
 
         elif event_type == "view_submission":
-            submit_leave_handler(slack, payload)
+            return submit_leave_handler(slack, payload)
 
         else:
             generate_error_log(

@@ -64,7 +64,7 @@ def handler(slack: SlackIntegration, payload: dict):
             leave_application.half_day_date = (
                 start_date  # Assuming half day is on the start date
             )
-            leave_application.half_day_period = (
+            leave_application.custom_first_halfsecond_half = (
                 "First Half" if half_day_period == "first_half" else "Second Half"
             )
 

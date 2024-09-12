@@ -33,10 +33,14 @@ def handler(slack: SlackIntegration, payload: dict):
             > 0
         )
         half_day_period = None
+        half_day_date = None
         if is_half_day:
             half_day_period = view_state["half_day_period"]["half_day_period_select"][
                 "selected_option"
             ]["value"]
+            half_day_date = view_state["half_day_date"]["half_day_date_picker"][
+                "selected_date"
+            ]
 
         # Get the employee based on the Slack user ID
         employee = get_employeeid_from_slackid(user_info["id"])
@@ -61,9 +65,7 @@ def handler(slack: SlackIntegration, payload: dict):
 
         if is_half_day:
             leave_application.half_day = 1
-            leave_application.half_day_date = (
-                start_date  # Assuming half day is on the start date
-            )
+            leave_application.half_day_date = half_day_date
             leave_application.custom_first_halfsecond_half = (
                 "First Half" if half_day_period == "first_half" else "Second Half"
             )

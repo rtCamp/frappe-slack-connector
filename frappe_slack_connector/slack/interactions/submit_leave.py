@@ -155,7 +155,7 @@ def format_leave_submission_blocks(
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": ":memo: Leave Requested",
+                "text": ":memo: Leave Request Submitted",
                 "emoji": True,
             },
         },
@@ -163,20 +163,19 @@ def format_leave_submission_blocks(
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"Hey <@{user_slack}>!\n_Your leave <{leave_link}|{leave_id}> request has been submitted._",
+                "text": f"Hello<@{user_slack}>! Your leave request has been successfully submitted.",
             },
         },
-        {"type": "divider"},
         {
-            "type": "section",
-            "fields": [
-                {"type": "mrkdwn", "text": f"*Leave Type:*\n:rocket: {leave_type}"},
+            "type": "context",
+            "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": f"*Submitted On:*\n:clock3: {standard_date_fmt(leave_submission_date)}",
-                },
+                    "text": f"*Leave ID:* <{leave_link}|{leave_id}> • *Submitted On:* {standard_date_fmt(leave_submission_date)}",
+                }
             ],
         },
+        {"type": "divider"},
         {
             "type": "section",
             "fields": [
@@ -186,24 +185,29 @@ def format_leave_submission_blocks(
                 },
                 {
                     "type": "mrkdwn",
-                    "text": f"*To:*\n:calendar: {standard_date_fmt(to_date)}",
+                    "text": f"*Leave Type:*\n:rocket: {leave_type}",
                 },
             ],
         },
         {
             "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*Reason:*\n>{reason}",
-            },
+            "fields": [
+                {"type": "mrkdwn", "text": f"*To:*\n:calendar: {standard_date_fmt(to_date)}"},
+                {"type": "mrkdwn", "text": f"*Reason:*\n>{reason}"},
+            ],
         },
+        {"type": "divider"},
         {
             "type": "actions",
             "elements": [
                 {
                     "type": "button",
                     "action_id": "ignore_leave_view",
-                    "text": {"type": "plain_text", "text": "View", "emoji": True},
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Check Status",
+                        "emoji": True,
+                    },
                     "url": leave_link,
                 }
             ],

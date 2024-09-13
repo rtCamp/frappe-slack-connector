@@ -3,7 +3,7 @@ from datetime import datetime
 import frappe
 from erpnext.setup.doctype.holiday_list.holiday_list import is_holiday
 from frappe import _
-from frappe.utils import get_time
+from frappe.utils import get_time, getdate
 
 from frappe_slack_connector.db.leave_application import get_employees_on_leave
 from frappe_slack_connector.db.user_meta import get_user_meta
@@ -68,7 +68,8 @@ def send_notification() -> None:
             "name": slack_name,
             "until_date": (
                 user_application.to_date
-                if user_application.from_date != user_application.to_date
+                # Don't show until date if the leave ends today
+                if user_application.to_date != getdate(frappe.utils.nowdate())
                 else None
             ),
         }

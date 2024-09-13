@@ -41,7 +41,7 @@ def slash_leave():
         )
 
         return send_http_response(
-            status_code=200,
+            status_code=204,
             is_empty=True,
         )
     except Exception as e:

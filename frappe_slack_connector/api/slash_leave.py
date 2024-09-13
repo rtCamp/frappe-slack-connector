@@ -3,7 +3,6 @@ from frappe.utils import today
 from hrms.hr.doctype.leave_application.leave_application import (
     get_leave_allocation_records,
 )
-from werkzeug.wrappers import Response
 
 from frappe_slack_connector.db.user_meta import get_employeeid_from_slackid
 from frappe_slack_connector.helpers.error import generate_error_log
@@ -41,10 +40,16 @@ def slash_leave():
             },
         )
 
-        return Response(status=200)
+        return send_http_response(
+            status_code=200,
+            is_empty=True,
+        )
     except Exception as e:
         generate_error_log("Error opening modal", exception=e)
-        return Response(status=500)
+        return send_http_response(
+            status_code=500,
+            is_empty=True,
+        )
 
 
 def build_leave_form(leaves: list) -> list:

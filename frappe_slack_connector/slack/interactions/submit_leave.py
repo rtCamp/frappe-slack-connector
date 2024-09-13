@@ -1,12 +1,10 @@
-import json
-
 import frappe
 from frappe import _, clear_messages
 from frappe.utils import get_url_to_form
 from hrms.hr.doctype.leave_application.leave_application import get_leave_approver
-from werkzeug.wrappers import Response
 
 from frappe_slack_connector.db.user_meta import get_employeeid_from_slackid
+from frappe_slack_connector.helpers.http_response import send_http_response
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
 from frappe_slack_connector.helpers.str_utils import strip_html_tags
 from frappe_slack_connector.slack.app import SlackIntegration
@@ -123,9 +121,8 @@ def handler(slack: SlackIntegration, payload: dict):
                 ],
             },
         }
-        return Response(
-            json.dumps(response),
-            content_type="application/json",
+        return send_http_response(
+            body=response,
         )
 
 
@@ -186,7 +183,10 @@ def format_leave_submission_blocks(
         {
             "type": "section",
             "fields": [
-                {"type": "mrkdwn", "text": f"*To:*\n:calendar: {standard_date_fmt(to_date)}"},
+                {
+                    "type": "mrkdwn",
+                    "text": f"*To:*\n:calendar: {standard_date_fmt(to_date)}",
+                },
                 {"type": "mrkdwn", "text": f"*Reason:*\n>{reason}"},
             ],
         },

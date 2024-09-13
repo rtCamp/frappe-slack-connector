@@ -44,12 +44,12 @@ def connect_slack(user_email: str = None) -> None:
             indicator="green",
         )
 
-        send_http_response(_("Slack user connected successfully"))
+        return send_http_response(_("Slack user connected successfully"))
     except Exception as e:
         generate_error_log(
             title="Error connecting Slack user",
             exception=e,
         )
-        send_http_response(
+        return send_http_response(
             _("An error occurred while connecting Slack user"), status_code=500
         )

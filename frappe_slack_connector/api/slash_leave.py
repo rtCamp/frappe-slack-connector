@@ -24,7 +24,14 @@ def slash_leave():
 
     try:
         employee_id = get_employeeid_from_slackid(frappe.form_dict.get("user_id"))
-        leaves = get_leave_allocation_records(employee_id, today())
+        leaves = list(get_leave_allocation_records(employee_id, today()).keys())
+        leaves_without_pay = frappe.get_all(
+            "Leave Type", filters={"is_lwp": 1}, pluck="name"
+        )
+        leaves.extend(leaves_without_pay)
+
+        if not leaves:
+            raise Exception("No leave types found for the employee")
 
         slack.slack_app.client.views_open(
             trigger_id=frappe.form_dict.get("trigger_id"),
@@ -32,7 +39,7 @@ def slash_leave():
                 "type": "modal",
                 "callback_id": "apply_leave_application",
                 "title": {"type": "plain_text", "text": "Apply for Leave"},
-                "blocks": build_leave_form(leaves.keys()),
+                "blocks": build_leave_form(leaves),
                 "submit": {
                     "type": "plain_text",
                     "text": "Submit",
@@ -40,16 +47,39 @@ def slash_leave():
             },
         )
 
-        return send_http_response(
-            status_code=204,
-            is_empty=True,
-        )
     except Exception as e:
         generate_error_log("Error opening modal", exception=e)
-        return send_http_response(
-            status_code=500,
-            is_empty=True,
+        slack.slack_app.client.views_open(
+            trigger_id=frappe.form_dict.get("trigger_id"),
+            view={
+                "type": "modal",
+                "callback_id": "apply_leave_application_error",
+                "title": {"type": "plain_text", "text": "Error"},
+                "blocks": [
+                    {
+                        "type": "header",
+                        "text": {
+                            "type": "plain_text",
+                            "text": ":warning: Error submitting leave request",
+                            "emoji": True,
+                        },
+                    },
+                    {"type": "divider"},
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*Error Details:*\n```{str(e)}```",
+                        },
+                    },
+                ],
+            },
         )
+
+    return send_http_response(
+        status_code=204,
+        is_empty=True,
+    )
 
 
 def build_leave_form(leaves: list) -> list:

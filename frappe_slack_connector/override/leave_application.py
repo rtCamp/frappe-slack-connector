@@ -55,6 +55,55 @@ def send_leave_notification_bg(doc: Document):
                 reason=doc.description,
             ),
         )
+
+        # if leave date is today and attendance notification is already sent,
+        # send notification to attendance channel
+        slack_settings = frappe.get_single("Slack Settings")
+        if (
+            doc.from_date == frappe.utils.today()
+            and slack_settings.send_attendance_updates == 1
+            and slack_settings.last_attendance_date is not None
+            and slack_settings.last_attendance_msg_ts is not None
+            and slack_settings.last_attendance_date == frappe.utils.nowdate()
+        ):
+            slack.slack_app.client.chat_postMessage(
+                channel=slack.SLACK_CHANNEL_ID,
+                blocks=[
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"<@{user_slack}> requested for leave today. "
+                            + "_("
+                            + (
+                                doc.custom_first_halfsecond_half
+                                if doc.half_day
+                                and doc.custom_first_halfsecond_half
+                                and doc.half_day_date == frappe.utils.today()
+                                else "Full Day"
+                            )
+                            + ")_",
+                        },
+                    },
+                    {"type": "divider"},
+                    {
+                        "type": "section",
+                        "fields": [
+                            {
+                                "type": "mrkdwn",
+                                "text": f"*To:*\n:calendar: {standard_date_fmt(doc.to_date)}",
+                            },
+                            {
+                                "type": "mrkdwn",
+                                "text": f"*Reason:*\n>{doc.description}",
+                            },
+                        ],
+                    },
+                ],
+                thread_ts=slack_settings.last_attendance_msg_ts,
+                reply_broadcast=True,
+            )
+
     except Exception as e:
         generate_error_log(
             title="Error posting message to Slack",

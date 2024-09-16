@@ -18,7 +18,8 @@
   "test_slack_channel",
   "column_break_tjcf",
   "attendance_time",
-  "last_attendance_date"
+  "last_attendance_date",
+  "last_attendance_msg_ts"
  ],
  "fields": [
   {
@@ -99,12 +100,18 @@
    "fieldtype": "Password",
    "label": "Signing Token",
    "reqd": 1
+  },
+  {
+   "fieldname": "last_attendance_msg_ts",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Last Attendance Message ID"
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2024-09-04 14:01:18.859947",
+ "modified": "2024-09-16 13:53:08.821143",
  "modified_by": "Administrator",
  "module": "Frappe Slack Connector",
  "name": "Slack Settings",

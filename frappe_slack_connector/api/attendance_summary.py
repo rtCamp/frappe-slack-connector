@@ -40,10 +40,11 @@ def attendance_channel() -> None:
         return
 
     # Send the attendance summary to the Slack channel
-    send_notification()
+    message_ts = send_notification()
 
     # Update the last attendance date
     slack_settings.last_attendance_date = frappe.utils.nowdate()
+    slack_settings.last_attendance_msg_ts = message_ts
     slack_settings.save(ignore_permissions=True)
 
 
@@ -78,7 +79,7 @@ def send_notification() -> None:
     leave_details_mrkdwn = format_leave_groups(leave_groups)
 
     try:
-        slack.slack_app.client.chat_postMessage(
+        message = slack.slack_app.client.chat_postMessage(
             channel=slack.SLACK_CHANNEL_ID,
             blocks=format_attendance_blocks(
                 date_string=standard_date_fmt(frappe.utils.nowdate()),
@@ -86,6 +87,7 @@ def send_notification() -> None:
                 leave_details_mrkdwn=leave_details_mrkdwn,
             ),
         )
+        return message["ts"]
     except Exception as e:
         generate_error_log(
             title=_("Error posting message to Slack"),

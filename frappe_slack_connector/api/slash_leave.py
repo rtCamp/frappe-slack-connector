@@ -46,8 +46,29 @@ def slash_leave():
         )
     except Exception as e:
         generate_error_log("Error opening modal", exception=e)
+        slack.slack_app.client.views_open(
+            trigger_id=frappe.form_dict.get("trigger_id"),
+            view={
+                "type": "modal",
+                "callback_id": "error_modal",
+                "title": {"type": "plain_text", "text": "Error"},
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "```An error occurred, please try again later.```",
+                        },
+                    }
+                ],
+                "close": {
+                    "type": "plain_text",
+                    "text": "Close",
+                },
+            },
+        )
         return send_http_response(
-            status_code=500,
+            status_code=204,
             is_empty=True,
         )
 

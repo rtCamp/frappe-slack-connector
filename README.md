@@ -1,8 +1,9 @@
-# Frappe Slack Integration
+# Frappe Slack Integration  [![AGPL License](https://img.shields.io/badge/license-AGPL-blue.svg)](http://www.gnu.org/licenses/agpl-3.0)
 
 This Frappe app integrates the Leave Management module with Slack, allowing seamless leave application and approval workflows directly within Slack.
 
-[![AGPL License](https://img.shields.io/badge/license-AGPL-blue.svg)](http://www.gnu.org/licenses/agpl-3.0)
+<img alt="ss" width="450" src="https://github.com/user-attachments/assets/8f13de1c-589c-4503-929a-d34b1780e422" />
+<img alt="ss" width="512" src="https://github.com/user-attachments/assets/f7088963-eff0-4d06-b9b6-13b10a9bf1b1" />
 
 ## Features
 

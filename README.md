@@ -65,7 +65,7 @@ Refer to our [Wiki](https://github.com/rtCamp/frappe-slack-connector/wiki)
 
 ## Contribution Guide
 
-1. Install the apps with the help of the [Installation Guide](./docs/local_setup/README.md).
+1. Install the apps with the help of the [Installation Guide](#installation).
 
 2. Set up [pre-commit](https://pre-commit.com/) in the app.
 

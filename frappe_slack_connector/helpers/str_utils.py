@@ -2,6 +2,9 @@ import re
 
 
 def strip_html_tags(text):
+    """
+    Remove HTML tags from the given text
+    """
     # Regex pattern to match HTML tags
     pattern = re.compile("<.*?>")
 

@@ -1,3 +1,8 @@
+/*
+ * Add a menu item named `Authorize Slack` to the
+ * User form to connect Slack manually
+ */
+
 frappe.ui.form.on("User", {
   refresh: function (frm) {
     frm.page.add_menu_item(__("Authorize Slack"), function () {

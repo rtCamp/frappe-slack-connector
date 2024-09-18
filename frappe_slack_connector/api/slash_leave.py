@@ -12,6 +12,10 @@ from frappe_slack_connector.slack.app import SlackIntegration
 
 @frappe.whitelist(allow_guest=True)
 def slash_leave():
+    """
+    API endpoint for the Slash command to open the modal for applying leave
+    Slash command: /apply-leave
+    """
     slack = SlackIntegration()
     try:
         slack.verify_slack_request(

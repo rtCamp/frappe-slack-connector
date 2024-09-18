@@ -2,7 +2,7 @@
 
 This Frappe app integrates the Leave Management module with Slack, allowing seamless leave application and approval workflows directly within Slack.
 
-[![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](https://choosealicense.com/licenses/mit/)
+[![AGPL License](https://img.shields.io/badge/license-AGPL-blue.svg)](http://www.gnu.org/licenses/agpl-3.0)
 
 ## Features
 
@@ -43,7 +43,7 @@ To install the app:
 3. **Approvers Notification**:
    - Ensure the approvers are defined correctly in the Frappe Leave Management module, and notifications will automatically be sent when there are pending leave requests.
 
-For detailed steps, please refer to our [wiki](https://github.com/rtCamp/frappe-slack-connector/wiki).
+For detailed steps, please refer to our [wiki](https://github.com/rtCamp/frappe-slack-connector/wiki/Getting-Started).
 
 ## Usage
 
@@ -94,4 +94,4 @@ For branch names and commit messages, follow the guidelines at: https://www.conv
 
 ## License
 
-This project is licensed under the [MIT License](license.txt).
+This project is licensed under the [AGPLv3 License](license.txt).

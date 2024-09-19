@@ -40,7 +40,11 @@ def attendance_channel() -> None:
         return
 
     # Send the attendance summary to the Slack channel
-    message_ts = send_notification()
+    message_ts = send_notification(
+        slack_settings.leave_notification_subject
+        if slack_settings.leave_notification_subject
+        else "Employees on Leave"  # Default title
+    )
 
     # Update the last attendance date
     slack_settings.last_attendance_date = frappe.utils.nowdate()
@@ -48,9 +52,10 @@ def attendance_channel() -> None:
     slack_settings.save(ignore_permissions=True)
 
 
-def send_notification() -> None:
+def send_notification(attendance_title: str) -> str | None:
     """
     Background job to post the attendance summary to the Slack channel
+    Returns the message timestamp if successful
     """
     slack = SlackIntegration()
     leave_groups = {"Full Day": [], "First-Half": [], "Second-Half": []}
@@ -83,6 +88,7 @@ def send_notification() -> None:
             channel=slack.SLACK_CHANNEL_ID,
             blocks=format_attendance_blocks(
                 date_string=standard_date_fmt(frappe.utils.nowdate()),
+                attendance_title=attendance_title,
                 employee_count=len(users_on_leave),
                 leave_details_mrkdwn=leave_details_mrkdwn,
             ),
@@ -133,9 +139,11 @@ def format_leave_groups(leave_groups: dict) -> str:
 
 
 def format_attendance_blocks(
+    *,
     date_string: str,
     employee_count: int,
     leave_details_mrkdwn: str,
+    attendance_title: str,
 ) -> list:
     """
     Format the attendance summary into Slack blocks
@@ -146,7 +154,7 @@ def format_attendance_blocks(
                 "type": "header",
                 "text": {
                     "type": "plain_text",
-                    "text": ":sunny: No rtCampers are on leave today",
+                    "text": f":sunny: No {attendance_title}",
                     "emoji": True,
                 },
             }
@@ -157,7 +165,7 @@ def format_attendance_blocks(
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f":palm_tree: {employee_count} rtCamper{('' if employee_count <= 1 else 's')} on leave today",
+                "text": f":palm_tree: {employee_count} {attendance_title}",
                 "emoji": True,
             },
         },

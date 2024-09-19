@@ -37,7 +37,7 @@ To install the app:
    bench --site [site-name] migrate
    ```
 
-   For docker-managed deployments and local development, check out our dev-tool for seamlessly building Frappe apps: [frappe-manager](https://github.com/rtCamp/Frappe-Manager)
+For docker-managed deployments and local development, check out our dev-tool for seamlessly building Frappe apps: [frappe-manager](https://github.com/rtCamp/Frappe-Manager)
 
 ## Configuration
 

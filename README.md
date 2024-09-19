@@ -2,14 +2,19 @@
 
 This Frappe app integrates the Leave Management module with Slack, allowing seamless leave application and approval workflows directly within Slack.
 
-<img alt="ss" width="450" src="https://github.com/user-attachments/assets/8f13de1c-589c-4503-929a-d34b1780e422" />
-<img alt="ss" width="512" src="https://github.com/user-attachments/assets/f7088963-eff0-4d06-b9b6-13b10a9bf1b1" />
+
+
 
 ## Features
 
-- **Leave Application via Slack**: Users can apply for leave directly from Slack without accessing the Frappe interface.
-- **Approval Notifications**: Leave approvers will receive a notification in Slack to either approve or reject the leave requests.
-- **Daily Leave Reminder**: Every working day, at a specified time, a reminder is sent listing the employees who are on leave for that day in the attendance channel.
+- **Leave Application via Slack**: Users can apply for leave directly from Slack without accessing the Frappe interface.  
+<img width="518" alt="Screenshot 2024-09-19 at 1 25 37 PM" src="https://github.com/user-attachments/assets/4cfd0336-99e8-4b31-bb74-30131a03f6d4"><br/>
+
+- **Approval Notifications**: Leave approvers will receive a notification in Slack to either approve or reject the leave requests.  
+<img alt="ss" width="512" src="https://github.com/user-attachments/assets/f7088963-eff0-4d06-b9b6-13b10a9bf1b1" /><br/>
+
+- **Daily Leave Reminder**: Every working day, at a specified time, a reminder is sent listing the employees who are on leave for that day in the attendance channel.  
+<img alt="ss" width="450" src="https://github.com/user-attachments/assets/8f13de1c-589c-4503-929a-d34b1780e422" /><br/>
 
 ## Installation
 

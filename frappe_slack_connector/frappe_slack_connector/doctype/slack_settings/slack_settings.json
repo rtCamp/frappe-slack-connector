@@ -72,7 +72,7 @@
   {
    "fieldname": "workspace_section",
    "fieldtype": "Section Break",
-   "label": "Workspace"
+   "label": "Leave Settings"
   },
   {
    "default": "1",
@@ -119,7 +119,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2024-09-19 14:45:46.835960",
+ "modified": "2024-09-19 23:23:30.535487",
  "modified_by": "Administrator",
  "module": "Frappe Slack Connector",
  "name": "Slack Settings",

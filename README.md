@@ -19,6 +19,12 @@ This Frappe app integrates the Leave Management module with Slack, allowing seam
 
 - **Daily Leave Reminders**: Every working day at the specified time, a Slack message will list all employees currently on leave.
 
+## Prerequisite
+
+Before you begin, make sure you have following apps installed on your site:
+
+- [ERPNext](https://github.com/frappe/erpnext)
+- [Frappe HR](https://github.com/frappe/hrms)
 
 ## Installation
 

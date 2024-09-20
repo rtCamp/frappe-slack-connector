@@ -2,9 +2,10 @@ app_name = "frappe_slack_connector"
 app_title = "Frappe Slack Connector"
 app_publisher = "rtCamp"
 app_description = "The app is used to integrate Slack into Frappe site"
-app_email = "sys@rtcamp.com"
-app_license = "mit"
-# required_apps = []
+app_email = "erp@rtcamp.com"
+app_license = "GNU AFFERO GENERAL PUBLIC LICENSE (v3)"
+source_link = "https://github.com/rtCamp/frappe-slack-connector"
+required_apps = ["frappe/erpnext", "frappe/hrms"]
 
 # Includes in <head>
 # ------------------

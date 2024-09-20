@@ -1,12 +1,9 @@
 <div align="center">
 <img src="logo.png" height="128" alt="Frappe HR Logo">
 <h2>Frappe Slack Connector</h2>
+   Frappe app that integrates the Leave Management module with Slack.
 </div>
-
-## Introduction
-
-This Frappe app integrates the Leave Management module with Slack, allowing seamless leave application and approval workflows directly within Slack.
-
+<br>
 <div align="center">
 <img src="app-feat.png" style="width:80%" alt="Frappe HR Logo">
 </div>

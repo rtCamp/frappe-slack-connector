@@ -5,7 +5,10 @@ from erpnext.setup.doctype.holiday_list.holiday_list import is_holiday
 from frappe import _
 from frappe.utils import get_time, getdate
 
-from frappe_slack_connector.db.leave_application import get_employees_on_leave
+from frappe_slack_connector.db.leave_application import (
+    custom_fields_exist,
+    get_employees_on_leave,
+)
 from frappe_slack_connector.db.user_meta import get_user_meta
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
@@ -40,7 +43,11 @@ def attendance_channel() -> None:
         return
 
     # Send the attendance summary to the Slack channel
-    message_ts = send_notification()
+    message_ts = send_notification(
+        slack_settings.leave_notification_subject
+        if slack_settings.leave_notification_subject
+        else "Employees on Leave"  # Default title
+    )
 
     # Update the last attendance date
     slack_settings.last_attendance_date = frappe.utils.nowdate()
@@ -48,14 +55,19 @@ def attendance_channel() -> None:
     slack_settings.save(ignore_permissions=True)
 
 
-def send_notification() -> None:
+def send_notification(attendance_title: str) -> str | None:
     """
     Background job to post the attendance summary to the Slack channel
+    Returns the message timestamp if successful
     """
     slack = SlackIntegration()
-    leave_groups = {"Full Day": [], "First-Half": [], "Second-Half": []}
-    users_on_leave = get_employees_on_leave()
 
+    leave_groups = {"Full Day": [], "Half Day": []}
+    if custom_fields_exist():
+        leave_groups["First-Half"] = []
+        leave_groups["Second-Half"] = []
+
+    users_on_leave = get_employees_on_leave()
     for user_application in users_on_leave:
         user_slack = get_user_meta(employee_id=user_application.get("employee"))
         slack_name = (
@@ -83,6 +95,7 @@ def send_notification() -> None:
             channel=slack.SLACK_CHANNEL_ID,
             blocks=format_attendance_blocks(
                 date_string=standard_date_fmt(frappe.utils.nowdate()),
+                attendance_title=attendance_title,
                 employee_count=len(users_on_leave),
                 leave_details_mrkdwn=leave_details_mrkdwn,
             ),
@@ -101,9 +114,14 @@ def send_notification() -> None:
 def get_leave_type(user_application: dict) -> str:
     """
     Get the leave type based on the user's leave application
+    For standalone installations, the custom fields are not available,
+    so only use Full Day, and Half Day
+    For rtCamp installation, use Full Day, First-Half, and Second-Half
     """
     if not user_application.half_day:
         return "Full Day"
+    elif not custom_fields_exist():
+        return "Half Day"
     elif user_application.custom_first_halfsecond_half == "First Half":
         return "First-Half"
     else:
@@ -115,27 +133,30 @@ def format_leave_groups(leave_groups: dict) -> str:
     Format the leave groups into a readable text for posting to Slack
     """
     formatted_text = ""
-    emojis = {"Full Day": "", "First-Half": "", "Second-Half": ""}
 
     for leave_type, employees in leave_groups.items():
-        if employees:
-            formatted_text += f"*{emojis[leave_type]} {leave_type}*\n"
-            for index, employee in enumerate(employees, start=1):
-                formatted_text += f"  {index}. {employee['name']}"
-                if employee["until_date"]:
-                    formatted_text += (
-                        f" _until {standard_date_fmt(employee['until_date'])}_"
-                    )
-                formatted_text += "\n"
+        if not employees:
+            continue
+
+        formatted_text += f"*{leave_type}*\n"
+        for index, employee in enumerate(employees, start=1):
+            formatted_text += f"  {index}. {employee['name']}"
+            if employee["until_date"]:
+                formatted_text += (
+                    f" _until {standard_date_fmt(employee['until_date'])}_"
+                )
             formatted_text += "\n"
+        formatted_text += "\n"
 
     return formatted_text.strip()
 
 
 def format_attendance_blocks(
+    *,
     date_string: str,
     employee_count: int,
     leave_details_mrkdwn: str,
+    attendance_title: str,
 ) -> list:
     """
     Format the attendance summary into Slack blocks
@@ -146,7 +167,7 @@ def format_attendance_blocks(
                 "type": "header",
                 "text": {
                     "type": "plain_text",
-                    "text": ":sunny: No rtCampers are on leave today",
+                    "text": f":sunny: No {attendance_title}",
                     "emoji": True,
                 },
             }
@@ -157,7 +178,7 @@ def format_attendance_blocks(
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f":palm_tree: {employee_count} rtCamper{('' if employee_count <= 1 else 's')} on leave today",
+                "text": f":palm_tree: {employee_count} {attendance_title}",
                 "emoji": True,
             },
         },

@@ -43,12 +43,9 @@ fixtures = [
         "dt": "Custom Field",
         "filters": [
             [
-                "name",
+                "module",
                 "in",
-                [
-                    "User Meta-custom_slack_userid",
-                    "User Meta-custom_slack_username",
-                ],
+                ["Frappe Slack Connector"],
             ]
         ],
     },

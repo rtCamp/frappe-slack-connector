@@ -3,6 +3,7 @@ from frappe import _, clear_messages
 from frappe.utils import get_url_to_form
 from hrms.hr.doctype.leave_application.leave_application import get_leave_approver
 
+from frappe_slack_connector.db.leave_application import custom_fields_exist
 from frappe_slack_connector.db.user_meta import get_employeeid_from_slackid
 from frappe_slack_connector.helpers.http_response import send_http_response
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
@@ -40,9 +41,10 @@ def handler(slack: SlackIntegration, payload: dict):
         half_day_period = None
         half_day_date = None
         if is_half_day:
-            half_day_period = view_state["half_day_period"]["half_day_period_select"][
-                "selected_option"
-            ]["value"]
+            if custom_fields_exist():
+                half_day_period = view_state["half_day_period"][
+                    "half_day_period_select"
+                ]["selected_option"]["value"]
             half_day_date = (
                 view_state["half_day_date"]["half_day_date_picker"]["selected_date"]
                 if view_state.get("half_day_date")
@@ -73,9 +75,10 @@ def handler(slack: SlackIntegration, payload: dict):
         if is_half_day:
             leave_application.half_day = 1
             leave_application.half_day_date = half_day_date
-            leave_application.custom_first_halfsecond_half = (
-                "First Half" if half_day_period == "first_half" else "Second Half"
-            )
+            if custom_fields_exist():
+                leave_application.custom_first_halfsecond_half = (
+                    "First Half" if half_day_period == "first_half" else "Second Half"
+                )
 
         leave_application.save(ignore_permissions=True)
         frappe.db.commit()
@@ -257,33 +260,34 @@ def half_day_checkbox_handler(slack: SlackIntegration, payload: dict):
                 },
             ]
 
-        blocks += [
-            {
-                "type": "input",
-                "block_id": "half_day_period",
-                "element": {
-                    "type": "radio_buttons",
-                    "action_id": "half_day_period_select",
-                    "options": [
-                        {
-                            "text": {
-                                "type": "plain_text",
-                                "text": "First Half",
+        if custom_fields_exist():
+            blocks += [
+                {
+                    "type": "input",
+                    "block_id": "half_day_period",
+                    "element": {
+                        "type": "radio_buttons",
+                        "action_id": "half_day_period_select",
+                        "options": [
+                            {
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "First Half",
+                                },
+                                "value": "first_half",
                             },
-                            "value": "first_half",
-                        },
-                        {
-                            "text": {
-                                "type": "plain_text",
-                                "text": "Second Half",
+                            {
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "Second Half",
+                                },
+                                "value": "second_half",
                             },
-                            "value": "second_half",
-                        },
-                    ],
+                        ],
+                    },
+                    "label": {"type": "plain_text", "text": "Half Day Period"},
                 },
-                "label": {"type": "plain_text", "text": "Half Day Period"},
-            },
-        ]
+            ]
     else:
         # Remove half-day-related blocks if they exist
         blocks = [

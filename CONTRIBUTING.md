@@ -1,19 +1,23 @@
 ## Contribution Guide
 
-1. Install the apps with the help of the [Installation Guide](#installation).
+1. Create a new Frappe site with [Frappe Manager](https://github.com/rtCamp/frappe-manager).
+
+2. Install the app on the site.
+
+```bash
+bench get-app https://github.com/rtCamp/frappe-slack-connector
+bench --site [site-name] install-app frappe_slack_connector
+```
 
 2. Set up [pre-commit](https://pre-commit.com/) in the app.
 
 ```bash
-cd frappe-slack-connector
 pre-commit install
 ```
 
 3. Push the code to the given branch.
 
 ```bash
-cd frappe-slack-connector
-
 git pull origin main # Make sure to pull the latest changes before making the PR
 
 git checkout -b "new/branch"

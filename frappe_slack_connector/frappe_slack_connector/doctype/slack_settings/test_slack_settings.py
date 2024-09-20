@@ -6,4 +6,4 @@ from frappe.tests.utils import FrappeTestCase
 
 
 class TestSlackSettings(FrappeTestCase):
-	pass
+    pass

@@ -12,6 +12,10 @@ from frappe_slack_connector.slack.app import SlackIntegration
 
 
 def handler(slack: SlackIntegration, payload: dict):
+    """
+    Handle the submission of the leave application modal
+
+    """
     if not payload:
         frappe.throw(_("No payload found"), frappe.ValidationError)
     try:

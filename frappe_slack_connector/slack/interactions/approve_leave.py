@@ -7,6 +7,11 @@ from frappe_slack_connector.slack.app import SlackIntegration
 
 
 def handler(slack: SlackIntegration, payload: dict):
+    """
+    Handle the interaction when a leave application is approved or rejected
+    Update the message in Slack with the status of the leave application
+    Update the leave application in ERP accordingly
+    """
     # Check the user who sent the request
     user_id = payload.get("user", {}).get("id")
     if not user_id:

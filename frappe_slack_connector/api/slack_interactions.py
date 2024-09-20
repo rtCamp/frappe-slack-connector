@@ -19,6 +19,11 @@ from frappe_slack_connector.slack.interactions.submit_leave import (
 
 @frappe.whitelist(allow_guest=True)
 def event():
+    """
+    Handle the Slack interactions
+    This endpoint is called by the Slack API when an interaction occurs, like a button click
+    Need to route the interaction to the appropriate handler
+    """
     slack = SlackIntegration()
 
     try:

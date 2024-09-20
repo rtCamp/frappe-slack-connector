@@ -28,6 +28,9 @@ def slash_leave():
 
     try:
         employee_id = get_employeeid_from_slackid(frappe.form_dict.get("user_id"))
+        if employee_id is None:
+            raise Exception("Employee not found on ERP")
+
         leaves = list(get_leave_allocation_records(employee_id, today()).keys())
         leaves_without_pay = frappe.get_all(
             "Leave Type", filters={"is_lwp": 1}, pluck="name"

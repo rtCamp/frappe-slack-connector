@@ -44,6 +44,7 @@ def get_employees_on_leave() -> list:
             ),
         },
         fields=fields,
+        order_by="to_date asc",
     )
 
     return leave_applications

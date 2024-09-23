@@ -72,7 +72,7 @@ def send_leave_notification_bg(doc: Document):
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"<@{user_slack}> requested for leave today. "
+                            "text": f"{mention} requested for leave today. "
                             + "_("
                             + (
                                 doc.custom_first_halfsecond_half

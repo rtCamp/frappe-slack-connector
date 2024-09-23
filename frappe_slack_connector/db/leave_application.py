@@ -35,7 +35,14 @@ def get_employees_on_leave() -> list:
     # Query Leave Application doctype
     leave_applications = frappe.get_all(
         "Leave Application",
-        filters={"from_date": ("<=", current_date), "to_date": (">=", current_date)},
+        filters={
+            "from_date": ("<=", current_date),
+            "to_date": (">=", current_date),
+            "status": (
+                "in",
+                ["Open", "Approved"],
+            ),
+        },
         fields=fields,
     )
 

@@ -72,7 +72,7 @@ def send_leave_notification_bg(doc: Document):
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"<@{user_slack}> requested for leave today. "
+                            "text": f"{mention} requested for leave today. "
                             + "_("
                             + (
                                 doc.custom_first_halfsecond_half
@@ -83,20 +83,6 @@ def send_leave_notification_bg(doc: Document):
                             )
                             + ")_",
                         },
-                    },
-                    {"type": "divider"},
-                    {
-                        "type": "section",
-                        "fields": [
-                            {
-                                "type": "mrkdwn",
-                                "text": f"*To:*\n:calendar: {standard_date_fmt(doc.to_date)}",
-                            },
-                            {
-                                "type": "mrkdwn",
-                                "text": f"*Reason:*\n>{doc.description}",
-                            },
-                        ],
                     },
                 ],
                 thread_ts=slack_settings.last_attendance_msg_ts,

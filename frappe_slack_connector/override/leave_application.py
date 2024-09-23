@@ -84,20 +84,6 @@ def send_leave_notification_bg(doc: Document):
                             + ")_",
                         },
                     },
-                    {"type": "divider"},
-                    {
-                        "type": "section",
-                        "fields": [
-                            {
-                                "type": "mrkdwn",
-                                "text": f"*To:*\n:calendar: {standard_date_fmt(doc.to_date)}",
-                            },
-                            {
-                                "type": "mrkdwn",
-                                "text": f"*Reason:*\n>{doc.description}",
-                            },
-                        ],
-                    },
                 ],
                 thread_ts=slack_settings.last_attendance_msg_ts,
                 reply_broadcast=True,

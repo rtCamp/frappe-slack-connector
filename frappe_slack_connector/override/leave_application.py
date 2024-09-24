@@ -1,6 +1,7 @@
 import frappe
 from frappe.model.document import Document
 
+from frappe_slack_connector.db.leave_application import custom_fields_exist
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
 from frappe_slack_connector.slack.app import SlackIntegration
@@ -39,6 +40,13 @@ def send_leave_notification_bg(doc: Document):
     try:
         user_slack = slack.get_slack_user_id(employee_id=doc.employee)
         mention = f"<@{user_slack}>" if user_slack else doc.employee_name
+        day_period = "Full Day"
+        if doc.half_day and doc.half_day_date == frappe.utils.today():
+            day_period = (
+                doc.custom_first_halfsecond_half
+                if custom_fields_exist()
+                else "Half Day"
+            )
 
         # if leave date is today and attendance notification is already sent,
         # send notification to attendance channel thread
@@ -58,15 +66,7 @@ def send_leave_notification_bg(doc: Document):
                         "text": {
                             "type": "mrkdwn",
                             "text": f"{mention} requested for leave today. "
-                            + "_("
-                            + (
-                                doc.custom_first_halfsecond_half
-                                if doc.half_day
-                                and doc.custom_first_halfsecond_half
-                                and doc.half_day_date == frappe.utils.today()
-                                else "Full Day"
-                            )
-                            + ")_",
+                            + f"_({day_period})_",
                         },
                     },
                 ],

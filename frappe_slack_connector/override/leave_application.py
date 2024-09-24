@@ -1,6 +1,7 @@
 import frappe
 from frappe.model.document import Document
 
+from frappe_slack_connector.db.leave_application import custom_fields_exist
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
 from frappe_slack_connector.slack.app import SlackIntegration
@@ -23,7 +24,7 @@ def send_leave_notification_bg(doc: Document):
     Send a slack message to the leave approver when
     a new leave application is submitted
 
-    Also send a notification to the attendance channel if
+    Also send a notification to the attendance channel thread if
     the leave date is today and attendance notification is already sent
     """
     slack = SlackIntegration()
@@ -35,28 +36,20 @@ def send_leave_notification_bg(doc: Document):
             exception=e,
         )
         approver_slack = None
-    if approver_slack is None:
-        return
 
     try:
         user_slack = slack.get_slack_user_id(employee_id=doc.employee)
         mention = f"<@{user_slack}>" if user_slack else doc.employee_name
-
-        slack.slack_app.client.chat_postMessage(
-            channel=approver_slack,
-            blocks=format_leave_application_blocks(
-                leave_id=doc.name,
-                employee_name=mention,
-                leave_type=doc.leave_type,
-                leave_submission_date=standard_date_fmt(doc.creation),
-                from_date=standard_date_fmt(doc.from_date),
-                to_date=standard_date_fmt(doc.to_date),
-                reason=doc.description,
-            ),
-        )
+        day_period = "Full Day"
+        if doc.half_day and doc.half_day_date == frappe.utils.today():
+            day_period = (
+                doc.custom_first_halfsecond_half
+                if custom_fields_exist()
+                else "Half Day"
+            )
 
         # if leave date is today and attendance notification is already sent,
-        # send notification to attendance channel
+        # send notification to attendance channel thread
         slack_settings = frappe.get_single("Slack Settings")
         if (
             doc.from_date == frappe.utils.today()
@@ -73,20 +66,27 @@ def send_leave_notification_bg(doc: Document):
                         "text": {
                             "type": "mrkdwn",
                             "text": f"{mention} requested for leave today. "
-                            + "_("
-                            + (
-                                doc.custom_first_halfsecond_half
-                                if doc.half_day
-                                and doc.custom_first_halfsecond_half
-                                and doc.half_day_date == frappe.utils.today()
-                                else "Full Day"
-                            )
-                            + ")_",
+                            + f"_({day_period})_",
                         },
                     },
                 ],
                 thread_ts=slack_settings.last_attendance_msg_ts,
                 reply_broadcast=True,
+            )
+
+        # Send message to approver
+        if approver_slack is not None:
+            slack.slack_app.client.chat_postMessage(
+                channel=approver_slack,
+                blocks=format_leave_application_blocks(
+                    leave_id=doc.name,
+                    employee_name=mention,
+                    leave_type=doc.leave_type,
+                    leave_submission_date=standard_date_fmt(doc.creation),
+                    from_date=standard_date_fmt(doc.from_date),
+                    to_date=standard_date_fmt(doc.to_date),
+                    reason=doc.description,
+                ),
             )
 
     except Exception as e:

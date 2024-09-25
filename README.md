@@ -38,7 +38,7 @@ bench --site [site-name] migrate
 bench restart
 ```
 
-For local development, check out our dev-tool for seamlessly building Frappe apps: [frappe-manager](https://github.com/rtCamp/Frappe-Manager)
+For local development, check out our dev-tool for seamlessly building Frappe apps: [frappe-manager](https://github.com/rtCamp/Frappe-Manager)  
 NOTE: If using `frappe-manager`, you might require to `fm restart` to provision the worker queues.
 
 ## Slack Setup

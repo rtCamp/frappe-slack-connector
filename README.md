@@ -34,10 +34,12 @@ Run the following command to install the app.
 ```bash
 bench get-app https://github.com/rtCamp/frappe-slack-connector
 bench --site [site-name] install-app frappe_slack_connector
+bench --site [site-name] migrate
+bench restart
 ```
 
 For local development, check out our dev-tool for seamlessly building Frappe apps: [frappe-manager](https://github.com/rtCamp/Frappe-Manager)
-
+NOTE: If using `frappe-manager`, you might require to `fm restart` to provision the worker queues.
 
 ## Documentation
 

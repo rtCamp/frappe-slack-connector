@@ -41,6 +41,9 @@ bench restart
 For local development, check out our dev-tool for seamlessly building Frappe apps: [frappe-manager](https://github.com/rtCamp/Frappe-Manager)
 NOTE: If using `frappe-manager`, you might require to `fm restart` to provision the worker queues.
 
+## Slack Setup
+Visit the detailed [Slack setup guide](https://github.com/rtCamp/frappe-slack-connector/wiki/Getting-Started) on wiki.
+
 ## Documentation
 
 Please refer to our [Wiki](https://github.com/rtCamp/frappe-slack-connector/wiki) for details.

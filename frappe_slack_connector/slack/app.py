@@ -109,55 +109,65 @@ class SlackIntegration:
         if user_email and employee_id:
             raise ValueError("Only one of user_email or employee_id is required")
 
-        # If from API, directly fetch from Slack
-        if from_api:
-            if employee_id:
-                # FIXME: Possible NoneType Error
-                email = get_user_meta(employee_id=employee_id).user
-            else:
-                email = user_email
-            return self.slack_app.client.users_lookupByEmail(email=email)
+        try:
+            # If from API, directly fetch from Slack
+            if from_api:
+                if employee_id:
+                    # FIXME: Possible NoneType Error
+                    email = get_user_meta(employee_id=employee_id).user
+                else:
+                    email = user_email
+                return self.slack_app.client.users_lookupByEmail(email=email)
 
-        # If not from user meta but employee_id is provided, fetch user email first
-        if not check_meta and employee_id:
-            # FIXME: Possible NoneType Error
-            user_email = get_user_meta(employee_id=employee_id).user
-            slack_user = self.slack_app.client.users_lookupByEmail(email=user_email)
+            # If not from user meta but employee_id is provided, fetch user email first
+            if not check_meta and employee_id:
+                # FIXME: Possible NoneType Error
+                user_email = get_user_meta(employee_id=employee_id).user
+                slack_user = self.slack_app.client.users_lookupByEmail(email=user_email)
+                return {
+                    "id": slack_user.get("user", {}).get("id"),
+                    "name": slack_user.get("user", {}).get("name"),
+                }
+
+            user_meta = None
+            if check_meta:
+                user_meta = (
+                    get_user_meta(user_id=user_email)
+                    if user_email
+                    else get_user_meta(employee_id=employee_id)
+                )
+                if user_meta and user_meta.custom_slack_userid:
+                    return {
+                        "id": user_meta.custom_slack_userid,
+                        "name": user_meta.custom_slack_username,
+                    }
+            slack_email = user_meta.user if user_meta else user_email
+            if not slack_email:
+                return None
+
+            try:
+                slack_user = self.slack_app.client.users_lookupByEmail(
+                    email=slack_email
+                )
+            except Exception as e:
+                generate_error_log(
+                    title="Error fetching Slack user",
+                    message=f"User Email: {slack_email}",
+                    exception=e,
+                )
+                return None
+
             return {
                 "id": slack_user.get("user", {}).get("id"),
                 "name": slack_user.get("user", {}).get("name"),
             }
-
-        user_meta = None
-        if check_meta:
-            user_meta = (
-                get_user_meta(user_id=user_email)
-                if user_email
-                else get_user_meta(employee_id=employee_id)
-            )
-            if user_meta and user_meta.custom_slack_userid:
-                return {
-                    "id": user_meta.custom_slack_userid,
-                    "name": user_meta.custom_slack_username,
-                }
-        slack_email = user_meta.user if user_meta else user_email
-        if not slack_email:
-            return None
-
-        try:
-            slack_user = self.slack_app.client.users_lookupByEmail(email=slack_email)
         except Exception as e:
             generate_error_log(
                 title="Error fetching Slack user",
-                message=f"User Email: {slack_email}",
+                message="Please check the user email or employee ID and try again.",
                 exception=e,
             )
             return None
-
-        return {
-            "id": slack_user.get("user", {}).get("id"),
-            "name": slack_user.get("user", {}).get("name"),
-        }
 
     def verify_slack_request(
         self,

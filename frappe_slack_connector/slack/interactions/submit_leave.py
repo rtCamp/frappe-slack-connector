@@ -197,22 +197,6 @@ def format_leave_submission_blocks(
                 {"type": "mrkdwn", "text": f"*Reason:*\n>{reason}"},
             ],
         },
-        {"type": "divider"},
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "action_id": "ignore_leave_view",
-                    "text": {
-                        "type": "plain_text",
-                        "text": "Check Status",
-                        "emoji": True,
-                    },
-                    "url": leave_link,
-                }
-            ],
-        },
     ]
     return blocks
 

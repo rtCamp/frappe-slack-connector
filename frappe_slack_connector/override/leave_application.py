@@ -1,5 +1,6 @@
 import frappe
 from frappe.model.document import Document
+from frappe.utils import get_url_to_form
 
 from frappe_slack_connector.db.leave_application import custom_fields_exist
 from frappe_slack_connector.helpers.error import generate_error_log
@@ -80,6 +81,7 @@ def send_leave_notification_bg(doc: Document):
                 channel=approver_slack,
                 blocks=format_leave_application_blocks(
                     leave_id=doc.name,
+                    leave_link=get_url_to_form("Leave Application", doc.name),
                     employee_name=mention,
                     leave_type=doc.leave_type,
                     leave_submission_date=standard_date_fmt(doc.creation),
@@ -97,6 +99,7 @@ def send_leave_notification_bg(doc: Document):
 
 
 def format_leave_application_blocks(
+    *,
     leave_id: str,
     employee_name: str,
     leave_type: str,
@@ -105,6 +108,7 @@ def format_leave_application_blocks(
     to_date: str,
     reason: str = None,
     employee_link: str = "#",
+    leave_link: str = "#",
 ) -> list:
     """
     Format the blocks for the leave application message
@@ -124,6 +128,15 @@ def format_leave_application_blocks(
                 "type": "mrkdwn",
                 "text": f"{employee_name} has submitted a new leave request.",
             },
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Leave ID:* <{leave_link}|{leave_id}> ",
+                }
+            ],
         },
         {"type": "divider"},
         {

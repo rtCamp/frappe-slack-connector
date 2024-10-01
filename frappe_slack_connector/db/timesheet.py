@@ -5,6 +5,9 @@ from frappe_slack_connector.db.employee import get_employee_from_user
 
 
 def get_employee_working_hours(employee: str = None):
+    """
+    Get the working hours and frequency for the given employee
+    """
     if not employee:
         employee = get_employee_from_user()
     working_hour, working_frequency = frappe.get_value(
@@ -22,6 +25,9 @@ def get_employee_working_hours(employee: str = None):
 
 
 def get_employee_daily_working_norm(employee: str):
+    """
+    Get the daily working norm for the given employee
+    """
     working_details = get_employee_working_hours(employee)
     if working_details.get("working_frequency") != "Per Day":
         return working_details.get("working_hour") / 5
@@ -29,6 +35,9 @@ def get_employee_daily_working_norm(employee: str):
 
 
 def get_reported_time_by_employee(employee: str, date: datetime.date) -> bool:
+    """
+    Get the total reported time by the employee for the given date
+    """
     if_exists = frappe.db.exists(
         "Timesheet",
         {

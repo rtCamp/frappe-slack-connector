@@ -44,9 +44,10 @@ def get_employee_company_email(user_email: str = None):
         return None
 
 
-@frappe.whitelist()
 def get_employee_from_user(user=None):
-
+    """
+    Get the employee doc for the given user
+    """
     user = frappe.session.user
     employee = frappe.db.get_value("Employee", {"user_id": user})
 
@@ -56,11 +57,16 @@ def get_employee_from_user(user=None):
 
 
 def get_user_from_employee(employee: str):
+    """
+    Get the user for the given employee
+    """
     return frappe.get_value("Employee", employee, "user_id")
 
 
-@frappe.whitelist()
 def get_employee(filters=None, fieldname=None):
+    """
+    Get the employee doc for the given filters
+    """
     import json
 
     if not fieldname:
@@ -78,6 +84,9 @@ def get_employee(filters=None, fieldname=None):
 
 
 def check_if_date_is_holiday(date: datetime.date, employee: str) -> bool:
+    """
+    Check if the given date is a holiday for the given employee
+    """
     holiday_list = get_holiday_list_for_employee(employee)
     return frappe.db.exists(
         "Holiday",

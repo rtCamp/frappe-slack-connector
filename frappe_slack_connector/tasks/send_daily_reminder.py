@@ -12,6 +12,10 @@ from frappe_slack_connector.slack.app import SlackIntegration
 
 
 def send_reminder():
+    """
+    Send a reminder to the employees who have not made their daily
+    time entries on the previous day
+    """
     slack = SlackIntegration()
 
     current_date = getdate()

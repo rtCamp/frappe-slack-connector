@@ -146,6 +146,9 @@ doc_events = {
     "Leave Application": {
         "after_insert": "frappe_slack_connector.override.leave_application.after_insert",
     },
+    "Timesheet": {
+        "on_update": "frappe_slack_connector.override.timesheet.on_update",
+    },
 }
 
 # Scheduled Tasks

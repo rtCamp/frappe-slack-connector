@@ -15,6 +15,9 @@ from frappe_slack_connector.slack.interactions.submit_leave import (
 from frappe_slack_connector.slack.interactions.submit_leave import (
     handler as submit_leave_handler,
 )
+from frappe_slack_connector.slack.interactions.submit_timesheet import (
+    handler as submit_timesheet_handler,
+)
 
 
 @frappe.whitelist(allow_guest=True)
@@ -72,6 +75,9 @@ def event():
                 return approve_leave_handler(slack, payload)
 
         elif event_type == "view_submission":
+            if payload["view"]["callback_id"] == "timesheet_modal":
+                return submit_timesheet_handler(slack, payload)
+
             return submit_leave_handler(slack, payload)
 
         else:

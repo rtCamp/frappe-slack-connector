@@ -93,23 +93,17 @@ def build_timesheet_form(projects: list, tasks: list) -> list:
     blocks = [
         {
             "type": "input",
-            "block_id": "project_block",
+            "block_id": "entry_date",
             "element": {
-                "type": "static_select",
-                "action_id": "project_select",
-                "options": [
-                    {
-                        "text": {
-                            "type": "plain_text",
-                            "text": project.get("project_name"),
-                        },
-                        "value": project.get("name"),
-                    }
-                    for project in projects
-                ],
-                "placeholder": {"type": "plain_text", "text": "Enter project name"},
+                "type": "datepicker",
+                "action_id": "date_picker",
+                "placeholder": {
+                    "type": "plain_text",
+                    "text": "Select a date",
+                },
+                "initial_date": frappe.utils.today(),
             },
-            "label": {"type": "plain_text", "text": "Project", "emoji": True},
+            "label": {"type": "plain_text", "text": "Date"},
         },
         {
             "type": "input",
@@ -136,6 +130,26 @@ def build_timesheet_form(projects: list, tasks: list) -> list:
         },
         {
             "type": "input",
+            "block_id": "project_block",
+            "element": {
+                "type": "static_select",
+                "action_id": "project_select",
+                "options": [
+                    {
+                        "text": {
+                            "type": "plain_text",
+                            "text": project.get("project_name"),
+                        },
+                        "value": project.get("name"),
+                    }
+                    for project in projects
+                ],
+                "placeholder": {"type": "plain_text", "text": "Enter project name"},
+            },
+            "label": {"type": "plain_text", "text": "Project", "emoji": True},
+        },
+        {
+            "type": "input",
             "block_id": "hours_block",
             "element": {
                 "type": "number_input",
@@ -145,6 +159,16 @@ def build_timesheet_form(projects: list, tasks: list) -> list:
                 "placeholder": {"type": "plain_text", "text": "Enter hours worked"},
             },
             "label": {"type": "plain_text", "text": "Hours", "emoji": True},
+        },
+        {
+            "type": "input",
+            "block_id": "description",
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "description_input",
+                "multiline": True,
+            },
+            "label": {"type": "plain_text", "text": "Description", "emoji": True},
         },
     ]
     return blocks

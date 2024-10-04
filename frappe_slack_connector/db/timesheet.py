@@ -1,5 +1,5 @@
 import frappe
-from frappe.utils import datetime
+from frappe.utils import datetime, getdate
 
 from frappe_slack_connector.db.employee import get_employee_from_user
 
@@ -61,3 +61,36 @@ def get_reported_time_by_employee(employee: str, date: datetime.date) -> bool:
     for timesheet in timesheets:
         total_hours += timesheet.total_hours
     return total_hours
+
+
+def create_timesheet_detail(
+    date: str,
+    hours: float,
+    description: str,
+    task: str,
+    employee: str,
+    parent: str | None = None,
+):
+    if parent:
+        timesheet = frappe.get_doc("Timesheet", parent)
+    else:
+        timesheet = frappe.get_doc({"doctype": "Timesheet", "employee": employee})
+
+    project, custom_is_billable = frappe.get_value(
+        "Task", task, ["project", "custom_is_billable"]
+    )
+
+    timesheet.update({"parent_project": project})
+    timesheet.append(
+        "time_logs",
+        {
+            "task": task,
+            "hours": hours,
+            "description": description,
+            "from_time": getdate(date),
+            "to_time": getdate(date),
+            "project": project,
+            "is_billable": custom_is_billable,
+        },
+    )
+    timesheet.save(ignore_permissions=True)

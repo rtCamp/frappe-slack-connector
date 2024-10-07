@@ -107,6 +107,26 @@ def build_timesheet_form(projects: list, tasks: list) -> list:
         },
         {
             "type": "input",
+            "block_id": "project_block",
+            "element": {
+                "type": "static_select",
+                "action_id": "project_select",
+                "options": [
+                    {
+                        "text": {
+                            "type": "plain_text",
+                            "text": project.get("project_name"),
+                        },
+                        "value": project.get("name"),
+                    }
+                    for project in projects
+                ],
+                "placeholder": {"type": "plain_text", "text": "Enter project name"},
+            },
+            "label": {"type": "plain_text", "text": "Project", "emoji": True},
+        },
+        {
+            "type": "input",
             "block_id": "task_block",
             "element": {
                 "type": "static_select",
@@ -127,26 +147,6 @@ def build_timesheet_form(projects: list, tasks: list) -> list:
                 },
             },
             "label": {"type": "plain_text", "text": "Task", "emoji": True},
-        },
-        {
-            "type": "input",
-            "block_id": "project_block",
-            "element": {
-                "type": "static_select",
-                "action_id": "project_select",
-                "options": [
-                    {
-                        "text": {
-                            "type": "plain_text",
-                            "text": project.get("project_name"),
-                        },
-                        "value": project.get("name"),
-                    }
-                    for project in projects
-                ],
-                "placeholder": {"type": "plain_text", "text": "Enter project name"},
-            },
-            "label": {"type": "plain_text", "text": "Project", "emoji": True},
         },
         {
             "type": "input",

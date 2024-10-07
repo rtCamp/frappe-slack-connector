@@ -26,6 +26,7 @@ def slash_timesheet():
         if user_email is None:
             raise Exception("User not found on ERP")
 
+        # TODO: Move this to a function in db folder
         projects = frappe.get_all(
             "Project",
             filters={"status": "Open"},
@@ -107,6 +108,7 @@ def build_timesheet_form(projects: list, tasks: list) -> list:
         },
         {
             "type": "input",
+            "dispatch_action": True,
             "block_id": "project_block",
             "element": {
                 "type": "static_select",
@@ -128,6 +130,7 @@ def build_timesheet_form(projects: list, tasks: list) -> list:
         {
             "type": "input",
             "block_id": "task_block",
+            "dispatch_action": True,
             "element": {
                 "type": "static_select",
                 "action_id": "task_select",

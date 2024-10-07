@@ -93,4 +93,4 @@ def create_timesheet_detail(
             "is_billable": custom_is_billable,
         },
     )
-    timesheet.save(ignore_permissions=True)
+    timesheet.save()

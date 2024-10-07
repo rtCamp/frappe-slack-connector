@@ -2,7 +2,10 @@ import frappe
 from frappe.utils import getdate
 
 from frappe_slack_connector.db.timesheet import create_timesheet_detail
-from frappe_slack_connector.db.user_meta import get_employeeid_from_slackid
+from frappe_slack_connector.db.user_meta import (
+    get_employeeid_from_slackid,
+    get_userid_from_slackid,
+)
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.http_response import send_http_response
 from frappe_slack_connector.helpers.str_utils import strip_html_tags
@@ -20,6 +23,9 @@ def handler(slack: SlackIntegration, payload: dict):
         user_info = payload["user"]
         view_state = payload["view"]["state"]["values"]
         employee = get_employeeid_from_slackid(user_info["id"])
+
+        # Set the user performing the action
+        frappe.set_user(get_userid_from_slackid(user_info["id"]))
 
         task = view_state["task_block"]["task_select"]["selected_option"]["value"]
         date = view_state["entry_date"]["date_picker"]["selected_date"]
@@ -46,6 +52,8 @@ def handler(slack: SlackIntegration, payload: dict):
             "view": {
                 "type": "modal",
                 "title": {"type": "plain_text", "text": "Submitted"},
+                "close": {"type": "plain_text", "text": "Close"},
+                "clear_on_close": True,
                 "blocks": [
                     {
                         "type": "header",
@@ -60,13 +68,13 @@ def handler(slack: SlackIntegration, payload: dict):
         }
         return send_http_response(
             body=response,
-            status_code=204,
+            status_code=200,
         )
 
     except Exception as e:
-        generate_error_log(
-            "Error submitting timesheet", exception=frappe.get_traceback()
-        )
+        if not e:
+            e = frappe.get_traceback()
+        generate_error_log("Error submitting timesheet", exception=e)
         response = {
             "response_action": "push",
             "view": {

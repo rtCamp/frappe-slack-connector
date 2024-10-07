@@ -72,9 +72,13 @@ def handler(slack: SlackIntegration, payload: dict):
         )
 
     except Exception as e:
-        if not e:
-            e = frappe.get_traceback()
-        generate_error_log("Error submitting timesheet", exception=e)
+        exc = str(e)
+        if not exc:
+            exc = "There was an error submitting the timesheet. Please check ERP dashboard"
+            generate_error_log(
+                "Error submitting timesheet via Slack", message=frappe.get_traceback()
+            )
+
         response = {
             "response_action": "push",
             "view": {
@@ -94,7 +98,7 @@ def handler(slack: SlackIntegration, payload: dict):
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"*Error Details:*\n```{strip_html_tags(str(e))}```",
+                            "text": f"*Error Details:*\n```{strip_html_tags(exc)}```",
                         },
                     },
                 ],

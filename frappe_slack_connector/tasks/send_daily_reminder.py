@@ -37,10 +37,29 @@ def send_reminder():
         user_slack = slack.get_slack_user_id(employee_id=employee)
         if not user_slack:
             continue
-
         if check_if_date_is_holiday(date, employee.name):
             continue
+
         daily_norm = get_employee_daily_working_norm(employee.name)
+
+        # check if the employee has taken a half-day
+        # and set the daily norm accordingly
+        is_half_day = frappe.db.exists(
+            "Leave Application",
+            {
+                "employee": employee.name,
+                "from_date": ("<=", str(date)),
+                "to_date": (">=", str(date)),
+                "half_day": 1,
+                "status": (
+                    "in",
+                    ["Open", "Approved"],
+                ),
+            },
+        )
+        if is_half_day:
+            daily_norm = daily_norm / 2
+
         hour = get_reported_time_by_employee(employee.name, date)
         if hour >= daily_norm:
             continue

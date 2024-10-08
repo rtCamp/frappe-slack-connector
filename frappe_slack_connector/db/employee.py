@@ -85,13 +85,29 @@ def get_employee(filters=None, fieldname=None):
 
 def check_if_date_is_holiday(date: datetime.date, employee: str) -> bool:
     """
-    Check if the given date is a holiday for the given employee
+    Check if the given date is a non-working day for the given employee
     """
     holiday_list = get_holiday_list_for_employee(employee)
-    return frappe.db.exists(
+    is_holiday = frappe.db.exists(
         "Holiday",
         {
             "holiday_date": date,
             "parent": holiday_list,
         },
     )
+
+    # Check if it's a full-day leave
+    is_leave = frappe.db.exists(
+        "Leave Application",
+        {
+            "employee": employee,
+            "from_date": ("<=", date),
+            "to_date": (">=", date),
+            "half_day": 0,  # This ensures only full day leaves are considered
+            "status": (
+                "in",
+                ["Open", "Approved"],
+            ),
+        },
+    )
+    return any((is_holiday, is_leave))

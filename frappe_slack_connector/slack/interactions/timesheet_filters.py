@@ -49,6 +49,7 @@ def handle_timesheet_filter(slack: SlackIntegration, payload: dict):
 def handle_project_select(slack: SlackIntegration, payload: dict):
     """
     Handle the project selection interaction
+    Update the task block with the tasks for the selected project
     """
     view = payload["view"]
     state = view["state"]["values"]
@@ -65,6 +66,7 @@ def handle_project_select(slack: SlackIntegration, payload: dict):
         ignore_permissions=True,
     )
 
+    # If no tasks found for the project, show an error message
     if not tasks:
         slack.slack_app.client.views_push(
             trigger_id=payload["trigger_id"],
@@ -94,6 +96,7 @@ def handle_project_select(slack: SlackIntegration, payload: dict):
         )
         return
 
+    # Update the task block with the tasks for the selected project
     for block in blocks:
         if block["block_id"] == "task_block":
             block["element"]["options"] = [
@@ -128,6 +131,8 @@ def handle_project_select(slack: SlackIntegration, payload: dict):
 def handle_task_select(slack: SlackIntegration, payload: dict):
     """
     Handle the task selection interaction
+    Set the project block with the project for the selected task
+    Required when the project is not selected, directly selecting the task
     """
     view = payload["view"]
     state = view["state"]["values"]
@@ -139,6 +144,7 @@ def handle_task_select(slack: SlackIntegration, payload: dict):
         "Project", project, ["name", "project_name"]
     )
 
+    # Set the initial project option in the project block
     for block in blocks:
         if block["block_id"] == "project_block":
             block["element"]["initial_option"] = {

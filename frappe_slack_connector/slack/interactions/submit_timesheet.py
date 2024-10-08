@@ -15,6 +15,7 @@ from frappe_slack_connector.slack.app import SlackIntegration
 def handler(slack: SlackIntegration, payload: dict):
     """
     Handle the timesheet submission interaction
+    Save the timesheet details in the user's timesheet
     """
     if not payload:
         frappe.throw("No payload found", frappe.ValidationError)

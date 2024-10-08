@@ -91,6 +91,11 @@ def slash_timesheet():
 
 
 def build_timesheet_form(projects: list, tasks: list) -> list:
+    """
+    Build the form for the timesheet modal
+    Provide options for project and task
+    """
+
     blocks = [
         {
             "type": "input",

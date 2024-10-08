@@ -16,20 +16,16 @@ def send_reminder():
     Send a reminder to the employees who have not made their daily
     time entries on the previous day
     """
-    slack = SlackIntegration()
+    slack_settings = frappe.get_single("Slack Settings")
+    if not slack_settings.timesheet_previousday_reminder:
+        return
 
+    slack = SlackIntegration()
     current_date = getdate()
     date = add_days(current_date, -1)
 
-    reminder_template_name = frappe.db.get_single_value(
-        fieldname="reminder_template", doctype="Slack Settings"
-    )
-
-    reminder_template = frappe.get_doc("Email Template", reminder_template_name)
-    employees = frappe.get_all(
-        "Employee",
-        filters={"status": "Active"},
-        fields="*",
+    reminder_template = frappe.get_doc(
+        "Email Template", slack_settings.reminder_template
     )
     employees = frappe.get_all(
         "Employee",

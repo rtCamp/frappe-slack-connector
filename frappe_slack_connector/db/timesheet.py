@@ -4,7 +4,7 @@ from frappe.utils import datetime
 from frappe_slack_connector.db.employee import get_employee_from_user
 
 
-def get_employee_working_hours(employee: str = None):
+def get_employee_working_hours(employee: str = None) -> dict:
     """
     Get the working hours and frequency for the given employee
     """
@@ -24,7 +24,7 @@ def get_employee_working_hours(employee: str = None):
     return {"working_hour": working_hour or 8, "working_frequency": working_frequency}
 
 
-def get_employee_daily_working_norm(employee: str):
+def get_employee_daily_working_norm(employee: str) -> int:
     """
     Get the daily working norm for the given employee
     """
@@ -34,7 +34,7 @@ def get_employee_daily_working_norm(employee: str):
     return working_details.get("working_hour")
 
 
-def get_reported_time_by_employee(employee: str, date: datetime.date) -> bool:
+def get_reported_time_by_employee(employee: str, date: datetime.date) -> int:
     """
     Get the total reported time by the employee for the given date
     """

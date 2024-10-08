@@ -59,16 +59,26 @@ def get_user_meta(*, user_id: str = None, employee_id: str = None) -> dict | Non
         return None
 
 
+def get_userid_from_slackid(slack_user_id: str) -> str | None:
+    """
+    Get the Frappe User ID for the given Slack User ID.
+    """
+    user_meta = frappe.get_doc("User Meta", {"custom_slack_userid": slack_user_id})
+    if not user_meta or not user_meta.user:
+        return None
+    return user_meta.user
+
+
 def get_employeeid_from_slackid(slack_user_id: str) -> str | None:
     """
     Get the Employee ID for the given Slack User ID.
     """
     try:
-        user_meta = frappe.get_doc("User Meta", {"custom_slack_userid": slack_user_id})
-        if not user_meta or not user_meta.user:
+        userid = get_userid_from_slackid(slack_user_id)
+        if userid is None:
             return None
         # get the employee id from employee doctype
-        employee_id = frappe.get_value("Employee", {"user_id": user_meta.user}, "name")
+        employee_id = frappe.get_value("Employee", {"user_id": userid}, "name")
         return employee_id
     except Exception as e:
         generate_error_log(

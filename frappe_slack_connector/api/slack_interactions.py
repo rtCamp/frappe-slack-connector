@@ -15,6 +15,12 @@ from frappe_slack_connector.slack.interactions.submit_leave import (
 from frappe_slack_connector.slack.interactions.submit_leave import (
     handler as submit_leave_handler,
 )
+from frappe_slack_connector.slack.interactions.submit_timesheet import (
+    handler as submit_timesheet_handler,
+)
+from frappe_slack_connector.slack.interactions.timesheet_filters import (
+    handle_timesheet_filter,
+)
 
 
 @frappe.whitelist(allow_guest=True)
@@ -68,10 +74,15 @@ def event():
                 return
             elif block_id == "half_day_checkbox":
                 return half_day_checkbox_handler(slack, payload)
+            elif block_id in ("project_block", "task_block"):
+                return handle_timesheet_filter(slack, payload)
             else:
                 return approve_leave_handler(slack, payload)
 
         elif event_type == "view_submission":
+            if payload["view"]["callback_id"] == "timesheet_modal":
+                return submit_timesheet_handler(slack, payload)
+
             return submit_leave_handler(slack, payload)
 
         else:

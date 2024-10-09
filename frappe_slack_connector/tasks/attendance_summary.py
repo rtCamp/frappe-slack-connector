@@ -15,7 +15,6 @@ from frappe_slack_connector.helpers.standard_date import standard_date_fmt
 from frappe_slack_connector.slack.app import SlackIntegration
 
 
-@frappe.whitelist()
 def attendance_channel() -> None:
     """
     Server script to post the attendance summary to the Slack channel

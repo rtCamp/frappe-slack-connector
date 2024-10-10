@@ -40,6 +40,11 @@ def slash_timesheet():
             ignore_permissions=True,
         )
 
+        if not projects:
+            raise Exception("No projects found")
+        if not tasks:
+            raise Exception("No tasks found")
+
         slack.slack_app.client.views_open(
             trigger_id=frappe.form_dict.get("trigger_id"),
             view={

@@ -23,7 +23,6 @@
   "last_attendance_msg_ts",
   "timesheet_notifications_section",
   "timesheet_previousday_reminder",
-  "timesheet_submission_notification",
   "reminder_template"
  ],
  "fields": [
@@ -132,13 +131,6 @@
    "label": "Send previous day reminder to fill the timesheet"
   },
   {
-   "default": "0",
-   "description": "Enable sending a notification when a timesheet is submitted for approval.",
-   "fieldname": "timesheet_submission_notification",
-   "fieldtype": "Check",
-   "label": "Send notification on Timesheet submitted for Approval"
-  },
-  {
    "description": "The template to use for sending reminder notifications to user who hasn't filled up their timesheet",
    "fieldname": "reminder_template",
    "fieldtype": "Link",
@@ -149,7 +141,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2024-10-01 15:40:50.633662",
+ "modified": "2024-10-11 13:59:31.633141",
  "modified_by": "Administrator",
  "module": "Frappe Slack Connector",
  "name": "Slack Settings",

@@ -3,7 +3,7 @@ from datetime import datetime
 import frappe
 from erpnext.setup.doctype.holiday_list.holiday_list import is_holiday
 from frappe import _
-from frappe.utils import get_time, getdate
+from frappe.utils import get_time, getdate, today
 
 from frappe_slack_connector.db.leave_application import (
     custom_fields_exist,
@@ -117,7 +117,9 @@ def get_leave_type(user_application: dict) -> str:
     so only use Full Day, and Half Day
     For rtCamp installation, use Full Day, First-Half, and Second-Half
     """
-    if not user_application.half_day:
+    if not user_application.half_day or user_application.half_day_date != getdate(
+        today()
+    ):
         return "Full Day"
     elif not custom_fields_exist():
         return "Half Day"

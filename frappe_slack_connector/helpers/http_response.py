@@ -19,6 +19,8 @@ def send_http_response(
     """
     # Clear existing messages
     clear_messages()
+    if frappe.flags.error_message:
+        frappe.flags.error_message = None
 
     # Set the status code
     frappe.response["http_status_code"] = status_code

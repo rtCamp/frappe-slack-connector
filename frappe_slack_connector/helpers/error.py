@@ -13,7 +13,7 @@ def generate_error_log(
     Generate an error log with the given title and message
     """
     frappe.log_error(
-        title=title,
+        title="Slack: " + title,
         message=f"{message}\nException:\n{str(exception)}" if exception else message,
     )
 

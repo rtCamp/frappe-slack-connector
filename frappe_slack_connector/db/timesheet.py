@@ -4,6 +4,40 @@ from frappe.utils import datetime, getdate
 from frappe_slack_connector.db.employee import get_employee_from_user
 
 
+def get_user_projects(user: str, limit: int = 90) -> list:
+    """
+    Get the projects for the given user
+    """
+    return frappe.get_list(
+        "Project",
+        filters={"status": "Open"},
+        fields=["name", "project_name"],
+        user=user,
+        limit=limit,
+    )
+
+
+def get_user_tasks(
+    user: str,
+    project: str | None = None,
+    limit: int = 90,
+) -> list:
+    """
+    Get the tasks for the given user
+    """
+    filters = {"status": ["not in", ["Completed", "Cancelled"]]}
+    if project:
+        filters["project"] = project
+
+    return frappe.get_list(
+        "Task",
+        user=user,
+        filters=filters,
+        fields=["name", "subject"],
+        limit=limit,
+    )
+
+
 def get_employee_working_hours(employee: str = None) -> dict:
     """
     Get the working hours and frequency for the given employee

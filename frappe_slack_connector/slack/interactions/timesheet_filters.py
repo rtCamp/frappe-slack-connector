@@ -1,5 +1,6 @@
 import frappe
 
+from frappe_slack_connector.db.timesheet import get_user_tasks
 from frappe_slack_connector.db.user_meta import get_userid_from_slackid
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.str_utils import strip_html_tags
@@ -17,7 +18,12 @@ def handle_timesheet_filter(slack: SlackIntegration, payload: dict):
         elif action_id == "task_select":
             return handle_task_select(slack, payload)
     except Exception as e:
-        generate_error_log("Error submitting timesheet", exception=e)
+        exc = str(e)
+        if not exc:
+            exc = "There was an error. Please check ERP dashboard"
+            generate_error_log(
+                "Error getting projects for timesheet", message=frappe.get_traceback()
+            )
         slack.slack_app.client.views_push(
             trigger_id=payload["trigger_id"],
             view={
@@ -38,7 +44,7 @@ def handle_timesheet_filter(slack: SlackIntegration, payload: dict):
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"```{strip_html_tags(str(e))}```",
+                            "text": f"```{strip_html_tags(exc)}```",
                         },
                     },
                 ],
@@ -58,13 +64,7 @@ def handle_project_select(slack: SlackIntegration, payload: dict):
     user = get_userid_from_slackid(payload["user"]["id"])
 
     project = state["project_block"]["project_select"]["selected_option"]["value"]
-    tasks = frappe.get_list(
-        "Task",
-        user=user,
-        filters={"project": project},
-        fields=["name", "subject"],
-        ignore_permissions=True,
-    )
+    tasks = get_user_tasks(user, project)
 
     # If no tasks found for the project, show an error message
     if not tasks:

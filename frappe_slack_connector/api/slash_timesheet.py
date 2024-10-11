@@ -1,5 +1,6 @@
 import frappe
 
+from frappe_slack_connector.db.timesheet import get_user_projects, get_user_tasks
 from frappe_slack_connector.db.user_meta import get_userid_from_slackid
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.http_response import send_http_response
@@ -26,20 +27,8 @@ def slash_timesheet():
         if user_email is None:
             raise Exception("User not found on ERP")
 
-        # TODO: Move this to a function in db folder
-        projects = frappe.get_all(
-            "Project",
-            filters={"status": "Open"},
-            fields=["name", "project_name"],
-            user=user_email,
-        )
-        tasks = frappe.get_list(
-            "Task",
-            user=user_email,
-            fields=["name", "subject"],
-            ignore_permissions=True,
-        )
-
+        projects = get_user_projects(user_email)
+        tasks = get_user_tasks(user_email)
         if not projects:
             raise Exception("No projects found")
         if not tasks:

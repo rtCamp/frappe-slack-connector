@@ -51,6 +51,8 @@ def slash_timesheet():
 
     except Exception as e:
         generate_error_log("Error opening modal", exception=e)
+        exc = str(e) if str(e) else "There was an error opening the timesheet modal"
+
         slack.slack_app.client.views_open(
             trigger_id=frappe.form_dict.get("trigger_id"),
             view={
@@ -71,7 +73,7 @@ def slash_timesheet():
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"*Error Details:*\n```{str(e)}```",
+                            "text": f"*Error Details:*\n```{exc}```",
                         },
                     },
                 ],

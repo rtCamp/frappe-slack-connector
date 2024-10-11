@@ -12,6 +12,7 @@ def get_user_projects(user: str, limit: int = 90) -> list:
         "Project",
         filters={"status": "Open"},
         fields=["name", "project_name"],
+        order_by="modified desc",
         user=user,
         limit=limit,
     )
@@ -34,6 +35,7 @@ def get_user_tasks(
         user=user,
         filters=filters,
         fields=["name", "subject"],
+        order_by="modified desc",
         limit=limit,
     )
 

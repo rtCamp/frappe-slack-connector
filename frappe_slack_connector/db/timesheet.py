@@ -7,9 +7,7 @@ from frappe_slack_connector.db.employee import get_employee_from_user
 def get_user_projects(user: str, limit: int | None = 90) -> list:
     """
     Get the projects for the given user
-    NOTE: `set_user()` will effectively wipe out frappe.form_dict
     """
-    frappe.set_user(user)
     projects = frappe.get_list(
         "Project",
         filters={"status": "Open"},
@@ -28,9 +26,7 @@ def get_user_tasks(
 ) -> list:
     """
     Get the tasks for the given user
-    NOTE: `set_user()` will effectively wipe out frappe.form_dict
     """
-    frappe.set_user(user)
     if project:
         return frappe.get_list(
             "Task",

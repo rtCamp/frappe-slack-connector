@@ -9,9 +9,13 @@ from frappe_slack_connector.slack.app import SlackIntegration
 
 def handle_timesheet_filter(slack: SlackIntegration, payload: dict):
     """
-    Handle the timesheet submission interaction
+    Handle the timesheet project and task selection interactions
     """
     try:
+        user = get_userid_from_slackid(payload["user"]["id"])
+        # NOTE: `set_user()` will effectively wipe out frappe.form_dict
+        frappe.set_user(user)
+
         action_id = payload["actions"][0]["action_id"]
         if action_id == "project_select":
             return handle_project_select(slack, payload)

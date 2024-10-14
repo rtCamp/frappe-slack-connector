@@ -30,6 +30,8 @@ def slash_timesheet():
         if user_email is None:
             raise Exception("User not found on ERP")
 
+        # NOTE: `set_user()` will effectively wipe out frappe.form_dict
+        frappe.set_user(user_email)
         projects = get_user_projects(user_email)
         tasks = get_user_tasks(user_email)
 

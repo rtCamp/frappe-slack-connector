@@ -1,5 +1,6 @@
 import frappe
 
+from frappe_slack_connector.db.timesheet import get_user_projects, get_user_tasks
 from frappe_slack_connector.db.user_meta import get_userid_from_slackid
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.http_response import send_http_response
@@ -13,6 +14,9 @@ def slash_timesheet():
     Slash command: /timesheet
     """
     slack = SlackIntegration()
+    slack_userid = frappe.form_dict.get("user_id")
+    slack_trigger_id = frappe.form_dict.get("trigger_id")
+
     try:
         slack.verify_slack_request(
             signature=frappe.request.headers.get("X-Slack-Signature"),
@@ -22,23 +26,14 @@ def slash_timesheet():
     except Exception:
         return send_http_response("Invalid request", status_code=403)
     try:
-        user_email = get_userid_from_slackid(frappe.form_dict.get("user_id"))
+        user_email = get_userid_from_slackid(slack_userid)
         if user_email is None:
             raise Exception("User not found on ERP")
 
-        # TODO: Move this to a function in db folder
-        projects = frappe.get_all(
-            "Project",
-            filters={"status": "Open"},
-            fields=["name", "project_name"],
-            user=user_email,
-        )
-        tasks = frappe.get_list(
-            "Task",
-            user=user_email,
-            fields=["name", "subject"],
-            ignore_permissions=True,
-        )
+        # NOTE: `set_user()` will effectively wipe out frappe.form_dict
+        frappe.set_user(user_email)
+        projects = get_user_projects(user_email)
+        tasks = get_user_tasks(user_email)
 
         if not projects:
             raise Exception("No projects found")
@@ -46,7 +41,7 @@ def slash_timesheet():
             raise Exception("No tasks found")
 
         slack.slack_app.client.views_open(
-            trigger_id=frappe.form_dict.get("trigger_id"),
+            trigger_id=slack_trigger_id,
             view={
                 "type": "modal",
                 "callback_id": "timesheet_modal",
@@ -62,8 +57,10 @@ def slash_timesheet():
 
     except Exception as e:
         generate_error_log("Error opening modal", exception=e)
+        exc = str(e) if str(e) else "There was an error opening the timesheet modal"
+
         slack.slack_app.client.views_open(
-            trigger_id=frappe.form_dict.get("trigger_id"),
+            trigger_id=slack_trigger_id,
             view={
                 "type": "modal",
                 "callback_id": "timesheet_error",
@@ -82,7 +79,7 @@ def slash_timesheet():
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"*Error Details:*\n```{str(e)}```",
+                            "text": f"*Error Details:*\n```{exc}```",
                         },
                     },
                 ],

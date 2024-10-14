@@ -14,6 +14,9 @@ def slash_timesheet():
     Slash command: /timesheet
     """
     slack = SlackIntegration()
+    slack_userid = frappe.form_dict.get("user_id")
+    slack_trigger_id = frappe.form_dict.get("trigger_id")
+
     try:
         slack.verify_slack_request(
             signature=frappe.request.headers.get("X-Slack-Signature"),
@@ -23,7 +26,7 @@ def slash_timesheet():
     except Exception:
         return send_http_response("Invalid request", status_code=403)
     try:
-        user_email = get_userid_from_slackid(frappe.form_dict.get("user_id"))
+        user_email = get_userid_from_slackid(slack_userid)
         if user_email is None:
             raise Exception("User not found on ERP")
 
@@ -36,7 +39,7 @@ def slash_timesheet():
             raise Exception("No tasks found")
 
         slack.slack_app.client.views_open(
-            trigger_id=frappe.form_dict.get("trigger_id"),
+            trigger_id=slack_trigger_id,
             view={
                 "type": "modal",
                 "callback_id": "timesheet_modal",
@@ -55,7 +58,7 @@ def slash_timesheet():
         exc = str(e) if str(e) else "There was an error opening the timesheet modal"
 
         slack.slack_app.client.views_open(
-            trigger_id=frappe.form_dict.get("trigger_id"),
+            trigger_id=slack_trigger_id,
             view={
                 "type": "modal",
                 "callback_id": "timesheet_error",

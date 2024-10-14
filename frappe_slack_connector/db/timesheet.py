@@ -7,24 +7,18 @@ from frappe_slack_connector.db.employee import get_employee_from_user
 def get_user_projects(user: str, limit: int | None = 90) -> list:
     """
     Get the projects for the given user
+    NOTE: `set_user()` will effectively wipe out frappe.form_dict
     """
-    projects = frappe.get_all(
+    frappe.set_user(user)
+    projects = frappe.get_list(
         "Project",
         filters={"status": "Open"},
         fields=["name", "project_name"],
         order_by="modified desc",
+        limit=limit,
     )
 
-    # Filter projects based on user permissions
-    user_projects = list(
-        filter(
-            lambda project: frappe.has_permission(
-                "Project", "read", project["name"], user=user
-            ),
-            projects,
-        )
-    )
-    return user_projects[:limit] if limit else user_projects
+    return projects
 
 
 def get_user_tasks(
@@ -34,9 +28,11 @@ def get_user_tasks(
 ) -> list:
     """
     Get the tasks for the given user
+    NOTE: `set_user()` will effectively wipe out frappe.form_dict
     """
+    frappe.set_user(user)
     if project:
-        return frappe.get_all(
+        return frappe.get_list(
             "Task",
             filters={
                 "status": ["not in", ["Completed", "Cancelled"]],
@@ -47,17 +43,10 @@ def get_user_tasks(
             limit=limit,
         )
 
-    # Get projects for the user
-    user_projects = get_user_projects(user)
-
-    # Extract project names
-    project_names = [project.name for project in user_projects]
-
     # Get tasks for these projects
-    tasks = frappe.get_all(
+    tasks = frappe.get_list(
         "Task",
         filters=[
-            ["project", "in", project_names],
             ["status", "not in", ["Completed", "Cancelled"]],
         ],
         fields=["name", "subject"],

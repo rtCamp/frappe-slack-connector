@@ -29,6 +29,7 @@ def slash_timesheet():
 
         projects = get_user_projects(user_email)
         tasks = get_user_tasks(user_email)
+
         if not projects:
             raise Exception("No projects found")
         if not tasks:

@@ -4,18 +4,27 @@ from frappe.utils import datetime, getdate
 from frappe_slack_connector.db.employee import get_employee_from_user
 
 
-def get_user_projects(user: str, limit: int = 90) -> list:
+def get_user_projects(user: str, limit: int | None = 90) -> list:
     """
     Get the projects for the given user
     """
-    return frappe.get_list(
+    projects = frappe.get_all(
         "Project",
         filters={"status": "Open"},
         fields=["name", "project_name"],
         order_by="modified desc",
-        user=user,
-        limit=limit,
     )
+
+    # Filter projects based on user permissions
+    user_projects = list(
+        filter(
+            lambda project: frappe.has_permission(
+                "Project", "read", project["name"], user=user
+            ),
+            projects,
+        )
+    )
+    return user_projects[:limit] if limit else user_projects
 
 
 def get_user_tasks(
@@ -26,18 +35,37 @@ def get_user_tasks(
     """
     Get the tasks for the given user
     """
-    filters = {"status": ["not in", ["Completed", "Cancelled"]]}
     if project:
-        filters["project"] = project
+        return frappe.get_all(
+            "Task",
+            filters={
+                "status": ["not in", ["Completed", "Cancelled"]],
+                "project": project,
+            },
+            fields=["name", "subject"],
+            order_by="modified desc",
+            limit=limit,
+        )
 
-    return frappe.get_list(
+    # Get projects for the user
+    user_projects = get_user_projects(user)
+
+    # Extract project names
+    project_names = [project.name for project in user_projects]
+
+    # Get tasks for these projects
+    tasks = frappe.get_all(
         "Task",
-        user=user,
-        filters=filters,
+        filters=[
+            ["project", "in", project_names],
+            ["status", "not in", ["Completed", "Cancelled"]],
+        ],
         fields=["name", "subject"],
         order_by="modified desc",
         limit=limit,
     )
+
+    return tasks
 
 
 def get_employee_working_hours(employee: str = None) -> dict:

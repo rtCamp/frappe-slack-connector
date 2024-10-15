@@ -4,6 +4,7 @@ from frappe_slack_connector.db.timesheet import get_user_projects, get_user_task
 from frappe_slack_connector.db.user_meta import get_userid_from_slackid
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.http_response import send_http_response
+from frappe_slack_connector.helpers.str_utils import truncate_text
 from frappe_slack_connector.slack.app import SlackIntegration
 
 
@@ -124,7 +125,8 @@ def build_timesheet_form(projects: list, tasks: list) -> list:
                     {
                         "text": {
                             "type": "plain_text",
-                            "text": project.get("project_name"),
+                            # Limit the text to 75 characters
+                            "text": truncate_text(project.get("project_name")),
                         },
                         "value": project.get("name"),
                     }
@@ -145,7 +147,10 @@ def build_timesheet_form(projects: list, tasks: list) -> list:
                     {
                         "text": {
                             "type": "plain_text",
-                            "text": task.get("subject"),
+                            # Limit the text to 75 characters
+                            "text": truncate_text(
+                                task.get("subject", task.get("name", ""))
+                            ),
                         },
                         "value": task.get("name"),
                     }

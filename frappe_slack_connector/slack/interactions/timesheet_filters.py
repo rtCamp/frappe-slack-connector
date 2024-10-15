@@ -3,7 +3,7 @@ import frappe
 from frappe_slack_connector.db.timesheet import get_user_tasks
 from frappe_slack_connector.db.user_meta import get_userid_from_slackid
 from frappe_slack_connector.helpers.error import generate_error_log
-from frappe_slack_connector.helpers.str_utils import strip_html_tags
+from frappe_slack_connector.helpers.str_utils import strip_html_tags, truncate_text
 from frappe_slack_connector.slack.app import SlackIntegration
 
 
@@ -107,7 +107,8 @@ def handle_project_select(slack: SlackIntegration, payload: dict):
                 {
                     "text": {
                         "type": "plain_text",
-                        "text": task.get("subject"),
+                        # Limit the task subject to 75 characters
+                        "text": truncate_text(task.get("subject")),
                     },
                     "value": task.get("name"),
                 }
@@ -154,7 +155,7 @@ def handle_task_select(slack: SlackIntegration, payload: dict):
             block["element"]["initial_option"] = {
                 "text": {
                     "type": "plain_text",
-                    "text": project_name,
+                    "text": truncate_text(project_name),
                 },
                 "value": project_id,
             }

@@ -40,6 +40,11 @@ def slash_timesheet():
         if not tasks:
             raise Exception("No tasks found")
 
+        if not projects:
+            raise Exception("No projects found")
+        if not tasks:
+            raise Exception("No tasks found")
+
         slack.slack_app.client.views_open(
             trigger_id=slack_trigger_id,
             view={

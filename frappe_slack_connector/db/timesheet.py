@@ -4,7 +4,8 @@ from frappe.utils import datetime, getdate
 from frappe_slack_connector.db.employee import get_employee_from_user
 
 
-def get_user_projects(user: str, limit: int | None = 90) -> list:
+# NOTE: Slack supports a maximum of 100 options in a select menu
+def get_user_projects(user: str, limit: int | None = 99) -> list:
     """
     Get the projects for the given user
     """
@@ -22,7 +23,7 @@ def get_user_projects(user: str, limit: int | None = 90) -> list:
 def get_user_tasks(
     user: str,
     project: str | None = None,
-    limit: int = 90,
+    limit: int = 99,
 ) -> list:
     """
     Get the tasks for the given user

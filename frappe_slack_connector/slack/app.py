@@ -15,6 +15,8 @@ from frappe_slack_connector.helpers.error import generate_error_log
 
 
 class SlackIntegration:
+    SLACK_CHAR_LIMIT = 75
+
     def __init__(self):
         """
         Initialize the Slack Integration instance

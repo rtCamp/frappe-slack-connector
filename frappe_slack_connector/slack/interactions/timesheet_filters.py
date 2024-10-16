@@ -145,9 +145,12 @@ def handle_task_select(slack: SlackIntegration, payload: dict):
 
     task = state["task_block"]["task_select"]["selected_option"]["value"]
     project = frappe.get_value("Task", task, "project")
-    project_id, project_name = frappe.get_value(
-        "Project", project, ["name", "project_name"]
-    )
+    project_fields = frappe.get_value("Project", project, ["name", "project_name"])
+
+    if project_fields is None:
+        raise Exception("Project not found for the task")
+
+    project_id, project_name = project_fields
 
     # Set the initial project option in the project block
     for block in blocks:

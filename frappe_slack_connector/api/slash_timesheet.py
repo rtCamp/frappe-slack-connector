@@ -153,6 +153,10 @@ def build_timesheet_form(projects: list, tasks: list) -> list:
                             ),
                         },
                         "value": task.get("name"),
+                        "description": {
+                            "type": "plain_text",
+                            "text": truncate_text(task.get("name")),
+                        },
                     }
                     for task in tasks
                 ],

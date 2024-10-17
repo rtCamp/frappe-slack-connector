@@ -1,5 +1,7 @@
 import re
 
+from frappe_slack_connector.slack.app import SlackIntegration
+
 
 def strip_html_tags(text):
     """
@@ -12,3 +14,10 @@ def strip_html_tags(text):
     clean_text = re.sub(pattern, "", text)
 
     return clean_text
+
+
+def truncate_text(text, limit=SlackIntegration.SLACK_CHAR_LIMIT):
+    """
+    Truncate the text to the given limit
+    """
+    return text[:limit]

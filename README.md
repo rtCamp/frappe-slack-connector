@@ -50,8 +50,8 @@ Please refer to our [Wiki](https://github.com/rtCamp/frappe-slack-connector/wiki
 
 ## Contribution Guide
 
-Please read [contribution.md](./CONTRIBUTING.md) for details.
+Please read [CONTRIBUTING.md](./CONTRIBUTING.md) for details.
 
 ## License
 
-This project is licensed under the [AGPLv3 License](license.txt).
+This project is licensed under the [AGPLv3 License](./LICENSE).

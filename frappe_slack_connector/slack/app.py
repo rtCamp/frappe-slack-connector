@@ -1,4 +1,5 @@
 import frappe
+from frappe import _
 from slack_bolt import App
 
 from frappe_slack_connector.db.user_meta import get_user_meta
@@ -57,9 +58,7 @@ class SlackIntegration:
             try:
                 # Make API call with cursor if it exists
                 if cursor:
-                    result = self.slack_app.client.users_list(
-                        limit=limit, cursor=cursor
-                    )
+                    result = self.slack_app.client.users_list(limit=limit, cursor=cursor)
                 else:
                     result = self.slack_app.client.users_list(limit=limit)
 
@@ -67,12 +66,7 @@ class SlackIntegration:
 
                 for user in users:
                     email = user.get("profile", {}).get("email")
-                    if (
-                        email is None
-                        or user["deleted"]
-                        or user["is_bot"]
-                        or user["is_app_user"]
-                    ):
+                    if email is None or user["deleted"] or user["is_bot"] or user["is_app_user"]:
                         continue
                     user_dict[email] = {
                         "id": user["id"],
@@ -96,8 +90,8 @@ class SlackIntegration:
 
     def get_slack_user(
         self,
-        user_email: str = None,
-        employee_id: str = None,
+        user_email: str | None = None,
+        employee_id: str | None = None,
         check_meta: bool = True,
         from_api: bool = False,
     ) -> dict | None:
@@ -133,11 +127,7 @@ class SlackIntegration:
 
             user_meta = None
             if check_meta:
-                user_meta = (
-                    get_user_meta(user_id=user_email)
-                    if user_email
-                    else get_user_meta(employee_id=employee_id)
-                )
+                user_meta = get_user_meta(user_id=user_email) if user_email else get_user_meta(employee_id=employee_id)
                 if user_meta and user_meta.custom_slack_userid:
                     return {
                         "id": user_meta.custom_slack_userid,
@@ -148,9 +138,7 @@ class SlackIntegration:
                 return None
 
             try:
-                slack_user = self.slack_app.client.users_lookupByEmail(
-                    email=slack_email
-                )
+                slack_user = self.slack_app.client.users_lookupByEmail(email=slack_email)
             except Exception as e:
                 generate_error_log(
                     title="Error fetching Slack user",
@@ -185,27 +173,22 @@ class SlackIntegration:
         if abs(time.time() - int(timestamp)) > 60 * 5:
             generate_error_log(
                 title="Slack Timestamp verification failed",
-                msgprint="Request is too old",
+                msgprint=_("Request is too old"),
             )
-            frappe.throw("Request is too old", frappe.PermissionError)
+            frappe.throw(_("Request is too old"), frappe.PermissionError)
 
         # Create the signature base string
         sig_basestring = f"v0:{timestamp}:{req_data}"
 
         # Compute the hash using your Slack signing secret
         request_signature = (
-            "v0="
-            + hmac.new(
-                self.SLACK_SIGNATURE.encode(), sig_basestring.encode(), hashlib.sha256
-            ).hexdigest()
+            "v0=" + hmac.new(self.SLACK_SIGNATURE.encode(), sig_basestring.encode(), hashlib.sha256).hexdigest()
         )
 
         # Compare the computed signature with the received signature
         if not hmac.compare_digest(request_signature, signature):
-            generate_error_log(
-                title="Slack Signature verification failed", message="Slack Event"
-            )
-            frappe.throw("Invalid request signature", frappe.PermissionError)
+            generate_error_log(title="Slack Signature verification failed", message="Slack Event")
+            frappe.throw(_("Invalid request signature"), frappe.PermissionError)
 
     def get_slack_user_id(self, *args, **kwargs) -> str | None:
         """

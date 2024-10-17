@@ -18,7 +18,7 @@ def handler(slack: SlackIntegration, payload: dict):
     Save the timesheet details in the user's timesheet
     """
     if not payload:
-        frappe.throw("No payload found", frappe.ValidationError)
+        frappe.throw(frappe._("No payload found"), frappe.ValidationError)
 
     try:
         user_info = payload["user"]
@@ -76,9 +76,7 @@ def handler(slack: SlackIntegration, payload: dict):
         exc = str(e)
         if not exc:
             exc = "There was an error submitting the timesheet. Please check ERP dashboard"
-            generate_error_log(
-                "Error submitting timesheet via Slack", message=frappe.get_traceback()
-            )
+            generate_error_log("Error submitting timesheet via Slack", message=frappe.get_traceback())
 
         response = {
             "response_action": "push",

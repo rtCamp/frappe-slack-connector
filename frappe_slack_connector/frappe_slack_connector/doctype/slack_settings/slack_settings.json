@@ -23,7 +23,8 @@
   "last_attendance_msg_ts",
   "timesheet_notifications_section",
   "timesheet_previousday_reminder",
-  "reminder_template"
+  "reminder_template",
+  "allowed_departments"
  ],
  "fields": [
   {
@@ -136,12 +137,21 @@
    "fieldtype": "Link",
    "label": "Reminder Template",
    "options": "Email Template"
+  },
+  {
+   "depends_on": "eval:doc.timesheet_previousday_reminder",
+   "description": "This field will be used to filter the employee based on department to whom the Daily reminder will be sent.",
+   "fieldname": "allowed_departments",
+   "fieldtype": "Table MultiSelect",
+   "label": "Allowed Departments",
+   "mandatory_depends_on": "eval:doc.timesheet_previousday_reminder",
+   "options": "Slack Department"
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2024-10-11 13:59:31.633141",
+ "modified": "2024-10-17 13:24:47.318263",
  "modified_by": "Administrator",
  "module": "Frappe Slack Connector",
  "name": "Slack Settings",

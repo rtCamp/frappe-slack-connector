@@ -2,10 +2,7 @@ import frappe
 from frappe.utils import add_days, getdate
 
 from frappe_slack_connector.db.employee import check_if_date_is_holiday
-from frappe_slack_connector.db.timesheet import (
-    get_employee_daily_working_norm,
-    get_reported_time_by_employee,
-)
+from frappe_slack_connector.db.timesheet import get_employee_daily_working_norm, get_reported_time_by_employee
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
 from frappe_slack_connector.slack.app import SlackIntegration
@@ -24,12 +21,11 @@ def send_reminder():
     current_date = getdate()
     date = add_days(current_date, -1)
 
-    reminder_template = frappe.get_doc(
-        "Email Template", slack_settings.reminder_template
-    )
+    reminder_template = frappe.get_doc("Email Template", slack_settings.reminder_template)
+    allowed_departments = [doc.department for doc in slack_settings.allowed_departments]
     employees = frappe.get_all(
         "Employee",
-        filters={"status": "Active"},
+        filters={"status": "Active", "department": ["in", allowed_departments]},
         fields="*",
     )
 
@@ -83,6 +79,23 @@ def send_reminder():
                             "type": "mrkdwn",
                             "text": message,
                         },
+                    },
+                    {
+                        "type": "divider",
+                    },
+                    {
+                        "type": "actions",
+                        "block_id": "daily_reminder_button",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "Log Time",
+                                },
+                                "style": "primary",
+                            },
+                        ],
                     },
                 ],
             )

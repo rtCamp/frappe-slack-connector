@@ -80,6 +80,23 @@ def send_reminder():
                             "text": message,
                         },
                     },
+                    {
+                        "type": "divider",
+                    },
+                    {
+                        "type": "actions",
+                        "block_id": "daily_reminder_button",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "Log Time",
+                                },
+                                "style": "primary",
+                            },
+                        ],
+                    },
                 ],
             )
         except Exception as e:

@@ -38,7 +38,7 @@ def sync_slack_job():
             except Exception as e:
                 users_not_found.append((email, str(e)))
 
-        frappe.msgprint(_("Slack data synced successfully", realtime=True, indicator="green"))
+        frappe.msgprint(_("Slack data synced successfully"), realtime=True, indicator="green")
 
         # Check and display employees in ERPNext but not in Slack
         employees = frappe.get_all(

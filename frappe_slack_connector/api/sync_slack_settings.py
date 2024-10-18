@@ -1,4 +1,5 @@
 import frappe
+from frappe import _
 
 from frappe_slack_connector.db.user_meta import update_user_meta
 from frappe_slack_connector.helpers.error import generate_error_log
@@ -11,7 +12,7 @@ def sync_slack_data():
     Sync the Slack data with the User Meta
     Enqueues the background job to sync
     """
-    frappe.msgprint("Syncing Slack data...")
+    frappe.msgprint(_("Syncing Slack data..."))
     frappe.enqueue(sync_slack_job, queue="long")
 
 
@@ -37,9 +38,7 @@ def sync_slack_job():
             except Exception as e:
                 users_not_found.append((email, str(e)))
 
-        frappe.msgprint(
-            "Slack data synced successfully", realtime=True, indicator="green"
-        )
+        frappe.msgprint(_("Slack data synced successfully"), realtime=True, indicator="green")
 
         # Check and display employees in ERPNext but not in Slack
         employees = frappe.get_all(

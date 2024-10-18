@@ -1,4 +1,5 @@
 import frappe
+from frappe import _
 from slack_bolt import App
 
 from frappe_slack_connector.db.user_meta import get_user_meta
@@ -15,6 +16,8 @@ from frappe_slack_connector.helpers.error import generate_error_log
 
 
 class SlackIntegration:
+    SLACK_CHAR_LIMIT = 75
+
     def __init__(self):
         """
         Initialize the Slack Integration instance
@@ -55,9 +58,7 @@ class SlackIntegration:
             try:
                 # Make API call with cursor if it exists
                 if cursor:
-                    result = self.slack_app.client.users_list(
-                        limit=limit, cursor=cursor
-                    )
+                    result = self.slack_app.client.users_list(limit=limit, cursor=cursor)
                 else:
                     result = self.slack_app.client.users_list(limit=limit)
 
@@ -65,12 +66,7 @@ class SlackIntegration:
 
                 for user in users:
                     email = user.get("profile", {}).get("email")
-                    if (
-                        email is None
-                        or user["deleted"]
-                        or user["is_bot"]
-                        or user["is_app_user"]
-                    ):
+                    if email is None or user["deleted"] or user["is_bot"] or user["is_app_user"]:
                         continue
                     user_dict[email] = {
                         "id": user["id"],
@@ -94,8 +90,8 @@ class SlackIntegration:
 
     def get_slack_user(
         self,
-        user_email: str = None,
-        employee_id: str = None,
+        user_email: str | None = None,
+        employee_id: str | None = None,
         check_meta: bool = True,
         from_api: bool = False,
     ) -> dict | None:
@@ -109,55 +105,59 @@ class SlackIntegration:
         if user_email and employee_id:
             raise ValueError("Only one of user_email or employee_id is required")
 
-        # If from API, directly fetch from Slack
-        if from_api:
-            if employee_id:
-                # FIXME: Possible NoneType Error
-                email = get_user_meta(employee_id=employee_id).user
-            else:
-                email = user_email
-            return self.slack_app.client.users_lookupByEmail(email=email)
+        try:
+            # If from API, directly fetch from Slack
+            if from_api:
+                if employee_id:
+                    # FIXME: Possible NoneType Error
+                    email = get_user_meta(employee_id=employee_id).user
+                else:
+                    email = user_email
+                return self.slack_app.client.users_lookupByEmail(email=email)
 
-        # If not from user meta but employee_id is provided, fetch user email first
-        if not check_meta and employee_id:
-            # FIXME: Possible NoneType Error
-            user_email = get_user_meta(employee_id=employee_id).user
-            slack_user = self.slack_app.client.users_lookupByEmail(email=user_email)
+            # If not from user meta but employee_id is provided, fetch user email first
+            if not check_meta and employee_id:
+                # FIXME: Possible NoneType Error
+                user_email = get_user_meta(employee_id=employee_id).user
+                slack_user = self.slack_app.client.users_lookupByEmail(email=user_email)
+                return {
+                    "id": slack_user.get("user", {}).get("id"),
+                    "name": slack_user.get("user", {}).get("name"),
+                }
+
+            user_meta = None
+            if check_meta:
+                user_meta = get_user_meta(user_id=user_email) if user_email else get_user_meta(employee_id=employee_id)
+                if user_meta and user_meta.custom_slack_userid:
+                    return {
+                        "id": user_meta.custom_slack_userid,
+                        "name": user_meta.custom_slack_username,
+                    }
+            slack_email = user_meta.user if user_meta else user_email
+            if not slack_email:
+                return None
+
+            try:
+                slack_user = self.slack_app.client.users_lookupByEmail(email=slack_email)
+            except Exception as e:
+                generate_error_log(
+                    title="Error fetching Slack user",
+                    message=f"User Email: {slack_email}",
+                    exception=e,
+                )
+                return None
+
             return {
                 "id": slack_user.get("user", {}).get("id"),
                 "name": slack_user.get("user", {}).get("name"),
             }
-
-        user_meta = None
-        if check_meta:
-            user_meta = (
-                get_user_meta(user_id=user_email)
-                if user_email
-                else get_user_meta(employee_id=employee_id)
-            )
-            if user_meta and user_meta.custom_slack_userid:
-                return {
-                    "id": user_meta.custom_slack_userid,
-                    "name": user_meta.custom_slack_username,
-                }
-        slack_email = user_meta.user if user_meta else user_email
-        if not slack_email:
-            return None
-
-        try:
-            slack_user = self.slack_app.client.users_lookupByEmail(email=slack_email)
         except Exception as e:
             generate_error_log(
                 title="Error fetching Slack user",
-                message=f"User Email: {slack_email}",
+                message="Please check the user email or employee ID and try again.",
                 exception=e,
             )
             return None
-
-        return {
-            "id": slack_user.get("user", {}).get("id"),
-            "name": slack_user.get("user", {}).get("name"),
-        }
 
     def verify_slack_request(
         self,
@@ -173,27 +173,22 @@ class SlackIntegration:
         if abs(time.time() - int(timestamp)) > 60 * 5:
             generate_error_log(
                 title="Slack Timestamp verification failed",
-                msgprint="Request is too old",
+                msgprint=_("Request is too old"),
             )
-            frappe.throw("Request is too old", frappe.PermissionError)
+            frappe.throw(_("Request is too old"), frappe.PermissionError)
 
         # Create the signature base string
         sig_basestring = f"v0:{timestamp}:{req_data}"
 
         # Compute the hash using your Slack signing secret
         request_signature = (
-            "v0="
-            + hmac.new(
-                self.SLACK_SIGNATURE.encode(), sig_basestring.encode(), hashlib.sha256
-            ).hexdigest()
+            "v0=" + hmac.new(self.SLACK_SIGNATURE.encode(), sig_basestring.encode(), hashlib.sha256).hexdigest()
         )
 
         # Compare the computed signature with the received signature
         if not hmac.compare_digest(request_signature, signature):
-            generate_error_log(
-                title="Slack Signature verification failed", message="Slack Event"
-            )
-            frappe.throw("Invalid request signature", frappe.PermissionError)
+            generate_error_log(title="Slack Signature verification failed", message="Slack Event")
+            frappe.throw(_("Invalid request signature"), frappe.PermissionError)
 
     def get_slack_user_id(self, *args, **kwargs) -> str | None:
         """

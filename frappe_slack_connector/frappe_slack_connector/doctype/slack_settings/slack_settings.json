@@ -20,7 +20,11 @@
   "attendance_time",
   "leave_notification_subject",
   "last_attendance_date",
-  "last_attendance_msg_ts"
+  "last_attendance_msg_ts",
+  "timesheet_notifications_section",
+  "timesheet_previousday_reminder",
+  "reminder_template",
+  "allowed_departments"
  ],
  "fields": [
   {
@@ -99,7 +103,7 @@
   {
    "fieldname": "slack_signing_token",
    "fieldtype": "Password",
-   "label": "Signing Token",
+   "label": "Signing Secret",
    "reqd": 1
   },
   {
@@ -114,12 +118,40 @@
    "fieldname": "leave_notification_subject",
    "fieldtype": "Data",
    "label": "Leave Notification Subject"
+  },
+  {
+   "fieldname": "timesheet_notifications_section",
+   "fieldtype": "Section Break",
+   "label": "Timesheet Notifications"
+  },
+  {
+   "default": "0",
+   "description": "Enable sending a reminder if a team member hasn\u2019t filled in their timesheet for the previous working day or has logged less than 8 hours.",
+   "fieldname": "timesheet_previousday_reminder",
+   "fieldtype": "Check",
+   "label": "Send previous day reminder to fill the timesheet"
+  },
+  {
+   "description": "The template to use for sending reminder notifications to user who hasn't filled up their timesheet",
+   "fieldname": "reminder_template",
+   "fieldtype": "Link",
+   "label": "Reminder Template",
+   "options": "Email Template"
+  },
+  {
+   "depends_on": "eval:doc.timesheet_previousday_reminder",
+   "description": "This field will be used to filter the employee based on department to whom the Daily reminder will be sent.",
+   "fieldname": "allowed_departments",
+   "fieldtype": "Table MultiSelect",
+   "label": "Allowed Departments",
+   "mandatory_depends_on": "eval:doc.timesheet_previousday_reminder",
+   "options": "Slack Department"
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2024-09-19 23:23:30.535487",
+ "modified": "2024-10-17 13:24:47.318263",
  "modified_by": "Administrator",
  "module": "Frappe Slack Connector",
  "name": "Slack Settings",

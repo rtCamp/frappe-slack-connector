@@ -54,7 +54,7 @@ def get_user_tasks(
     return tasks
 
 
-def get_employee_working_hours(employee: str = None) -> dict:
+def get_employee_working_hours(employee: str = "") -> dict:
     """
     Get the working hours and frequency for the given employee
     """
@@ -66,9 +66,7 @@ def get_employee_working_hours(employee: str = None) -> dict:
         ["custom_working_hours", "custom_work_schedule"],
     )
     if not working_hour:
-        working_hour = frappe.db.get_single_value(
-            "HR Settings", "standard_working_hours"
-        )
+        working_hour = frappe.db.get_single_value("HR Settings", "standard_working_hours")
     if not working_frequency:
         working_frequency = "Per Day"
     return {"working_hour": working_hour or 8, "working_frequency": working_frequency}
@@ -126,9 +124,7 @@ def create_timesheet_detail(
     else:
         timesheet = frappe.get_doc({"doctype": "Timesheet", "employee": employee})
 
-    project, custom_is_billable = frappe.get_value(
-        "Task", task, ["project", "custom_is_billable"]
-    )
+    project, custom_is_billable = frappe.get_value("Task", task, ["project", "custom_is_billable"])
 
     timesheet.update({"parent_project": project})
     timesheet.append(

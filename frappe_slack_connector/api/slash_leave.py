@@ -32,9 +32,7 @@ def slash_leave():
             raise Exception("Employee not found on ERP")
 
         leaves = list(get_leave_allocation_records(employee_id, today()).keys())
-        leaves_without_pay = frappe.get_all(
-            "Leave Type", filters={"is_lwp": 1}, pluck="name"
-        )
+        leaves_without_pay = frappe.get_all("Leave Type", filters={"is_lwp": 1}, pluck="name")
         leaves.extend(leaves_without_pay)
 
         if not leaves:
@@ -76,7 +74,7 @@ def slash_leave():
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"*Error Details:*\n```{str(e)}```",
+                            "text": f"*Error Details:*\n```{str(e)}```",  # noqa
                         },
                     },
                 ],

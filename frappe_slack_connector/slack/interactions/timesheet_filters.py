@@ -25,9 +25,7 @@ def handle_timesheet_filter(slack: SlackIntegration, payload: dict):
         exc = str(e)
         if not exc:
             exc = "There was an error. Please check ERP dashboard"
-            generate_error_log(
-                "Error getting projects for timesheet", message=frappe.get_traceback()
-            )
+            generate_error_log("Error getting projects for timesheet", message=frappe.get_traceback())
         slack.slack_app.client.views_push(
             trigger_id=payload["trigger_id"],
             view={

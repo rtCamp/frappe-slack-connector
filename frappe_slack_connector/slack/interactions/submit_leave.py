@@ -26,25 +26,16 @@ def handler(slack: SlackIntegration, payload: dict):
         # Extract leave details
         start_date = view_state["start_date"]["start_date_picker"]["selected_date"]
         end_date = view_state["end_date"]["end_date_picker"]["selected_date"]
-        leave_type = view_state["leave_type"]["leave_type_select"]["selected_option"][
-            "value"
-        ]
+        leave_type = view_state["leave_type"]["leave_type_select"]["selected_option"]["value"]
         reason = view_state["reason"]["reason_input"]["value"]
 
         # Check if it's a half day
-        is_half_day = (
-            len(
-                view_state["half_day_checkbox"]["half_day_checkbox"]["selected_options"]
-            )
-            > 0
-        )
+        is_half_day = len(view_state["half_day_checkbox"]["half_day_checkbox"]["selected_options"]) > 0
         half_day_period = None
         half_day_date = None
         if is_half_day:
             if custom_fields_exist():
-                half_day_period = view_state["half_day_period"][
-                    "half_day_period_select"
-                ]["selected_option"]["value"]
+                half_day_period = view_state["half_day_period"]["half_day_period_select"]["selected_option"]["value"]
             half_day_date = (
                 view_state["half_day_date"]["half_day_date_picker"]["selected_date"]
                 if view_state.get("half_day_date")
@@ -54,9 +45,7 @@ def handler(slack: SlackIntegration, payload: dict):
         # Get the employee based on the Slack user ID
         employee = get_employeeid_from_slackid(user_info["id"])
         if not employee:
-            frappe.throw(
-                _("No employee found for this Slack user"), frappe.ValidationError
-            )
+            frappe.throw(_("No employee found for this Slack user"), frappe.ValidationError)
 
         # Create the leave application
         leave_application = frappe.get_doc(
@@ -218,9 +207,7 @@ def half_day_checkbox_handler(slack: SlackIntegration, payload: dict):
     end_date = state["end_date"]["end_date_picker"]["selected_date"]
 
     # Check if "Half Day" is selected in the checkboxes
-    half_day_selected = (
-        len(state["half_day_checkbox"]["half_day_checkbox"]["selected_options"]) > 0
-    )
+    half_day_selected = len(state["half_day_checkbox"]["half_day_checkbox"]["selected_options"]) > 0
 
     # Check if start and end dates are the same
     same_day = start_date == end_date
@@ -274,11 +261,7 @@ def half_day_checkbox_handler(slack: SlackIntegration, payload: dict):
             ]
     else:
         # Remove half-day-related blocks if they exist
-        blocks = [
-            block
-            for block in blocks
-            if block["block_id"] not in ["half_day_date", "half_day_period"]
-        ]
+        blocks = [block for block in blocks if block["block_id"] not in ["half_day_date", "half_day_period"]]
 
     # Update the modal with the modified blocks
     updated_view = {

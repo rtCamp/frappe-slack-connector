@@ -32,11 +32,7 @@ def handler(slack: SlackIntegration, payload: dict):
 
         blocks = payload["message"]["blocks"]
 
-        status_text = (
-            "Approved :white_check_mark:"
-            if action_id == "leave_approve"
-            else "Rejected :x:"
-        )
+        status_text = "Approved :white_check_mark:" if action_id == "leave_approve" else "Rejected :x:"
 
         # Replace the actions block with a status update
         for i, block in enumerate(blocks):

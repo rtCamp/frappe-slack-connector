@@ -7,7 +7,7 @@ from frappe_slack_connector.slack.app import SlackIntegration
 
 
 @frappe.whitelist()
-def test_channel(channel_id: str = None):
+def test_channel(channel_id: str = ""):
     """
     Test the connection to the Slack channel
     Sends a test message to the given channel ID
@@ -19,10 +19,7 @@ def test_channel(channel_id: str = None):
     try:
         slack.slack_app.client.chat_postMessage(
             channel=channel_id,
-            text=(
-                "*This is a test message from ERPNext.*\n"
-                "_You will see list of people on leave daily_\n"
-            ),
+            text=("*This is a test message from ERPNext.*\n" "_You will see list of people on leave daily_\n"),
         )
     except Exception as e:
         send_http_response(

@@ -117,9 +117,7 @@ def get_leave_type(user_application: dict) -> str:
     so only use Full Day, and Half Day
     For rtCamp installation, use Full Day, First-Half, and Second-Half
     """
-    if not user_application.half_day or user_application.half_day_date != getdate(
-        today()
-    ):
+    if not user_application.half_day or user_application.half_day_date != getdate(today()):
         return "Full Day"
     elif not custom_fields_exist():
         return "Half Day"
@@ -143,9 +141,7 @@ def format_leave_groups(leave_groups: dict) -> str:
         for index, employee in enumerate(employees, start=1):
             formatted_text += f"  {index}. {employee['name']}"
             if employee["until_date"]:
-                formatted_text += (
-                    f" _until {standard_date_fmt(employee['until_date'])}_"
-                )
+                formatted_text += f" _until {standard_date_fmt(employee['until_date'])}_"
             formatted_text += "\n"
         formatted_text += "\n"
 

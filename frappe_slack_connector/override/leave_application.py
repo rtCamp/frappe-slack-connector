@@ -43,11 +43,7 @@ def send_leave_notification_bg(doc: Document):
         mention = f"<@{user_slack}>" if user_slack else doc.employee_name
         day_period = "Full Day"
         if doc.half_day and doc.half_day_date == frappe.utils.today():
-            day_period = (
-                doc.custom_first_halfsecond_half
-                if custom_fields_exist()
-                else "Half Day"
-            )
+            day_period = doc.custom_first_halfsecond_half if custom_fields_exist() else "Half Day"
 
         # if leave date is today and attendance notification is already sent,
         # send notification to attendance channel thread
@@ -66,8 +62,7 @@ def send_leave_notification_bg(doc: Document):
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"{mention} requested for leave today. "
-                            + f"_({day_period})_",
+                            "text": f"{mention} requested for leave today. " + f"_({day_period})_",
                         },
                     },
                 ],
@@ -106,7 +101,7 @@ def format_leave_application_blocks(
     leave_submission_date: str,
     from_date: str,
     to_date: str,
-    reason: str = None,
+    reason: str = "",
     employee_link: str = "#",
     leave_link: str = "#",
 ) -> list:

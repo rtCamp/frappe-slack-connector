@@ -8,7 +8,7 @@ from frappe_slack_connector.slack.app import SlackIntegration
 
 
 @frappe.whitelist()
-def connect_slack(user_email: str = "") -> None:
+def connect_slack(user_email: str | None = None) -> None:
     """
     Connect the Slack user to the given user email
     """

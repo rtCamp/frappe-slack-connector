@@ -7,7 +7,7 @@ from frappe_slack_connector.slack.app import SlackIntegration
 
 
 @frappe.whitelist()
-def test_channel(channel_id: str = ""):
+def test_channel(channel_id: str | None = None):
     """
     Test the connection to the Slack channel
     Sends a test message to the given channel ID

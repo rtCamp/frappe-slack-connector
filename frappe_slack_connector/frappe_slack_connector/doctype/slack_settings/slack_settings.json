@@ -23,8 +23,10 @@
   "last_attendance_msg_ts",
   "timesheet_notifications_section",
   "timesheet_previousday_reminder",
+  "timesheet_daily_notification_time",
   "reminder_template",
-  "allowed_departments"
+  "allowed_departments",
+  "last_timesheet_notification_date"
  ],
  "fields": [
   {
@@ -146,12 +148,25 @@
    "label": "Allowed Departments",
    "mandatory_depends_on": "eval:doc.timesheet_previousday_reminder",
    "options": "Slack Department"
+  },
+  {
+   "default": "08:00:00",
+   "description": "Time of day to send the notification to users",
+   "fieldname": "timesheet_daily_notification_time",
+   "fieldtype": "Time",
+   "label": "Time to Send"
+  },
+  {
+   "fieldname": "last_timesheet_notification_date",
+   "fieldtype": "Date",
+   "hidden": 1,
+   "label": "Last Timesheet Notification Date"
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2024-10-17 13:24:47.318263",
+ "modified": "2024-11-06 12:19:04.544662",
  "modified_by": "Administrator",
  "module": "Frappe Slack Connector",
  "name": "Slack Settings",

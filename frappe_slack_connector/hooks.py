@@ -152,8 +152,10 @@ doc_events = {
 # ---------------
 
 scheduler_events = {
-    "all": ["frappe_slack_connector.tasks.attendance_summary.attendance_channel"],
-    "daily": ["frappe_slack_connector.tasks.send_daily_reminder.send_reminder"],
+    "all": [
+        "frappe_slack_connector.tasks.attendance_summary.attendance_channel",
+        "frappe_slack_connector.tasks.send_daily_reminder.send_reminder",
+    ],
     # "hourly": ["frappe_slack_connector.tasks.hourly"],
     # "weekly": ["frappe_slack_connector.tasks.weekly"],
     # "monthly": ["frappe_slack_connector.tasks.monthly"],

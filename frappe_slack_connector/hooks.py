@@ -50,6 +50,7 @@ fixtures = [
             ]
         ],
     },
+    {"dt": "Property Setter", "filters": [["doc_type", "=", "Leave Application"]]},
 ]
 
 

@@ -1,3 +1,5 @@
+import time
+
 import frappe
 from frappe.utils import add_days, get_time, getdate
 
@@ -124,3 +126,6 @@ def send_slack_notification(reminder_template: str, allowed_departments: list):
                 title="Error sending slack message",
                 exception=e,
             )
+
+        # NOTE:  Sleep for 1 second to avoid rate limiting
+        time.sleep(1)

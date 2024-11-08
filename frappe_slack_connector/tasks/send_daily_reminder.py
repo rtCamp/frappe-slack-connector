@@ -1,5 +1,7 @@
+import time
+
 import frappe
-from frappe.utils import add_days, getdate
+from frappe.utils import add_days, get_time, getdate
 
 from frappe_slack_connector.db.employee import check_if_date_is_holiday
 from frappe_slack_connector.db.timesheet import get_employee_daily_working_norm, get_reported_time_by_employee
@@ -12,17 +14,37 @@ def send_reminder():
     """
     Send a reminder to the employees who have not made their daily
     time entries on the previous day
+    Conditions:
+     - Check if reminder is enabled
+     - Check if last notification date is not the current date
     """
     slack_settings = frappe.get_single("Slack Settings")
-    if not slack_settings.timesheet_previousday_reminder:
+    if (
+        not slack_settings.timesheet_previousday_reminder
+        or (
+            slack_settings.last_timesheet_notification_date is not None
+            and slack_settings.last_timesheet_notification_date == frappe.utils.nowdate()
+        )
+        or frappe.utils.now_datetime().time() < get_time(slack_settings.timesheet_daily_notification_time)
+    ):
         return
 
+    send_slack_notification(slack_settings.reminder_template, slack_settings.allowed_departments)
+
+    slack_settings.last_timesheet_notification_date = frappe.utils.nowdate()
+    slack_settings.save(ignore_permissions=True)
+
+
+def send_slack_notification(reminder_template: str, allowed_departments: list):
+    """
+    Send the notification to the Slack users
+    """
     slack = SlackIntegration()
     current_date = getdate()
     date = add_days(current_date, -1)
 
-    reminder_template = frappe.get_doc("Email Template", slack_settings.reminder_template)
-    allowed_departments = [doc.department for doc in slack_settings.allowed_departments]
+    reminder_template = frappe.get_doc("Email Template", reminder_template)
+    allowed_departments = [doc.department for doc in allowed_departments]
     employees = frappe.get_all(
         "Employee",
         filters={"status": "Active", "department": ["in", allowed_departments]},
@@ -104,3 +126,6 @@ def send_reminder():
                 title="Error sending slack message",
                 exception=e,
             )
+
+        # NOTE:  Sleep for 1 second to avoid rate limiting
+        time.sleep(1)

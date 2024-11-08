@@ -43,11 +43,7 @@ def send_leave_notification_bg(doc: Document):
         mention = f"<@{user_slack}>" if user_slack else doc.employee_name
         day_period = "Full Day"
         if doc.half_day and doc.half_day_date == frappe.utils.today():
-            day_period = (
-                doc.custom_first_halfsecond_half
-                if custom_fields_exist()
-                else "Half Day"
-            )
+            day_period = doc.custom_first_halfsecond_half if custom_fields_exist() else "Half Day"
 
         # if leave date is today and attendance notification is already sent,
         # send notification to attendance channel thread
@@ -66,8 +62,7 @@ def send_leave_notification_bg(doc: Document):
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"{mention} requested for leave today. "
-                            + f"_({day_period})_",
+                            "text": f"{mention} requested for leave today. " + f"_({day_period})_",
                         },
                     },
                 ],
@@ -84,6 +79,7 @@ def send_leave_notification_bg(doc: Document):
                     leave_link=get_url_to_form("Leave Application", doc.name),
                     employee_name=mention,
                     leave_type=doc.leave_type,
+                    is_half_day=doc.half_day,
                     leave_submission_date=standard_date_fmt(doc.creation),
                     from_date=standard_date_fmt(doc.from_date),
                     to_date=standard_date_fmt(doc.to_date),
@@ -106,7 +102,8 @@ def format_leave_application_blocks(
     leave_submission_date: str,
     from_date: str,
     to_date: str,
-    reason: str = None,
+    is_half_day: bool,
+    reason: str = "",
     employee_link: str = "#",
     leave_link: str = "#",
 ) -> list:
@@ -163,36 +160,55 @@ def format_leave_application_blocks(
                 "text": f"*Reason:*\n>{reason if reason else 'No reason provided'}",
             },
         },
-        {"type": "divider"},
-        {
-            "type": "actions",
-            "block_id": "leave_actions_block",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "emoji": True, "text": "Approve"},
-                    "style": "primary",
-                    "value": leave_id,
-                    "action_id": "leave_approve",
-                },
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "emoji": True, "text": "Reject"},
-                    "style": "danger",
-                    "value": leave_id,
-                    "action_id": "leave_reject",
-                },
-            ],
-        },
-        {
-            "type": "context",
-            "block_id": "footer_block",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": "Please review and take action on this leave request.",
-                }
-            ],
-        },
     ]
+
+    # Add a context menu indicating it is a half day
+    if is_half_day:
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "Half Day: :white_check_mark:",
+                    }
+                ],
+            }
+        )
+
+    blocks.extend(
+        [
+            {"type": "divider"},
+            {
+                "type": "actions",
+                "block_id": "leave_actions_block",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "emoji": True, "text": "Approve"},
+                        "style": "primary",
+                        "value": leave_id,
+                        "action_id": "leave_approve",
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "emoji": True, "text": "Reject"},
+                        "style": "danger",
+                        "value": leave_id,
+                        "action_id": "leave_reject",
+                    },
+                ],
+            },
+            {
+                "type": "context",
+                "block_id": "footer_block",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "Please review and take action on this leave request.",
+                    }
+                ],
+            },
+        ]
+    )
     return blocks

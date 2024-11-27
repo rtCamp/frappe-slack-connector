@@ -66,8 +66,7 @@ def send_slack_notification(reminder_template: str, allowed_departments: list):
             "Leave Application",
             {
                 "employee": employee.name,
-                "from_date": ("<=", str(date)),
-                "to_date": (">=", str(date)),
+                "half_day_date": str(date),
                 "half_day": 1,
                 "status": (
                     "in",

@@ -62,12 +62,11 @@ def send_slack_notification(reminder_template: str, allowed_departments: list):
 
         # check if the employee has taken a half-day
         # and set the daily norm accordingly
-        is_half_day = frappe.db.exists(
+        half_days = frappe.get_all(
             "Leave Application",
             {
                 "employee": employee.name,
-                "from_date": ("<=", str(date)),
-                "to_date": (">=", str(date)),
+                "half_day_date": str(date),
                 "half_day": 1,
                 "status": (
                     "in",
@@ -75,7 +74,11 @@ def send_slack_notification(reminder_template: str, allowed_departments: list):
                 ),
             },
         )
-        if is_half_day:
+        # if half day is taken for both the first and second half of the day,
+        # then consider full day leave
+        if len(half_days) > 1:
+            continue
+        elif half_days:
             daily_norm = daily_norm / 2
 
         hour = get_reported_time_by_employee(employee.name, date)

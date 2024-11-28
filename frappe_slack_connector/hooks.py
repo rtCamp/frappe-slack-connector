@@ -159,7 +159,9 @@ scheduler_events = {
     "hourly": [
         "frappe_slack_connector.tasks.send_daily_reminder.send_reminder",
     ],
-    # "weekly": ["frappe_slack_connector.tasks.weekly"],
+    "weekly": [
+        "frappe_slack_connector.api.sync_slack_settings.sync_slack_job",
+    ],
     # "monthly": ["frappe_slack_connector.tasks.monthly"],
 }
 

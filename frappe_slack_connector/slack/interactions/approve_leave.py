@@ -2,6 +2,7 @@ import frappe
 from frappe import _
 
 from frappe_slack_connector.db.leave_application import approve_leave, reject_leave
+from frappe_slack_connector.db.user_meta import get_userid_from_slackid
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.str_utils import strip_html_tags
 from frappe_slack_connector.slack.app import SlackIntegration
@@ -18,6 +19,7 @@ def handler(slack: SlackIntegration, payload: dict):
         user_id = payload.get("user", {}).get("id")
         if not user_id:
             generate_error_log("User ID not found in payload", msgprint=True)
+        frappe.set_user(get_userid_from_slackid(user_id))
 
         action_id = payload["actions"][0]["action_id"]
         leave_id = payload["actions"][0]["value"]

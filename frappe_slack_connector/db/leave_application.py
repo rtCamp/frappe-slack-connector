@@ -57,6 +57,7 @@ def approve_leave(leave_id: str) -> None:
     leave_request.status = "Approved"
     leave_request.save(ignore_permissions=True)
     leave_request.submit()
+    leave_request.add_comment(comment_type="Info", text="approved via Slack")
 
 
 def reject_leave(leave_id: str) -> None:
@@ -68,3 +69,4 @@ def reject_leave(leave_id: str) -> None:
     leave_request.status = "Rejected"
     leave_request.save(ignore_permissions=True)
     leave_request.submit()
+    leave_request.add_comment(comment_type="Info", text="rejected via Slack")

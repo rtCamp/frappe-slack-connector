@@ -18,6 +18,99 @@ def after_insert(doc, method):
         queue="short",
         doc=doc,
     )
+    frappe.enqueue(
+        send_leave_notification_to_applicant,
+        queue="short",
+        doc=doc,
+    )
+
+
+def send_leave_notification_to_applicant(doc: Document):
+    # Send a confirmation message to the user
+    slack = SlackIntegration()
+    user_id = slack.get_slack_user_id(employee_id=doc.employee)
+    slack.slack_app.client.chat_postMessage(
+        channel=user_id,
+        blocks=format_leave_submission_blocks(
+            leave_id=doc.name,
+            employee_name=doc.employee,
+            leave_link=get_url_to_form("Leave Application", doc.name),
+            leave_type=doc.leave_type,
+            leave_submission_date=doc.creation,
+            from_date=doc.from_date,
+            user_slack=user_id,
+            to_date=doc.to_date,
+            reason=doc.description,
+        ),
+    )
+
+
+def format_leave_submission_blocks(
+    *,
+    leave_id: str,
+    employee_name: str,
+    leave_type: str,
+    leave_submission_date: str,
+    user_slack: str,
+    from_date: str,
+    to_date: str,
+    reason: str,
+    leave_link: str = "#",
+) -> list:
+    """
+    Format the blocks for the leave application message
+    """
+    blocks = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": ":memo: Leave Request Submitted",
+                "emoji": True,
+            },
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"Hello<@{user_slack}>! Your leave request has been successfully submitted.",
+            },
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Leave ID:* <{leave_link}|{leave_id}> • *Submitted On:* {standard_date_fmt(leave_submission_date)}",
+                }
+            ],
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "fields": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"*From:*\n:calendar: {standard_date_fmt(from_date)}",
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Leave Type:*\n:rocket: {leave_type}",
+                },
+            ],
+        },
+        {
+            "type": "section",
+            "fields": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"*To:*\n:calendar: {standard_date_fmt(to_date)}",
+                },
+                {"type": "mrkdwn", "text": f"*Reason:*\n>{reason}"},
+            ],
+        },
+    ]
+    return blocks
 
 
 def send_leave_notification_bg(doc: Document):

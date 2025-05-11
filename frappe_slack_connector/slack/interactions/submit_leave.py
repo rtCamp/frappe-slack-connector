@@ -1,12 +1,10 @@
 import frappe
 from frappe import _, clear_messages
-from frappe.utils import get_url_to_form
 from hrms.hr.doctype.leave_application.leave_application import get_leave_approver
 
 from frappe_slack_connector.db.leave_application import custom_fields_exist
 from frappe_slack_connector.db.user_meta import get_employeeid_from_slackid
 from frappe_slack_connector.helpers.http_response import send_http_response
-from frappe_slack_connector.helpers.standard_date import standard_date_fmt
 from frappe_slack_connector.helpers.str_utils import strip_html_tags
 from frappe_slack_connector.slack.app import SlackIntegration
 
@@ -75,22 +73,6 @@ def handler(slack: SlackIntegration, payload: dict):
         # while saving the leave, as slack need empty object in response.
         clear_messages()
 
-        # Send a confirmation message to the user
-        slack.slack_app.client.chat_postMessage(
-            channel=user_info["id"],
-            blocks=format_leave_submission_blocks(
-                leave_id=leave_application.name,
-                employee_name=employee,
-                leave_link=get_url_to_form("Leave Application", leave_application.name),
-                leave_type=leave_type,
-                leave_submission_date=leave_application.creation,
-                from_date=start_date,
-                user_slack=user_info["id"],
-                to_date=end_date,
-                reason=reason,
-            ),
-        )
-
     except Exception as e:
         response = {
             "response_action": "push",
@@ -120,74 +102,6 @@ def handler(slack: SlackIntegration, payload: dict):
         return send_http_response(
             body=response,
         )
-
-
-def format_leave_submission_blocks(
-    *,
-    leave_id: str,
-    employee_name: str,
-    leave_type: str,
-    leave_submission_date: str,
-    user_slack: str,
-    from_date: str,
-    to_date: str,
-    reason: str,
-    leave_link: str = "#",
-) -> list:
-    """
-    Format the blocks for the leave application message
-    """
-    blocks = [
-        {
-            "type": "header",
-            "text": {
-                "type": "plain_text",
-                "text": ":memo: Leave Request Submitted",
-                "emoji": True,
-            },
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"Hello<@{user_slack}>! Your leave request has been successfully submitted.",
-            },
-        },
-        {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Leave ID:* <{leave_link}|{leave_id}> • *Submitted On:* {standard_date_fmt(leave_submission_date)}",
-                }
-            ],
-        },
-        {"type": "divider"},
-        {
-            "type": "section",
-            "fields": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"*From:*\n:calendar: {standard_date_fmt(from_date)}",
-                },
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Leave Type:*\n:rocket: {leave_type}",
-                },
-            ],
-        },
-        {
-            "type": "section",
-            "fields": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"*To:*\n:calendar: {standard_date_fmt(to_date)}",
-                },
-                {"type": "mrkdwn", "text": f"*Reason:*\n>{reason}"},
-            ],
-        },
-    ]
-    return blocks
 
 
 def half_day_checkbox_handler(slack: SlackIntegration, payload: dict):

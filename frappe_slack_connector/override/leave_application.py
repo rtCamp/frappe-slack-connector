@@ -133,7 +133,8 @@ def send_leave_notification_bg(doc: Document):
 
     try:
         user_slack = slack.get_slack_user_id(employee_id=doc.employee)
-        mention = f"<@{user_slack}>" if user_slack else doc.employee_name
+        mention_users = frappe.db.get_single_value("Slack Settings", "mention_user")
+        mention = f"<@{user_slack}>" if user_slack and mention_users else doc.employee_name
         day_period = "Full Day"
         if doc.half_day and doc.half_day_date == frappe.utils.today():
             day_period = doc.custom_first_halfsecond_half if custom_fields_exist() else "Half Day"

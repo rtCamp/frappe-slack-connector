@@ -60,7 +60,7 @@ def send_notification(attendance_title: str) -> str | None:
     Returns the message timestamp if successful
     """
     slack = SlackIntegration()
-
+    mention_users = frappe.db.get_single_value("Slack Settings", "mention_user")
     leave_groups = {"Full Day": [], "Half Day": []}
     if custom_fields_exist():
         leave_groups["First-Half"] = []
@@ -71,7 +71,7 @@ def send_notification(attendance_title: str) -> str | None:
         user_slack = get_user_meta(employee_id=user_application.get("employee"))
         slack_name = (
             f"<@{user_slack.custom_slack_userid}>"
-            if user_slack and user_slack.custom_slack_userid
+            if user_slack and user_slack.custom_slack_userid and mention_users
             else user_application.employee_name
         )
 

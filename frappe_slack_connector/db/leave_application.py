@@ -68,5 +68,7 @@ def reject_leave(leave_id: str) -> None:
     leave_request = frappe.get_doc("Leave Application", leave_id)
     leave_request.status = "Rejected"
     leave_request.save(ignore_permissions=True)
+    if custom_fields_exist():
+        leave_request.workflow_state = "Rejected"
     leave_request.submit()
     leave_request.add_comment(comment_type="Info", text="rejected via Slack")

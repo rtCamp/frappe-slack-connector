@@ -1,5 +1,7 @@
+from datetime import timedelta
+
 import frappe
-from frappe.utils import datetime, getdate
+from frappe.utils import datetime, get_datetime
 
 from frappe_slack_connector.db.employee import get_employee_from_user
 
@@ -144,12 +146,12 @@ def create_timesheet_detail(
     else:
         project = field_values
 
+    timesheet_date = get_datetime(date)
     logs = {
         "task": task,
-        "hours": hours,
         "description": description,
-        "from_time": getdate(date),
-        "to_time": getdate(date),
+        "from_time": timesheet_date,
+        "to_time": timesheet_date + timedelta(hours=hours),
         "project": project,
     }
 

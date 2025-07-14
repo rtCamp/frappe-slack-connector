@@ -14,6 +14,7 @@
   "slack_client_secret",
   "workspace_section",
   "send_attendance_updates",
+  "mention_user",
   "attendance_channel_id",
   "test_slack_channel",
   "column_break_tjcf",
@@ -23,8 +24,10 @@
   "last_attendance_msg_ts",
   "timesheet_notifications_section",
   "timesheet_previousday_reminder",
-  "timesheet_submission_notification",
-  "reminder_template"
+  "timesheet_daily_notification_time",
+  "reminder_template",
+  "allowed_departments",
+  "last_timesheet_notification_date"
  ],
  "fields": [
   {
@@ -35,21 +38,23 @@
    "reqd": 1
   },
   {
+   "default": "NOT-SET",
    "fieldname": "slack_app_token",
    "fieldtype": "Password",
    "in_list_view": 1,
    "label": "App Token"
   },
   {
-   "description": "The name of the Slack channel where you have to send the attendance summary mesage",
+   "depends_on": "eval:doc.send_attendance_updates == 1;",
+   "description": "The name of the Slack channel where you have to send the attendance summary message",
    "fieldname": "attendance_channel_id",
    "fieldtype": "Data",
    "in_list_view": 1,
    "label": "Attendance Channel ID",
-   "reqd": 1
+   "mandatory_depends_on": "eval:doc.send_attendance_updates == 1;"
   },
   {
-   "depends_on": "eval:doc.attendance_channel_id && doc.attendance_channel_id.length > 0",
+   "depends_on": "eval:doc.attendance_channel_id && doc.attendance_channel_id.length > 0 && doc.send_attendance_updates == 1;",
    "fieldname": "test_slack_channel",
    "fieldtype": "Button",
    "label": "Send Test Message"
@@ -96,9 +101,11 @@
   },
   {
    "default": "08:00:00",
+   "depends_on": "eval:doc.send_attendance_updates == 1;",
    "fieldname": "attendance_time",
    "fieldtype": "Time",
-   "label": "Time"
+   "label": "Time",
+   "mandatory_depends_on": "eval:doc.send_attendance_updates == 1;"
   },
   {
    "fieldname": "slack_signing_token",
@@ -114,6 +121,7 @@
   },
   {
    "default": "Employees on leave today",
+   "depends_on": "eval:doc.send_attendance_updates == 1;",
    "description": "This will be prefixed with the employee count, for example:\n\"5 Team Members on Leave Today\"",
    "fieldname": "leave_notification_subject",
    "fieldtype": "Data",
@@ -132,24 +140,52 @@
    "label": "Send previous day reminder to fill the timesheet"
   },
   {
-   "default": "0",
-   "description": "Enable sending a notification when a timesheet is submitted for approval.",
-   "fieldname": "timesheet_submission_notification",
-   "fieldtype": "Check",
-   "label": "Send notification on Timesheet submitted for Approval"
-  },
-  {
+   "depends_on": "eval:doc.timesheet_previousday_reminder == 1;",
    "description": "The template to use for sending reminder notifications to user who hasn't filled up their timesheet",
    "fieldname": "reminder_template",
    "fieldtype": "Link",
    "label": "Reminder Template",
+   "mandatory_depends_on": "eval:doc.timesheet_previousday_reminder == 1;",
    "options": "Email Template"
+  },
+  {
+   "depends_on": "eval:doc.timesheet_previousday_reminder",
+   "description": "This field will be used to filter the employee based on department to whom the Daily reminder will be sent.",
+   "fieldname": "allowed_departments",
+   "fieldtype": "Table MultiSelect",
+   "label": "Allowed Departments",
+   "mandatory_depends_on": "eval:doc.timesheet_previousday_reminder",
+   "options": "Slack Department"
+  },
+  {
+   "default": "08:00:00",
+   "depends_on": "eval:doc.timesheet_previousday_reminder == 1;",
+   "description": "Time of day to send the notification to users",
+   "fieldname": "timesheet_daily_notification_time",
+   "fieldtype": "Time",
+   "label": "Time to Send",
+   "mandatory_depends_on": "eval:doc.timesheet_previousday_reminder == 1;"
+  },
+  {
+   "fieldname": "last_timesheet_notification_date",
+   "fieldtype": "Date",
+   "hidden": 1,
+   "label": "Last Timesheet Notification Date"
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:doc.send_attendance_updates",
+   "description": "Enable this if you want to mention user on leave.",
+   "fieldname": "mention_user",
+   "fieldtype": "Check",
+   "label": "Mention User",
+   "mandatory_depends_on": "eval:doc.send_attendance_updates"
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2024-10-01 15:40:50.633662",
+ "modified": "2025-05-27 18:54:28.174707",
  "modified_by": "Administrator",
  "module": "Frappe Slack Connector",
  "name": "Slack Settings",

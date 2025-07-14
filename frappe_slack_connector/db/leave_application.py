@@ -1,4 +1,5 @@
 import frappe
+from frappe.model.workflow import apply_workflow
 from frappe.utils import today
 
 
@@ -7,9 +8,7 @@ def custom_fields_exist() -> bool:
     Check if the custom fields for rtCamp exist in the Leave Application doctype
     """
     # Check if the custom fields exist in the Leave Application doctype
-    return frappe.get_meta("Leave Application").has_field(
-        "custom_first_halfsecond_half"
-    )
+    return frappe.get_meta("Leave Application").has_field("custom_first_halfsecond_half")
 
 
 def get_employees_on_leave() -> list:
@@ -56,9 +55,13 @@ def approve_leave(leave_id: str) -> None:
     """
     # Logic to approve the leave request
     leave_request = frappe.get_doc("Leave Application", leave_id)
-    leave_request.status = "Approved"
-    leave_request.save(ignore_permissions=True)
-    leave_request.submit()
+    if custom_fields_exist():
+        apply_workflow(leave_request, "Approve")
+    else:
+        leave_request.status = "Approved"
+        leave_request.save()
+        leave_request.submit()
+    leave_request.add_comment(comment_type="Info", text="approved via Slack")
 
 
 def reject_leave(leave_id: str) -> None:
@@ -67,6 +70,10 @@ def reject_leave(leave_id: str) -> None:
     """
     # Logic to reject the leave request
     leave_request = frappe.get_doc("Leave Application", leave_id)
-    leave_request.status = "Rejected"
-    leave_request.save(ignore_permissions=True)
-    leave_request.submit()
+    if custom_fields_exist():
+        apply_workflow(leave_request, "Reject")
+    else:
+        leave_request.status = "Rejected"
+        leave_request.save()
+        leave_request.submit()
+    leave_request.add_comment(comment_type="Info", text="rejected via Slack")

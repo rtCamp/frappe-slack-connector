@@ -1,23 +1,31 @@
 import frappe
 
+from frappe_slack_connector.db.timesheet import get_user_tasks
 from frappe_slack_connector.db.user_meta import get_userid_from_slackid
 from frappe_slack_connector.helpers.error import generate_error_log
-from frappe_slack_connector.helpers.str_utils import strip_html_tags
+from frappe_slack_connector.helpers.str_utils import strip_html_tags, truncate_text
 from frappe_slack_connector.slack.app import SlackIntegration
 
 
 def handle_timesheet_filter(slack: SlackIntegration, payload: dict):
     """
-    Handle the timesheet submission interaction
+    Handle the timesheet project and task selection interactions
     """
     try:
+        user = get_userid_from_slackid(payload["user"]["id"])
+        # NOTE: `set_user()` will effectively wipe out frappe.form_dict
+        frappe.set_user(user)
+
         action_id = payload["actions"][0]["action_id"]
         if action_id == "project_select":
             return handle_project_select(slack, payload)
         elif action_id == "task_select":
             return handle_task_select(slack, payload)
     except Exception as e:
-        generate_error_log("Error submitting timesheet", exception=e)
+        exc = str(e)
+        if not exc:
+            exc = "There was an error. Please check ERP dashboard"
+            generate_error_log("Error getting projects for timesheet", message=frappe.get_traceback())
         slack.slack_app.client.views_push(
             trigger_id=payload["trigger_id"],
             view={
@@ -38,7 +46,7 @@ def handle_timesheet_filter(slack: SlackIntegration, payload: dict):
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"```{strip_html_tags(str(e))}```",
+                            "text": f"```{strip_html_tags(exc)}```",
                         },
                     },
                 ],
@@ -58,13 +66,7 @@ def handle_project_select(slack: SlackIntegration, payload: dict):
     user = get_userid_from_slackid(payload["user"]["id"])
 
     project = state["project_block"]["project_select"]["selected_option"]["value"]
-    tasks = frappe.get_list(
-        "Task",
-        user=user,
-        filters={"project": project},
-        fields=["name", "subject"],
-        ignore_permissions=True,
-    )
+    tasks = get_user_tasks(user, project)
 
     # If no tasks found for the project, show an error message
     if not tasks:
@@ -103,7 +105,8 @@ def handle_project_select(slack: SlackIntegration, payload: dict):
                 {
                     "text": {
                         "type": "plain_text",
-                        "text": task.get("subject"),
+                        # Limit the task subject to 75 characters
+                        "text": truncate_text(task.get("subject")),
                     },
                     "value": task.get("name"),
                 }
@@ -140,9 +143,12 @@ def handle_task_select(slack: SlackIntegration, payload: dict):
 
     task = state["task_block"]["task_select"]["selected_option"]["value"]
     project = frappe.get_value("Task", task, "project")
-    project_id, project_name = frappe.get_value(
-        "Project", project, ["name", "project_name"]
-    )
+    project_fields = frappe.get_value("Project", project, ["name", "project_name"])
+
+    if project_fields is None:
+        raise Exception("Project not found for the task")
+
+    project_id, project_name = project_fields
 
     # Set the initial project option in the project block
     for block in blocks:
@@ -150,7 +156,7 @@ def handle_task_select(slack: SlackIntegration, payload: dict):
             block["element"]["initial_option"] = {
                 "text": {
                     "type": "plain_text",
-                    "text": project_name,
+                    "text": truncate_text(project_name),
                 },
                 "value": project_id,
             }

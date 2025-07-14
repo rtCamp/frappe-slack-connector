@@ -8,7 +8,7 @@ from frappe_slack_connector.slack.app import SlackIntegration
 
 
 @frappe.whitelist()
-def connect_slack(user_email: str = None) -> None:
+def connect_slack(user_email: str | None = None) -> None:
     """
     Connect the Slack user to the given user email
     """
@@ -50,6 +50,4 @@ def connect_slack(user_email: str = None) -> None:
             title="Error connecting Slack user",
             exception=e,
         )
-        return send_http_response(
-            _("An error occurred while connecting Slack user"), status_code=500
-        )
+        return send_http_response(_("An error occurred while connecting Slack user"), status_code=500)

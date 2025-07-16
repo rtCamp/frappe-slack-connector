@@ -136,33 +136,22 @@ def create_timesheet_detail(
     project = None
     custom_is_billable = None
 
-    fields = ["project"]
-    if pms_installed:
-        fields.append("custom_is_billable")
-
-    field_values = frappe.get_value("Task", task, fields)
-    if pms_installed:
-        project, custom_is_billable = field_values
-    else:
-        project = field_values
-
     timesheet_date = get_datetime(date)
     logs = {
         "task": task,
         "description": description,
         "from_time": timesheet_date,
         "to_time": timesheet_date + timedelta(hours=hours),
-        "project": project,
     }
-
     if pms_installed:
-        logs.update({"is_billable": custom_is_billable})
+        project, custom_is_billable = frappe.get_value("Task", task, ["project", "custom_is_billable"])
+        logs.update({"project": project, "is_billable": custom_is_billable})
+    else:
+        project = frappe.get_value("Task", task, "project")
+        logs.update({"project": project})
 
     timesheet.update({"parent_project": project})
-    timesheet.append(
-        "time_logs",
-        logs,
-    )
+    timesheet.append("time_logs", logs)
     timesheet.save()
 
 

@@ -65,7 +65,7 @@ def get_employee_working_hours(employee: str = "") -> dict:
 
     working_hour = None
     working_frequency = None
-    if custom_timesheet_exists():
+    if is_next_pms_installed():
         working_hour, working_frequency = frappe.get_value(
             "Employee",
             employee,
@@ -126,7 +126,7 @@ def create_timesheet_detail(
     employee: str,
     parent: str | None = None,
 ):
-    pms_installed = custom_timesheet_exists()
+    pms_installed = is_next_pms_installed()
 
     if parent:
         timesheet = frappe.get_doc("Timesheet", parent)
@@ -166,7 +166,7 @@ def create_timesheet_detail(
     timesheet.save()
 
 
-def custom_timesheet_exists() -> bool:
+def is_next_pms_installed() -> bool:
     """
     Check if the custom fields for timesheet doctype exists
     These fields are taken from the frappe_pms app if installed

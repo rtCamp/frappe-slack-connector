@@ -142,6 +142,7 @@ def create_timesheet_detail(
         "description": description,
         "from_time": timesheet_date,
         "to_time": timesheet_date + timedelta(hours=hours),
+        "hours": hours,
     }
     if pms_installed:
         project, custom_is_billable = frappe.get_value("Task", task, ["project", "custom_is_billable"])

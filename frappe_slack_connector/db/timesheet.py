@@ -162,4 +162,4 @@ def is_next_pms_installed() -> bool:
     These fields are taken from the frappe_pms app if installed
     """
     installed_apps = frappe.get_installed_apps()
-    return "frappe_pms" in installed_apps
+    return "next_pms" in installed_apps

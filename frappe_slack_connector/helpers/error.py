@@ -5,7 +5,7 @@ def generate_error_log(
     title: str,
     *,
     message: str = "",
-    exception: Exception = None,
+    exception: Exception | None = None,
     msgprint: bool = False,
     realtime: bool = False,
 ):

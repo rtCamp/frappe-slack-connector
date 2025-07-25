@@ -1,5 +1,7 @@
+from datetime import timedelta
+
 import frappe
-from frappe.utils import datetime, getdate
+from frappe.utils import datetime, get_datetime
 
 from frappe_slack_connector.db.employee import get_employee_from_user
 
@@ -60,15 +62,20 @@ def get_employee_working_hours(employee: str = "") -> dict:
     """
     if not employee:
         employee = get_employee_from_user()
-    working_hour, working_frequency = frappe.get_value(
-        "Employee",
-        employee,
-        ["custom_working_hours", "custom_work_schedule"],
-    )
+
+    working_hour = None
+    working_frequency = None
+    if is_next_pms_installed():
+        working_hour, working_frequency = frappe.get_value(
+            "Employee",
+            employee,
+            ["custom_working_hours", "custom_work_schedule"],
+        )
     if not working_hour:
         working_hour = frappe.db.get_single_value("HR Settings", "standard_working_hours")
     if not working_frequency:
         working_frequency = "Per Day"
+
     return {"working_hour": working_hour or 8, "working_frequency": working_frequency}
 
 
@@ -119,24 +126,40 @@ def create_timesheet_detail(
     employee: str,
     parent: str | None = None,
 ):
+    pms_installed = is_next_pms_installed()
+
     if parent:
         timesheet = frappe.get_doc("Timesheet", parent)
     else:
         timesheet = frappe.get_doc({"doctype": "Timesheet", "employee": employee})
 
-    project, custom_is_billable = frappe.get_value("Task", task, ["project", "custom_is_billable"])
+    project = None
+    custom_is_billable = None
+
+    timesheet_date = get_datetime(date)
+    logs = {
+        "task": task,
+        "description": description,
+        "from_time": timesheet_date,
+        "to_time": timesheet_date + timedelta(hours=hours),
+        "hours": hours,
+    }
+    if pms_installed:
+        project, custom_is_billable = frappe.get_value("Task", task, ["project", "custom_is_billable"])
+        logs.update({"project": project, "is_billable": custom_is_billable})
+    else:
+        project = frappe.get_value("Task", task, "project")
+        logs.update({"project": project})
 
     timesheet.update({"parent_project": project})
-    timesheet.append(
-        "time_logs",
-        {
-            "task": task,
-            "hours": hours,
-            "description": description,
-            "from_time": getdate(date),
-            "to_time": getdate(date),
-            "project": project,
-            "is_billable": custom_is_billable,
-        },
-    )
+    timesheet.append("time_logs", logs)
     timesheet.save()
+
+
+def is_next_pms_installed() -> bool:
+    """
+    Check if the custom fields for timesheet doctype exists
+    These fields are taken from the frappe_pms app if installed
+    """
+    installed_apps = frappe.get_installed_apps()
+    return "next_pms" in installed_apps

@@ -23,9 +23,7 @@ frappe.ui.form.on("Slack Settings", {
         if (!response.exc) {
           frappe.msgprint({
             title: __("Success"),
-            message: __(
-              `Sent test message to the Slack channel: <strong>#${frm.doc.attendance_channel_id}</strong>`,
-            ),
+            message: `Sent test message to the Slack channel: <strong>#${frm.doc.attendance_channel_id}</strong>`,
             indicator: "green",
           });
         } else {

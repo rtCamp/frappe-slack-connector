@@ -1,4 +1,5 @@
 import frappe
+from frappe import _
 
 from frappe_slack_connector.db.user_meta import update_user_meta
 from frappe_slack_connector.helpers.error import generate_error_log
@@ -11,11 +12,11 @@ def sync_slack_data():
     Sync the Slack data with the User Meta
     Enqueues the background job to sync
     """
-    frappe.msgprint("Syncing Slack data...")
-    frappe.enqueue(sync_slack_job, queue="long")
+    frappe.msgprint(_("Syncing Slack data..."))
+    frappe.enqueue(sync_slack_job, queue="long", notify=True)
 
 
-def sync_slack_job():
+def sync_slack_job(notify: bool = False):
     """
     Background job to sync the Slack data with the User Meta
     """
@@ -37,9 +38,8 @@ def sync_slack_job():
             except Exception as e:
                 users_not_found.append((email, str(e)))
 
-        frappe.msgprint(
-            "Slack data synced successfully", realtime=True, indicator="green"
-        )
+        if notify:
+            frappe.msgprint(_("Slack data synced successfully"), realtime=True, indicator="green")
 
         # Check and display employees in ERPNext but not in Slack
         employees = frappe.get_all(
@@ -54,12 +54,13 @@ def sync_slack_job():
                 unset_employees.append(employee.employee_name)
 
         if users_not_found:
-            frappe.msgprint(
-                f"Users not found in ERPNext: {', '.join(user[0] for user in users_not_found)}",
-                title="Warning",
-                indicator="orange",
-                realtime=True,
-            )
+            if notify:
+                frappe.msgprint(
+                    f"Users not found in ERPNext: {', '.join(user[0] for user in users_not_found)}",
+                    title="Warning",
+                    indicator="orange",
+                    realtime=True,
+                )
             generate_error_log(
                 title="Users not found in ERPNext",
                 message="\n".join(user[1] for user in users_not_found),
@@ -69,14 +70,14 @@ def sync_slack_job():
             generate_error_log(
                 title="Employees not found in Slack",
                 message=f"Users not found in Slack: {', '.join(unset_employees)}",
-                realtime=True,
-                msgprint=True,
+                msgprint=notify,
+                realtime=notify,
             )
 
     except Exception as e:
         generate_error_log(
             title="Error syncing Slack data",
             exception=e,
-            msgprint=True,
-            realtime=True,
+            msgprint=notify,
+            realtime=notify,
         )

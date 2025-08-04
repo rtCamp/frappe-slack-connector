@@ -50,6 +50,7 @@ fixtures = [
             ]
         ],
     },
+    {"dt": "Property Setter", "filters": [["doc_type", "=", "Leave Application"]]},
 ]
 
 
@@ -152,10 +153,15 @@ doc_events = {
 # ---------------
 
 scheduler_events = {
-    "all": ["frappe_slack_connector.api.attendance_summary.attendance_channel"],
-    # "daily": ["frappe_slack_connector.api.attendance_summary.attendance_channel"],
-    # "hourly": ["frappe_slack_connector.tasks.hourly"],
-    # "weekly": ["frappe_slack_connector.tasks.weekly"],
+    "all": [
+        "frappe_slack_connector.tasks.attendance_summary.attendance_channel",
+    ],
+    "hourly": [
+        "frappe_slack_connector.tasks.send_daily_reminder.send_reminder",
+    ],
+    "weekly": [
+        "frappe_slack_connector.api.sync_slack_settings.sync_slack_job",
+    ],
     # "monthly": ["frappe_slack_connector.tasks.monthly"],
 }
 

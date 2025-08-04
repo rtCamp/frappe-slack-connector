@@ -3,7 +3,7 @@ from datetime import datetime
 import frappe
 from erpnext.setup.doctype.holiday_list.holiday_list import is_holiday
 from frappe import _
-from frappe.utils import get_time, getdate
+from frappe.utils import get_time, getdate, today
 
 from frappe_slack_connector.db.leave_application import (
     custom_fields_exist,
@@ -15,7 +15,6 @@ from frappe_slack_connector.helpers.standard_date import standard_date_fmt
 from frappe_slack_connector.slack.app import SlackIntegration
 
 
-@frappe.whitelist()
 def attendance_channel() -> None:
     """
     Server script to post the attendance summary to the Slack channel
@@ -61,7 +60,7 @@ def send_notification(attendance_title: str) -> str | None:
     Returns the message timestamp if successful
     """
     slack = SlackIntegration()
-
+    mention_users = frappe.db.get_single_value("Slack Settings", "mention_user")
     leave_groups = {"Full Day": [], "Half Day": []}
     if custom_fields_exist():
         leave_groups["First-Half"] = []
@@ -72,7 +71,7 @@ def send_notification(attendance_title: str) -> str | None:
         user_slack = get_user_meta(employee_id=user_application.get("employee"))
         slack_name = (
             f"<@{user_slack.custom_slack_userid}>"
-            if user_slack and user_slack.custom_slack_userid
+            if user_slack and user_slack.custom_slack_userid and mention_users
             else user_application.employee_name
         )
 
@@ -118,7 +117,7 @@ def get_leave_type(user_application: dict) -> str:
     so only use Full Day, and Half Day
     For rtCamp installation, use Full Day, First-Half, and Second-Half
     """
-    if not user_application.half_day:
+    if not user_application.half_day or user_application.half_day_date != getdate(today()):
         return "Full Day"
     elif not custom_fields_exist():
         return "Half Day"
@@ -142,9 +141,7 @@ def format_leave_groups(leave_groups: dict) -> str:
         for index, employee in enumerate(employees, start=1):
             formatted_text += f"  {index}. {employee['name']}"
             if employee["until_date"]:
-                formatted_text += (
-                    f" _until {standard_date_fmt(employee['until_date'])}_"
-                )
+                formatted_text += f" _until {standard_date_fmt(employee['until_date'])}_"
             formatted_text += "\n"
         formatted_text += "\n"
 

@@ -76,9 +76,7 @@ def sync_slack_job(notify: bool = False):
             fields=["user_id", "employee_name"],
         )
 
-        unset_employees = [
-            emp.employee_name for emp in employees if emp.user_id and slack_users.get(emp.user_id) is None
-        ]
+        unset_employees = [emp.employee_name for emp in employees if slack_users.get(emp.user_id) is None]
 
         if users_not_found:
             if notify:

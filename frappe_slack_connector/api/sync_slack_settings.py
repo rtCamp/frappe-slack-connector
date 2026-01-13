@@ -1,7 +1,6 @@
 import frappe
 from frappe import _
 
-from frappe_slack_connector.db.user_meta import update_user_meta
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.slack.app import SlackIntegration
 
@@ -24,19 +23,48 @@ def sync_slack_job(notify: bool = False):
         slack = SlackIntegration()
         slack_users = slack.get_slack_users()
 
+        # Batch fetch all existing User Meta records
+        existing_user_metas = frappe.get_all(
+            "User Meta",
+            filters={"user": ["in", list(slack_users.keys())]},
+            fields=["name", "user"],
+        )
+        user_meta_map = {um.user: um.name for um in existing_user_metas}
+
         # Check Users in Slack but not in ERPNext
         users_not_found = []
         for email, slack_details in slack_users.items():
             try:
-                update_user_meta(
-                    {
-                        "custom_slack_userid": slack_details["id"],
-                        "custom_slack_username": slack_details["name"],
-                    },
-                    user=email,
-                )
+                if email in user_meta_map:
+                    # Update existing User Meta using set_value (faster than get_doc + save)
+                    frappe.db.set_value(
+                        "User Meta",
+                        user_meta_map[email],
+                        {
+                            "custom_slack_userid": slack_details["id"],
+                            "custom_slack_username": slack_details["name"],
+                        },
+                        update_modified=True,
+                    )
+                else:
+                    # Create new User Meta - check if user exists first
+                    if frappe.db.exists("User", email):
+                        user_meta = frappe.get_doc(
+                            {
+                                "doctype": "User Meta",
+                                "user": email,
+                                "custom_slack_userid": slack_details["id"],
+                                "custom_slack_username": slack_details["name"],
+                            }
+                        )
+                        user_meta.insert(ignore_permissions=True)
+                    else:
+                        users_not_found.append((email, "User not found in ERPNext"))
             except Exception as e:
                 users_not_found.append((email, str(e)))
+
+        # Single commit after all updates
+        frappe.db.commit()
 
         if notify:
             frappe.msgprint(_("Slack data synced successfully"), realtime=True, indicator="green")
@@ -48,10 +76,9 @@ def sync_slack_job(notify: bool = False):
             fields=["user_id", "employee_name"],
         )
 
-        unset_employees = []
-        for employee in employees:
-            if slack_users.get(employee.user_id) is None:
-                unset_employees.append(employee.employee_name)
+        unset_employees = [
+            emp.employee_name for emp in employees if emp.user_id and slack_users.get(emp.user_id) is None
+        ]
 
         if users_not_found:
             if notify:

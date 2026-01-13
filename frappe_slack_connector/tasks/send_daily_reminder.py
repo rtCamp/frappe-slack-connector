@@ -46,6 +46,9 @@ def send_slack_notification(reminder_template: str, allowed_departments: list):
     reminder_template = frappe.get_doc("Email Template", reminder_template)
     allowed_departments = [doc.department for doc in allowed_departments]
     
+    # Cache HR Settings standard working hours to avoid repeated queries
+    standard_working_hours = frappe.db.get_single_value("HR Settings", "standard_working_hours") or 8
+    
     # Determine fields to fetch based on installed apps
     employee_fields = ["name", "employee_name", "user_id", "holiday_list"]
     if is_next_pms_installed():
@@ -150,7 +153,7 @@ def send_slack_notification(reminder_template: str, allowed_departments: list):
             continue
         
         # Calculate daily norm
-        daily_norm = get_daily_norm_from_employee(employee)
+        daily_norm = get_daily_norm_from_employee(employee, standard_working_hours)
         
         # Check half day and adjust daily norm
         half_day_count = half_day_counts.get(employee.name, 0)
@@ -215,7 +218,7 @@ def send_slack_notification(reminder_template: str, allowed_departments: list):
         time.sleep(1)
 
 
-def get_daily_norm_from_employee(employee):
+def get_daily_norm_from_employee(employee, standard_working_hours=8):
     """Calculate daily norm from employee record fields"""
     working_hour = None
     working_frequency = None
@@ -225,8 +228,8 @@ def get_daily_norm_from_employee(employee):
         working_hour = employee.get("custom_working_hours")
         working_frequency = employee.get("custom_work_schedule")
     
-    if not working_hour:
-        working_hour = frappe.db.get_single_value("HR Settings", "standard_working_hours") or 8
+    if working_hour is None:
+        working_hour = standard_working_hours
     
     if not working_frequency:
         working_frequency = "Per Day"

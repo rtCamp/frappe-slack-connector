@@ -23,6 +23,12 @@ def sync_slack_job(notify: bool = False):
         slack = SlackIntegration()
         slack_users = slack.get_slack_users()
 
+        # Guard against empty slack_users
+        if not slack_users:
+            if notify:
+                frappe.msgprint(_("No Slack users found"), realtime=True, indicator="orange")
+            return
+
         # Batch fetch all existing User Meta records
         existing_user_metas = frappe.get_all(
             "User Meta",

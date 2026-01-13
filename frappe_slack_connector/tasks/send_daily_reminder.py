@@ -2,10 +2,20 @@ import time
 
 import frappe
 from frappe.utils import add_days, get_time, getdate
+from hrms.hr.utils import get_holiday_list_for_employee
 
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
 from frappe_slack_connector.slack.app import SlackIntegration
+
+
+def is_next_pms_installed() -> bool:
+    """
+    Check if the custom fields for timesheet doctype exists
+    These fields are taken from the frappe_pms app if installed
+    """
+    installed_apps = frappe.get_installed_apps()
+    return "next_pms" in installed_apps
 
 
 def send_reminder():
@@ -44,11 +54,16 @@ def send_slack_notification(reminder_template: str, allowed_departments: list):
     reminder_template = frappe.get_doc("Email Template", reminder_template)
     allowed_departments = [doc.department for doc in allowed_departments]
     
+    # Determine fields to fetch based on installed apps
+    employee_fields = ["name", "employee_name", "user_id", "holiday_list"]
+    if is_next_pms_installed():
+        employee_fields.extend(["custom_working_hours", "custom_work_schedule"])
+    
     # Batch fetch employees with only needed fields
     employees = frappe.get_all(
         "Employee",
         filters={"status": "Active", "department": ["in", allowed_departments]},
-        fields=["name", "employee_name", "user_id", "holiday_list", "custom_working_hours", "custom_work_schedule"],
+        fields=employee_fields,
     )
     
     if not employees:
@@ -96,11 +111,19 @@ def send_slack_notification(reminder_template: str, allowed_departments: list):
         employee_hours[ts.employee] = employee_hours.get(ts.employee, 0) + ts.total_hours
     
     # Batch fetch holidays for the date
-    holiday_lists = set(e.holiday_list for e in employees if e.holiday_list)
+    # Get holiday lists for all employees (with fallback to company holiday list)
+    employee_holiday_lists = {}
+    for employee in employees:
+        holiday_list = get_holiday_list_for_employee(employee.name)
+        if holiday_list:
+            employee_holiday_lists[employee.name] = holiday_list
+    
+    # Get unique holiday lists and fetch holidays
+    unique_holiday_lists = set(employee_holiday_lists.values())
     holidays_on_date = frappe.get_all(
         "Holiday",
         filters={
-            "parent": ["in", list(holiday_lists)],
+            "parent": ["in", list(unique_holiday_lists)],
             "holiday_date": date,
         },
         fields=["parent"],
@@ -128,7 +151,8 @@ def send_slack_notification(reminder_template: str, allowed_departments: list):
             continue
         
         # Check if holiday or full-day leave
-        if employee.holiday_list in holiday_lists_with_holiday:
+        employee_holiday_list = employee_holiday_lists.get(employee.name)
+        if employee_holiday_list and employee_holiday_list in holiday_lists_with_holiday:
             continue
         if employee.name in employees_on_full_leave:
             continue
@@ -201,11 +225,20 @@ def send_slack_notification(reminder_template: str, allowed_departments: list):
 
 def get_daily_norm_from_employee(employee):
     """Calculate daily norm from employee record fields"""
-    working_hour = employee.get("custom_working_hours")
+    working_hour = None
+    working_frequency = None
+    
+    # Check if next_pms is installed before accessing custom fields
+    if is_next_pms_installed():
+        working_hour = employee.get("custom_working_hours")
+        working_frequency = employee.get("custom_work_schedule")
+    
     if not working_hour:
         working_hour = frappe.db.get_single_value("HR Settings", "standard_working_hours") or 8
     
-    working_frequency = employee.get("custom_work_schedule") or "Per Day"
+    if not working_frequency:
+        working_frequency = "Per Day"
+    
     if working_frequency != "Per Day":
         return working_hour / 5
     return working_hour

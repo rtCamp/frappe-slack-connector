@@ -8,7 +8,7 @@ requires-python = ">=3.10"
 readme = "README.md"
 dynamic = ["version"]
 dependencies = [
-    "slack_bolt~=1.19.1",
+    "slack_bolt~=1.27.0",
     # "frappe~=15.0.0" # Installed and managed by bench.
 ]
 

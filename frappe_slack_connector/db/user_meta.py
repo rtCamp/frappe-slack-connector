@@ -3,7 +3,9 @@ import frappe
 from frappe_slack_connector.helpers.error import generate_error_log
 
 
-def update_user_meta(user_meta_object: dict, user: str | None = None, upsert: bool = True) -> object:
+def update_user_meta(
+    user_meta_object: dict, user: str | None = None, upsert: bool = True, commit: bool = True
+) -> object:
     """
     Update the User Meta document for the given user.
     """
@@ -25,7 +27,8 @@ def update_user_meta(user_meta_object: dict, user: str | None = None, upsert: bo
 
     user_meta.update(user_meta_object)
     user_meta.save(ignore_permissions=True)
-    frappe.db.commit()  # commit the changes // nosemgrep
+    if commit:
+        frappe.db.commit()  # commit the changes // nosemgrep
 
     return user_meta
 

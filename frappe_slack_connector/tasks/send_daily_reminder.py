@@ -4,18 +4,10 @@ import frappe
 from frappe.utils import add_days, get_time, getdate
 from hrms.hr.utils import get_holiday_list_for_employee
 
+from frappe_slack_connector.db.timesheet import is_next_pms_installed
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
 from frappe_slack_connector.slack.app import SlackIntegration
-
-
-def is_next_pms_installed() -> bool:
-    """
-    Check if the custom fields for timesheet doctype exists
-    These fields are taken from the frappe_pms app if installed
-    """
-    installed_apps = frappe.get_installed_apps()
-    return "next_pms" in installed_apps
 
 
 def send_reminder():

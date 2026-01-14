@@ -48,7 +48,7 @@ def send_slack_notification(reminder_template: str, allowed_departments: list):
     employees = frappe.get_all(
         "Employee",
         filters={"status": "Active", "department": ["in", allowed_departments]},
-        fields="*",
+        fields=["name", "employee_name", "user_id"],
     )
 
     for employee in employees:

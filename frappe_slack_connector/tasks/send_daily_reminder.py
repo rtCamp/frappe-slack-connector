@@ -48,11 +48,11 @@ def send_slack_notification(reminder_template: str, allowed_departments: list):
     employees = frappe.get_all(
         "Employee",
         filters={"status": "Active", "department": ["in", allowed_departments]},
-        fields=["name", "employee_name"],
+        fields=["name", "employee_name", "user_id"],
     )
 
     for employee in employees:
-        user_slack = slack.get_slack_user_id(employee_id=employee)
+        user_slack = slack.get_slack_user_id(user_email=employee.user_id)
         if not user_slack:
             continue
         if check_if_date_is_holiday(date, employee.name):

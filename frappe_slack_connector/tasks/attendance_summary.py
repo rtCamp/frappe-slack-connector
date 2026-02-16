@@ -9,7 +9,6 @@ from frappe_slack_connector.db.leave_application import (
     custom_fields_exist,
     get_employees_on_leave,
 )
-from frappe_slack_connector.db.user_meta import get_user_meta
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
 from frappe_slack_connector.slack.app import SlackIntegration
@@ -67,11 +66,57 @@ def send_notification(attendance_title: str) -> str | None:
         leave_groups["Second-Half"] = []
 
     users_on_leave = get_employees_on_leave()
+
+    if not users_on_leave:
+        # No employees on leave, post "no leaves" message
+        leave_details_mrkdwn = format_leave_groups(leave_groups)
+        try:
+            message = slack.slack_app.client.chat_postMessage(
+                channel=slack.SLACK_CHANNEL_ID,
+                blocks=format_attendance_blocks(
+                    date_string=standard_date_fmt(frappe.utils.nowdate()),
+                    attendance_title=attendance_title,
+                    employee_count=0,
+                    leave_details_mrkdwn=leave_details_mrkdwn,
+                ),
+            )
+            return message["ts"]
+        except Exception as e:
+            generate_error_log(
+                title=_("Error posting message to Slack"),
+                message=_("Please check the channel ID and try again."),
+                exception=e,
+                msgprint=True,
+                realtime=True,
+            )
+            return None
+
+    # Batch fetch employee user_ids
+    employee_ids = [u.get("employee") for u in users_on_leave]
+    employee_user_ids = frappe.get_all(
+        "Employee",
+        filters={"name": ["in", employee_ids]},
+        fields=["name", "user_id"]
+    )
+    employee_to_user = {e.name: e.user_id for e in employee_user_ids}
+
+    # Batch fetch User Meta for all users
+    user_ids = [u for u in employee_to_user.values() if u]
+    user_metas = frappe.get_all(
+        "User Meta",
+        filters={"user": ["in", user_ids]},
+        fields=["user", "custom_slack_userid"]
+    ) if user_ids else []
+    user_to_slack = {um.user: um.custom_slack_userid for um in user_metas}
+
     for user_application in users_on_leave:
-        user_slack = get_user_meta(employee_id=user_application.get("employee"))
+        employee_id = user_application.get("employee")
+        user_id = employee_to_user.get(employee_id)
+        slack_userid = user_to_slack.get(user_id) if user_id else None
+
         slack_name = (
-            f"<@{user_slack.custom_slack_userid}>"
-            if user_slack and user_slack.custom_slack_userid and mention_users
+            f"<@{slack_userid}>"
+            if slack_userid and mention_users
             else user_application.employee_name
         )
 

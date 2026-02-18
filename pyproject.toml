@@ -8,7 +8,7 @@ requires-python = ">=3.10"
 readme = "README.md"
 dynamic = ["version"]
 dependencies = [
-    "slack_bolt~=1.19.1",
+    "slack_bolt~=1.27.0",
     # "frappe~=15.0.0" # Installed and managed by bench.
 ]
 
@@ -19,6 +19,9 @@ build-backend = "flit_core.buildapi"
 # These dependencies are only installed when developer mode is enabled
 [tool.bench.dev-dependencies]
 # package_name = "~=1.1.0"
+
+[tool.bench.frappe-dependencies]
+frappe = ">=15.0.0,<17.0.0"
 
 [tool.black]
 line-length = 120

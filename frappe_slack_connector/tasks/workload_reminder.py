@@ -35,9 +35,19 @@ TARGET_CHANNEL = "#workload"
 
 def get_workload_data(start_date, end_date):
     """Fetch employees, their allocations, and leaves in the given date range."""
-    # Assuming engineers are Active employees
+
+    # Fetch target designations from Timesheet Settings
+    timesheet_settings = frappe.get_doc("Timesheet Settings")
+    designations = [d.designation for d in timesheet_settings.designations]
+
+    if not designations:
+        return [], {}, {}
+
+    # Fetch Active employees matching the specified designations
     employees = frappe.get_all(
-        "Employee", filters={"status": "Active"}, fields=["name", "employee_name", "reports_to", "user_id"]
+        "Employee",
+        filters={"status": "Active", "designation": ["in", designations]},
+        fields=["name", "employee_name", "reports_to", "user_id"],
     )
 
     employee_names = [emp.name for emp in employees]

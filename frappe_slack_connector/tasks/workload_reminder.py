@@ -2,12 +2,18 @@ import frappe
 from frappe import _
 from frappe.utils import add_days, get_weekday, getdate
 
-# Import your existing holiday checker
 from frappe_slack_connector.db.employee import check_if_date_is_holiday
+from frappe_slack_connector.helpers.error import generate_error_log
+from frappe_slack_connector.slack.app import SlackIntegration
+
+NEXT_PMS_INSTALLED = "next_pms" in frappe.get_installed_apps()
+IMPORT_SUCCESS = True
+
 
 try:
     from next_pms.resource_management.api.utils.query import get_allocation_list_for_employee_for_given_range
 except ImportError:
+    IMPORT_SUCCESS = False
 
     def get_allocation_list_for_employee_for_given_range(*args, **kwargs):
         frappe.throw(
@@ -18,7 +24,8 @@ except ImportError:
         )
 
 
-from frappe_slack_connector.slack.app import SlackIntegration
+# Combined flag to use in tasks
+NEXT_PMS_AVAILABLE = NEXT_PMS_INSTALLED and IMPORT_SUCCESS
 
 STANDARD_HOURS = 8
 
@@ -57,7 +64,6 @@ def get_workload_data(start_date, end_date):
         end_date=end_date,
     )
 
-    # Bypass `get_employee_leaves` to avoid SQL tuple formatting errors
     leaves = frappe.get_all(
         "Leave Application",
         filters=[
@@ -121,6 +127,14 @@ def send_daily_workload_reminder():
     if not slack_settings.send_daily_allocation_updates:
         return
 
+    # Fail gracefully if enabled but PMS is missing
+    if not NEXT_PMS_AVAILABLE:
+        generate_error_log(
+            "Daily Workload Reminder Error",
+            message="Next PMS app is missing or failed to import, but 'Send Daily Allocation Updates' is enabled in Slack Settings.",
+        )
+        return
+
     date = getdate()
     if date.weekday() > 4:
         return
@@ -140,7 +154,7 @@ def send_daily_workload_reminder():
 
         leaves = leave_map.get(emp.name, [])
         # Check if they are on leave today
-        on_leave = any(l.get("from_date") <= date <= l.get("to_date") for l in leaves)
+        on_leave = any(leave.get("from_date") <= date <= leave.get("to_date") for leave in leaves)
         if on_leave:
             continue
 
@@ -176,7 +190,10 @@ def send_daily_workload_reminder():
     underallocated_users.sort(key=lambda x: x["unallocated"], reverse=True)
 
     intro_blocks = [
-        {"type": "header", "text": {"type": "plain_text", "text": "📉 Daily Workload Alert", "emoji": True}},
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": ":chart_with_upwards_trend: Daily Workload Alert", "emoji": True},
+        },
         {"type": "divider"},
         {
             "type": "section",
@@ -228,7 +245,10 @@ def send_daily_workload_reminder():
                 {
                     "type": "context",
                     "elements": [
-                        {"type": "mrkdwn", "text": "💡 _Please ensure all allocations are updated in the PMS system._"}
+                        {
+                            "type": "mrkdwn",
+                            "text": ":bulb: _Please ensure all allocations are updated in the PMS system._",
+                        }
                     ],
                 }
             )
@@ -241,6 +261,14 @@ def send_weekly_workload_reminder():
     """Triggered weekly. Generates a table of underallocated hours for the week."""
     slack_settings = frappe.get_single("Slack Settings")
     if not slack_settings.send_weekly_allocation_updates:
+        return
+
+    # Fail gracefully if enabled but PMS is missing
+    if not NEXT_PMS_AVAILABLE:
+        generate_error_log(
+            "Weekly Workload Reminder Error",
+            message="Next PMS app is missing or failed to import, but 'Send Weekly Allocation Updates' is enabled in Slack Settings.",
+        )
         return
 
     timesheet_settings = frappe.get_single("Timesheet Settings")
@@ -282,7 +310,7 @@ def send_weekly_workload_reminder():
                 day_unallocated.append(0)
                 continue
 
-            on_leave = any(l.get("from_date") <= cur_date <= l.get("to_date") for l in leaves)
+            on_leave = any(leave.get("from_date") <= cur_date <= leave.get("to_date") for leave in leaves)
 
             if on_leave:
                 day_unallocated.append(0)
@@ -320,7 +348,7 @@ def send_weekly_workload_reminder():
         return
 
     intro_blocks = [
-        {"type": "header", "text": {"type": "plain_text", "text": "🗓️ Weekly Workload Alert", "emoji": True}},
+        {"type": "header", "text": {"type": "plain_text", "text": ":date: Weekly Workload Alert", "emoji": True}},
         {"type": "divider"},
         {
             "type": "section",
@@ -379,7 +407,7 @@ def send_weekly_workload_reminder():
             payload_blocks.append(
                 {
                     "type": "context",
-                    "elements": [{"type": "mrkdwn", "text": "💡 _Values shown are unallocated hours per day._"}],
+                    "elements": [{"type": "mrkdwn", "text": ":bulb: _Values shown are unallocated hours per day._"}],
                 }
             )
 

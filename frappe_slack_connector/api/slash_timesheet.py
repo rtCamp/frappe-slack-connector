@@ -5,7 +5,7 @@ from frappe_slack_connector.slack.app import SlackIntegration
 from frappe_slack_connector.slack.interactions.timesheet_modal import show_timesheet_modal
 
 
-@frappe.whitelist(allow_guest=True)
+@frappe.whitelist(allow_guest=True)  # nosemgrep: we are verifying request signature
 def slash_timesheet():
     """
     API endpoint for the Slash command to open the modal for timesheet creation

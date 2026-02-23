@@ -10,7 +10,7 @@ from frappe_slack_connector.helpers.http_response import send_http_response
 from frappe_slack_connector.slack.app import SlackIntegration
 
 
-@frappe.whitelist(allow_guest=True)
+@frappe.whitelist(allow_guest=True)  # nosemgrep: we are verifying request signature
 def slash_leave():
     """
     API endpoint for the Slash command to open the modal for applying leave

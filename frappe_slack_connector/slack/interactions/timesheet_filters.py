@@ -14,7 +14,7 @@ def handle_timesheet_filter(slack: SlackIntegration, payload: dict):
     try:
         user = get_userid_from_slackid(payload["user"]["id"])
         # NOTE: `set_user()` will effectively wipe out frappe.form_dict
-        frappe.set_user(user)
+        frappe.set_user(user)  # nosemgrep: request is validated by signature
 
         action_id = payload["actions"][0]["action_id"]
         if action_id == "project_select":

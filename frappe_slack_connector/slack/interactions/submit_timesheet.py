@@ -26,7 +26,7 @@ def handler(slack: SlackIntegration, payload: dict):
         employee = get_employeeid_from_slackid(user_info["id"])
 
         # Set the user performing the action
-        frappe.set_user(get_userid_from_slackid(user_info["id"]))
+        frappe.set_user(get_userid_from_slackid(user_info["id"]))  # nosemgrep: request is validated by signature
 
         task = view_state["task_block"]["task_select"]["selected_option"]["value"]
         date = view_state["entry_date"]["date_picker"]["selected_date"]

@@ -1,14 +1,12 @@
 import frappe
 from frappe import _
-from frappe.utils import add_days, getdate
+from frappe.utils import add_days, get_weekday, getdate
 
 # Import your existing holiday checker
 from frappe_slack_connector.db.employee import check_if_date_is_holiday
 
 try:
-    from next_pms.resource_management.api.utils.query import (
-        get_allocation_list_for_employee_for_given_range,
-    )
+    from next_pms.resource_management.api.utils.query import get_allocation_list_for_employee_for_given_range
 except ImportError:
 
     def get_allocation_list_for_employee_for_given_range(*args, **kwargs):
@@ -23,7 +21,6 @@ except ImportError:
 from frappe_slack_connector.slack.app import SlackIntegration
 
 STANDARD_HOURS = 8
-TARGET_CHANNEL = "#workload"
 
 
 def get_workload_data(start_date, end_date):
@@ -85,7 +82,7 @@ def get_workload_data(start_date, end_date):
     return employees, allocation_map, leave_map
 
 
-def get_pm_details(slack, reports_to):
+def get_pm_details(slack, reports_to, mention_users=True):
     """Get the Slack ID and name for the Project Manager"""
     if not reports_to:
         return None, "N/A"
@@ -94,7 +91,7 @@ def get_pm_details(slack, reports_to):
     pm_name = frappe.db.get_value("Employee", reports_to, "employee_name")
 
     slack_id = None
-    if pm_user_id:
+    if pm_user_id and mention_users:
         slack_id = slack.get_slack_user_id(employee_id=reports_to, from_api=False)
 
     return slack_id, pm_name or "N/A"
@@ -120,9 +117,16 @@ def send_blocks_in_chunks(slack, channel, blocks):
 
 def send_daily_workload_reminder():
     """Triggered daily. Alerts if today's allocation < 8 hours."""
+    slack_settings = frappe.get_single("Slack Settings")
+    if not slack_settings.send_daily_allocation_updates:
+        return
+
     date = getdate()
     if date.weekday() > 4:
         return
+
+    target_channel = slack_settings.workload_channel_id or "#workload"
+    mention_users = slack_settings.workload_mention_users
 
     slack = SlackIntegration()
     employees, allocation_map, leave_map = get_workload_data(date, date)
@@ -149,8 +153,11 @@ def send_daily_workload_reminder():
         unallocated = max(0, STANDARD_HOURS - total_allocated)
 
         if unallocated > 0:
-            user_slack_id = slack.get_slack_user_id(employee_id=emp.name, from_api=False)
-            pm_slack_id, pm_name = get_pm_details(slack, emp.reports_to)
+            user_slack_id = None
+            if mention_users:
+                user_slack_id = slack.get_slack_user_id(employee_id=emp.name, from_api=False)
+
+            pm_slack_id, pm_name = get_pm_details(slack, emp.reports_to, mention_users)
 
             underallocated_users.append(
                 {
@@ -226,19 +233,37 @@ def send_daily_workload_reminder():
                 }
             )
 
-        slack.slack_app.client.chat_postMessage(channel=TARGET_CHANNEL, blocks=payload_blocks)
+        slack.slack_app.client.chat_postMessage(channel=target_channel, blocks=payload_blocks)
         first_message = False
 
 
 def send_weekly_workload_reminder():
-    """Triggered every Monday. Generates a table of underallocated hours for the week."""
-    date = getdate()
-    if date.weekday() != 0:  # Proceed only if today is Monday
+    """Triggered weekly. Generates a table of underallocated hours for the week."""
+    slack_settings = frappe.get_single("Slack Settings")
+    if not slack_settings.send_weekly_allocation_updates:
         return
 
-    end_date = add_days(date, 4)  # Friday
+    timesheet_settings = frappe.get_single("Timesheet Settings")
+    date = getdate()
+
+    # Check if today matches the scheduled run day (e.g. "Monday")
+    if get_weekday(date) != timesheet_settings.remind_on:
+        return
+
+    target_channel = slack_settings.workload_channel_id or "#workload"
+    mention_users = slack_settings.workload_mention_users
+
+    # Establish the Monday to Friday for the evaluated week
+    weekday = date.weekday()
+    if weekday > 4:  # Run on weekend -> evaluates the next week
+        monday = add_days(date, (7 - weekday) % 7)
+    else:  # Run on weekday -> evaluates the current week
+        monday = add_days(date, -weekday)
+
+    end_date = add_days(monday, 4)  # Friday
+
     slack = SlackIntegration()
-    employees, allocation_map, leave_map = get_workload_data(date, end_date)
+    employees, allocation_map, leave_map = get_workload_data(monday, end_date)
 
     table_data = []
 
@@ -250,7 +275,7 @@ def send_weekly_workload_reminder():
         has_underallocation = False
 
         for i in range(5):  # Mon to Fri
-            cur_date = add_days(date, i)
+            cur_date = add_days(monday, i)
 
             # Check for Holidays!
             if check_if_date_is_holiday(cur_date, emp.name):
@@ -275,8 +300,11 @@ def send_weekly_workload_reminder():
                 has_underallocation = True
 
         if has_underallocation:
-            user_slack_id = slack.get_slack_user_id(employee_id=emp.name, from_api=False)
-            pm_slack_id, pm_name = get_pm_details(slack, emp.reports_to)
+            user_slack_id = None
+            if mention_users:
+                user_slack_id = slack.get_slack_user_id(employee_id=emp.name, from_api=False)
+
+            pm_slack_id, pm_name = get_pm_details(slack, emp.reports_to, mention_users)
 
             table_data.append(
                 {
@@ -355,5 +383,5 @@ def send_weekly_workload_reminder():
                 }
             )
 
-        slack.slack_app.client.chat_postMessage(channel=TARGET_CHANNEL, blocks=payload_blocks)
+        slack.slack_app.client.chat_postMessage(channel=target_channel, blocks=payload_blocks)
         first_message = False

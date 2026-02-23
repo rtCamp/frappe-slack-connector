@@ -98,7 +98,7 @@ def get_pm_details(slack, reports_to, mention_users=True):
 
     slack_id = None
     if pm_user_id and mention_users:
-        slack_id = slack.get_slack_user_id(employee_id=reports_to, from_api=False)
+        slack_id = slack.get_slack_user_id(employee_id=reports_to)
 
     return slack_id, pm_name or "N/A"
 
@@ -169,7 +169,7 @@ def send_daily_workload_reminder():
         if unallocated > 0:
             user_slack_id = None
             if mention_users:
-                user_slack_id = slack.get_slack_user_id(employee_id=emp.name, from_api=False)
+                user_slack_id = slack.get_slack_user_id(employee_id=emp.name)
 
             pm_slack_id, pm_name = get_pm_details(slack, emp.reports_to, mention_users)
 
@@ -330,7 +330,7 @@ def send_weekly_workload_reminder():
         if has_underallocation:
             user_slack_id = None
             if mention_users:
-                user_slack_id = slack.get_slack_user_id(employee_id=emp.name, from_api=False)
+                user_slack_id = slack.get_slack_user_id(employee_id=emp.name)
 
             pm_slack_id, pm_name = get_pm_details(slack, emp.reports_to, mention_users)
 

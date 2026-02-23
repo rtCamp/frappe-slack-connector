@@ -52,7 +52,7 @@ def send_slack_notification(reminder_template: str, allowed_departments: list):
     )
 
     for employee in employees:
-        user_slack = slack.get_slack_user_id(employee_id=employee)
+        user_slack = slack.get_slack_user_id(employee_id=employee, from_api=True)
         if not user_slack:
             continue
         if check_if_date_is_holiday(date, employee.name):

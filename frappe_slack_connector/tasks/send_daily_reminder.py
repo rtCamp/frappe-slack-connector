@@ -94,9 +94,8 @@ def send_slack_notification(reminder_template: str, allowed_departments: list):
                 "mention": f"<@{user_slack}>",
                 "daily_norm": daily_norm,
             }
-            message = frappe.render_template(
-                reminder_template.response_html, args
-            )  # nosemgrep: system template-rendering
+            # nosemgrep
+            message = frappe.render_template(reminder_template.response_html, args)
             slack.slack_app.client.chat_postMessage(
                 channel=user_slack,
                 blocks=[

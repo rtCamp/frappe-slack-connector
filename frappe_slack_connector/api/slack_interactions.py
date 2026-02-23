@@ -14,7 +14,7 @@ from frappe_slack_connector.slack.interactions.timesheet_filters import handle_t
 from frappe_slack_connector.slack.interactions.timesheet_modal import show_timesheet_modal
 
 
-@frappe.whitelist(allow_guest=True)  # nosemgrep: we are verifying request signature
+@frappe.whitelist(allow_guest=True)  # nosemgrep
 def event():
     """
     Handle the Slack interactions

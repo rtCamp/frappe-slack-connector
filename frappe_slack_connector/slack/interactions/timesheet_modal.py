@@ -17,7 +17,8 @@ def show_timesheet_modal(slack: SlackIntegration, slack_userid: str, slack_trigg
             raise Exception("User not found on ERP")
 
         # NOTE: `set_user()` will effectively wipe out frappe.form_dict
-        frappe.set_user(user_email)  # nosemgrep: request is validated by signature
+        # Request is verified by signature in the parent function, so we can trust the user ID from the payload
+        frappe.set_user(user_email)  # nosemgrep
         projects = get_user_projects(user_email)
         tasks = get_user_tasks(user_email)
 

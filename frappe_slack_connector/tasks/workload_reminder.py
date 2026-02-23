@@ -347,6 +347,9 @@ def send_weekly_workload_reminder():
     if not table_data:
         return
 
+    # Sort by highest total missing hours across the entire week
+    table_data.sort(key=lambda x: sum(x["days"]), reverse=True)
+
     intro_blocks = [
         {"type": "header", "text": {"type": "plain_text", "text": ":date: Weekly Workload Alert", "emoji": True}},
         {"type": "divider"},

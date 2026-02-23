@@ -2,10 +2,12 @@ import frappe
 from frappe import _
 from frappe.utils import add_days, getdate
 
+# Import your existing holiday checker
+from frappe_slack_connector.db.employee import check_if_date_is_holiday
+
 try:
     from next_pms.resource_management.api.utils.query import (
         get_allocation_list_for_employee_for_given_range,
-        get_employee_leaves,
     )
 except ImportError:
 
@@ -17,18 +19,9 @@ except ImportError:
             exc=NotImplementedError,
         )
 
-    def get_employee_leaves(*args, **kwargs):
-        frappe.throw(
-            _(
-                "get_allocation_list_for_employee_for_given_range is not implemented because next_pms module is missing."
-            ),
-            exc=NotImplementedError,
-        )
-
 
 from frappe_slack_connector.slack.app import SlackIntegration
 
-SKIP_WEEKENDS = [5, 6]  # Saturday and Sunday
 STANDARD_HOURS = 8
 TARGET_CHANNEL = "#workload"
 
@@ -128,7 +121,7 @@ def send_blocks_in_chunks(slack, channel, blocks):
 def send_daily_workload_reminder():
     """Triggered daily. Alerts if today's allocation < 8 hours."""
     date = getdate()
-    if date.weekday() in SKIP_WEEKENDS:
+    if date.weekday() > 4:
         return
 
     slack = SlackIntegration()
@@ -137,6 +130,10 @@ def send_daily_workload_reminder():
     underallocated_users = []
 
     for emp in employees:
+        # Check for Holidays!
+        if check_if_date_is_holiday(date, emp.name):
+            continue
+
         leaves = leave_map.get(emp.name, [])
         # Check if they are on leave today
         on_leave = any(l.get("from_date") <= date <= l.get("to_date") for l in leaves)
@@ -186,7 +183,6 @@ def send_daily_workload_reminder():
         {"type": "raw_text", "text": "Project Manager"},
     ]
 
-    # Slack restricts tables to a maximum of 100 rows and only 1 table per message.
     chunk_size = 90
     first_message = True
     total_chunks = (len(underallocated_users) + chunk_size - 1) // chunk_size
@@ -237,8 +233,8 @@ def send_daily_workload_reminder():
 def send_weekly_workload_reminder():
     """Triggered every Monday. Generates a table of underallocated hours for the week."""
     date = getdate()
-    # if date.weekday() != 0:  # Proceed only if today is Monday
-    #     return
+    if date.weekday() != 0:  # Proceed only if today is Monday
+        return
 
     end_date = add_days(date, 4)  # Friday
     slack = SlackIntegration()
@@ -255,6 +251,12 @@ def send_weekly_workload_reminder():
 
         for i in range(5):  # Mon to Fri
             cur_date = add_days(date, i)
+
+            # Check for Holidays!
+            if check_if_date_is_holiday(cur_date, emp.name):
+                day_unallocated.append(0)
+                continue
+
             on_leave = any(l.get("from_date") <= cur_date <= l.get("to_date") for l in leaves)
 
             if on_leave:
@@ -308,7 +310,6 @@ def send_weekly_workload_reminder():
         {"type": "raw_text", "text": "Project Manager"},
     ]
 
-    # Slack restricts tables to a maximum of 100 rows and only 1 table per message.
     chunk_size = 90
     first_message = True
     total_chunks = (len(table_data) + chunk_size - 1) // chunk_size
@@ -318,13 +319,11 @@ def send_weekly_workload_reminder():
         rows = [header_row]
 
         for d in chunk:
-            # Use get_mention_cell to correctly tag the engineer in the first column
             row = [get_mention_cell(d.get("slack_id"), d.get("name"))]
             for u in d["days"]:
                 val = f"{u:g}h" if u > 0 else "-"
                 row.append({"type": "raw_text", "text": val})
 
-            # Use get_mention_cell to correctly tag the PM in the last column
             row.append(get_mention_cell(d.get("pm_slack_id"), d.get("pm_name")))
             rows.append(row)
 

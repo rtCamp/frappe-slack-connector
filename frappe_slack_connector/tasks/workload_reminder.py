@@ -82,20 +82,29 @@ def get_workload_data(start_date, end_date):
     return employees, allocation_map, leave_map
 
 
-def get_pm_mention(slack, reports_to):
-    """Get the Slack mention for the Project Manager (reports_to)"""
+def get_pm_details(slack, reports_to):
+    """Get the Slack ID and name for the Project Manager"""
     if not reports_to:
-        return "N/A"
+        return None, "N/A"
 
     pm_user_id = frappe.db.get_value("Employee", reports_to, "user_id")
     pm_name = frappe.db.get_value("Employee", reports_to, "employee_name")
 
+    slack_id = None
     if pm_user_id:
-        slack_id = slack.get_slack_user_id(employee_id=reports_to)
-        if slack_id:
-            return f"<@{slack_id}>"
+        slack_id = slack.get_slack_user_id(employee_id=reports_to, from_api=False)
 
-    return pm_name
+    return slack_id, pm_name or "N/A"
+
+
+def get_mention_cell(slack_id, fallback_name):
+    """Returns a rich_text user mention if slack_id is valid, otherwise returns a raw_text cell"""
+    if slack_id:
+        return {
+            "type": "rich_text",
+            "elements": [{"type": "rich_text_section", "elements": [{"type": "user", "user_id": slack_id}]}],
+        }
+    return {"type": "raw_text", "text": str(fallback_name)}
 
 
 def send_blocks_in_chunks(slack, channel, blocks):
@@ -133,11 +142,18 @@ def send_daily_workload_reminder():
         unallocated = max(0, STANDARD_HOURS - total_allocated)
 
         if unallocated > 0:
-            user_slack_id = slack.get_slack_user_id(employee_id=emp.name)
-            user_mention = f"<@{user_slack_id}>" if user_slack_id else emp.employee_name
-            pm_mention = get_pm_mention(slack, emp.reports_to)
+            user_slack_id = slack.get_slack_user_id(employee_id=emp.name, from_api=False)
+            pm_slack_id, pm_name = get_pm_details(slack, emp.reports_to)
 
-            underallocated_users.append({"name": user_mention, "unallocated": unallocated, "pm": pm_mention})
+            underallocated_users.append(
+                {
+                    "slack_id": user_slack_id,
+                    "name": emp.employee_name,
+                    "unallocated": unallocated,
+                    "pm_slack_id": pm_slack_id,
+                    "pm_name": pm_name,
+                }
+            )
 
     if not underallocated_users:
         return
@@ -145,25 +161,67 @@ def send_daily_workload_reminder():
     # Sort by highest hours unallocated
     underallocated_users.sort(key=lambda x: x["unallocated"], reverse=True)
 
-    blocks = [
-        {"type": "header", "text": {"type": "plain_text", "text": "📉 Daily Workload Alert"}},
-        {"type": "section", "text": {"type": "mrkdwn", "text": "*Engineers with less than 8 hours allocated today:*"}},
+    intro_blocks = [
+        {"type": "header", "text": {"type": "plain_text", "text": "📉 Daily Workload Alert", "emoji": True}},
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "The following engineers have less than 8 hours allocated today:"},
+        },
     ]
 
-    # Chunk the message strings to avoid 3000 chars limit per block
-    current_msg = ""
-    for u in underallocated_users:
-        line = f"• {u['name']}: *{u['unallocated']} hrs* unallocated (PM: {u['pm']})"
-        if len(current_msg) + len(line) + 1 > 2900:
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": current_msg.strip()}})
-            current_msg = line + "\n"
-        else:
-            current_msg += line + "\n"
+    header_row = [
+        {"type": "raw_text", "text": "Engineer"},
+        {"type": "raw_text", "text": "Unallocated Hours"},
+        {"type": "raw_text", "text": "Project Manager"},
+    ]
 
-    if current_msg.strip():
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": current_msg.strip()}})
+    # Slack restricts tables to a maximum of 100 rows and only 1 table per message.
+    chunk_size = 90
+    first_message = True
+    total_chunks = (len(underallocated_users) + chunk_size - 1) // chunk_size
 
-    send_blocks_in_chunks(slack, TARGET_CHANNEL, blocks)
+    for i in range(0, len(underallocated_users), chunk_size):
+        chunk = underallocated_users[i : i + chunk_size]
+        rows = [header_row]
+
+        for u in chunk:
+            rows.append(
+                [
+                    get_mention_cell(u.get("slack_id"), u.get("name")),
+                    {"type": "raw_text", "text": f"{u['unallocated']:g}h"},
+                    get_mention_cell(u.get("pm_slack_id"), u.get("pm_name")),
+                ]
+            )
+
+        table_block = {
+            "type": "table",
+            "column_settings": [
+                {"is_wrapped": True},  # Engineer
+                {"align": "center"},  # Unallocated Hours
+                {"is_wrapped": True},  # Project Manager
+            ],
+            "rows": rows,
+        }
+
+        # Include header texts only on the first payload sent to slack
+        payload_blocks = intro_blocks.copy() if first_message else []
+        payload_blocks.append(table_block)
+
+        # Include footer texts only on the last payload sent to slack
+        if i // chunk_size == total_chunks - 1:
+            payload_blocks.append({"type": "divider"})
+            payload_blocks.append(
+                {
+                    "type": "context",
+                    "elements": [
+                        {"type": "mrkdwn", "text": "💡 _Please ensure all allocations are updated in the PMS system._"}
+                    ],
+                }
+            )
+
+        slack.slack_app.client.chat_postMessage(channel=TARGET_CHANNEL, blocks=payload_blocks)
+        first_message = False
 
 
 def send_weekly_workload_reminder():
@@ -205,16 +263,28 @@ def send_weekly_workload_reminder():
                 has_underallocation = True
 
         if has_underallocation:
-            table_data.append({"name": emp.employee_name, "days": day_unallocated})
+            user_slack_id = slack.get_slack_user_id(employee_id=emp.name, from_api=False)
+            pm_slack_id, pm_name = get_pm_details(slack, emp.reports_to)
+
+            table_data.append(
+                {
+                    "slack_id": user_slack_id,
+                    "name": emp.employee_name,
+                    "days": day_unallocated,
+                    "pm_slack_id": pm_slack_id,
+                    "pm_name": pm_name,
+                }
+            )
 
     if not table_data:
         return
 
     intro_blocks = [
-        {"type": "header", "text": {"type": "plain_text", "text": "🗓️ Weekly Workload Alert"}},
+        {"type": "header", "text": {"type": "plain_text", "text": "🗓️ Weekly Workload Alert", "emoji": True}},
+        {"type": "divider"},
         {
             "type": "section",
-            "text": {"type": "mrkdwn", "text": "*Engineers with less than 8 hours allocated this week:*"},
+            "text": {"type": "mrkdwn", "text": "The following engineers have less than 8 hours allocated this week:"},
         },
     ]
 
@@ -225,22 +295,27 @@ def send_weekly_workload_reminder():
         {"type": "raw_text", "text": "Wed"},
         {"type": "raw_text", "text": "Thu"},
         {"type": "raw_text", "text": "Fri"},
+        {"type": "raw_text", "text": "Project Manager"},
     ]
 
     # Slack restricts tables to a maximum of 100 rows and only 1 table per message.
-    # We will chunk the data and send separate messages for each table to avoid 'only_one_table_allowed'.
     chunk_size = 90
     first_message = True
+    total_chunks = (len(table_data) + chunk_size - 1) // chunk_size
 
     for i in range(0, len(table_data), chunk_size):
         chunk = table_data[i : i + chunk_size]
         rows = [header_row]
 
         for d in chunk:
-            row = [{"type": "raw_text", "text": d["name"]}]
+            # Use get_mention_cell to correctly tag the engineer in the first column
+            row = [get_mention_cell(d.get("slack_id"), d.get("name"))]
             for u in d["days"]:
-                val = f"{u:g}" if u > 0 else "-"
+                val = f"{u:g}h" if u > 0 else "-"
                 row.append({"type": "raw_text", "text": val})
+
+            # Use get_mention_cell to correctly tag the PM in the last column
+            row.append(get_mention_cell(d.get("pm_slack_id"), d.get("pm_name")))
             rows.append(row)
 
         table_block = {
@@ -252,6 +327,7 @@ def send_weekly_workload_reminder():
                 {"align": "center"},  # Wed
                 {"align": "center"},  # Thu
                 {"align": "center"},  # Fri
+                {"is_wrapped": True},  # Project Manager
             ],
             "rows": rows,
         }
@@ -259,6 +335,16 @@ def send_weekly_workload_reminder():
         # Include header texts only on the first payload sent to slack
         payload_blocks = intro_blocks.copy() if first_message else []
         payload_blocks.append(table_block)
+
+        # Include footer texts only on the last payload sent to slack
+        if i // chunk_size == total_chunks - 1:
+            payload_blocks.append({"type": "divider"})
+            payload_blocks.append(
+                {
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": "💡 _Values shown are unallocated hours per day._"}],
+                }
+            )
 
         slack.slack_app.client.chat_postMessage(channel=TARGET_CHANNEL, blocks=payload_blocks)
         first_message = False

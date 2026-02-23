@@ -93,7 +93,7 @@ class SlackIntegration:
         user_email: str | None = None,
         employee_id: str | None = None,
         check_meta: bool = True,
-        from_api: bool = False,
+        from_api: bool = True,
     ) -> dict | None:
         """
         Get the Slack user for the given user email
@@ -107,13 +107,13 @@ class SlackIntegration:
 
         try:
             # If from API, directly fetch from Slack
-            if from_api:
-                if employee_id:
-                    # FIXME: Possible NoneType Error
-                    email = get_user_meta(employee_id=employee_id).user
-                else:
-                    email = user_email
-                return self.slack_app.client.users_lookupByEmail(email=email)
+            # if from_api:
+            #     if employee_id:
+            #         # FIXME: Possible NoneType Error
+            #         email = get_user_meta(employee_id=employee_id).user
+            #     else:
+            #         email = user_email
+            #     return self.slack_app.client.users_lookupByEmail(email=email)
 
             # If not from user meta but employee_id is provided, fetch user email first
             if not check_meta and employee_id:
@@ -137,14 +137,17 @@ class SlackIntegration:
             if not slack_email:
                 return None
 
-            try:
-                slack_user = self.slack_app.client.users_lookupByEmail(email=slack_email)
-            except Exception as e:
-                generate_error_log(
-                    title="Error fetching Slack user",
-                    message=f"User Email: {slack_email}",
-                    exception=e,
-                )
+            if from_api is True:
+                try:
+                    slack_user = self.slack_app.client.users_lookupByEmail(email=slack_email)
+                except Exception as e:
+                    generate_error_log(
+                        title="Error fetching Slack user",
+                        message=f"User Email: {slack_email}",
+                        exception=e,
+                    )
+                    return None
+            else:
                 return None
 
             return {

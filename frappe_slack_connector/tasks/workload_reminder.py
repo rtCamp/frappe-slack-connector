@@ -3,12 +3,11 @@ from frappe import _
 from frappe.utils import add_days, get_weekday, getdate
 
 from frappe_slack_connector.db.employee import check_if_date_is_holiday
+from frappe_slack_connector.db.timesheet import is_next_pms_installed
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.slack.app import SlackIntegration
 
-NEXT_PMS_INSTALLED = "next_pms" in frappe.get_installed_apps()
 IMPORT_SUCCESS = True
-
 
 try:
     from next_pms.resource_management.api.utils.query import get_allocation_list_for_employee_for_given_range
@@ -23,9 +22,6 @@ except ImportError:
             exc=NotImplementedError,
         )
 
-
-# Combined flag to use in tasks
-NEXT_PMS_AVAILABLE = NEXT_PMS_INSTALLED and IMPORT_SUCCESS
 
 STANDARD_HOURS = 8
 
@@ -128,7 +124,7 @@ def send_daily_workload_reminder():
         return
 
     # Fail gracefully if enabled but PMS is missing
-    if not NEXT_PMS_AVAILABLE:
+    if not (is_next_pms_installed() and IMPORT_SUCCESS):
         generate_error_log(
             "Daily Workload Reminder Error",
             message="Next PMS app is missing or failed to import, but 'Send Daily Allocation Updates' is enabled in Slack Settings.",
@@ -264,7 +260,7 @@ def send_weekly_workload_reminder():
         return
 
     # Fail gracefully if enabled but PMS is missing
-    if not NEXT_PMS_AVAILABLE:
+    if not (is_next_pms_installed() and IMPORT_SUCCESS):
         generate_error_log(
             "Weekly Workload Reminder Error",
             message="Next PMS app is missing or failed to import, but 'Send Weekly Allocation Updates' is enabled in Slack Settings.",

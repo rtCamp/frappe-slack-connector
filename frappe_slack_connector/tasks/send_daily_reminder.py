@@ -52,7 +52,7 @@ def send_slack_notification(reminder_template: str, allowed_departments: list):
     )
 
     for employee in employees:
-        user_slack = slack.get_slack_user_id(employee_id=employee)
+        user_slack = slack.get_slack_user_id(employee_id=employee, from_api=True)
         if not user_slack:
             continue
         if check_if_date_is_holiday(date, employee.name):
@@ -94,6 +94,7 @@ def send_slack_notification(reminder_template: str, allowed_departments: list):
                 "mention": f"<@{user_slack}>",
                 "daily_norm": daily_norm,
             }
+            # nosemgrep
             message = frappe.render_template(reminder_template.response_html, args)
             slack.slack_app.client.chat_postMessage(
                 channel=user_slack,

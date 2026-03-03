@@ -1,5 +1,5 @@
 import frappe
-from frappe import _
+from frappe import _ as translate
 from frappe.utils import add_days, get_weekday, getdate
 
 from frappe_slack_connector.db.employee import check_if_date_is_holiday
@@ -16,7 +16,7 @@ except ImportError:
 
     def get_allocation_list_for_employee_for_given_range(*args, **kwargs):
         frappe.throw(
-            _(
+            translate(
                 "get_allocation_list_for_employee_for_given_range is not implemented because next_pms module is missing."
             ),
             exc=NotImplementedError,
@@ -85,7 +85,7 @@ def get_workload_data(start_date, end_date):
 
 
 def get_pm_details(slack, reports_to, mention_users=True):
-    """Get the Slack ID and name for the Project Manager"""
+    """Get the Slack ID and name for the Reporting Manager"""
     if not reports_to:
         return None, "N/A"
 
@@ -99,12 +99,28 @@ def get_pm_details(slack, reports_to, mention_users=True):
     return slack_id, pm_name or "N/A"
 
 
-def get_mention_cell(slack_id, fallback_name):
-    """Returns a rich_text user mention if slack_id is valid, otherwise returns a raw_text cell"""
+def get_mention_text(slack_id, fallback_name):
+    """Returns a string formatted for markdown with the user's name and slack mention (Used for Daily List)."""
     if slack_id:
+        return f"{fallback_name} (<@{slack_id}>)"
+    return str(fallback_name)
+
+
+def get_mention_cell(slack_id, fallback_name, include_name=False):
+    """Returns a rich_text user mention for the Slack table block (Used for Weekly Table)."""
+    if slack_id:
+        elements = []
+        if include_name:
+            elements.append({"type": "text", "text": f"{fallback_name} ("})
+
+        elements.append({"type": "user", "user_id": slack_id})
+
+        if include_name:
+            elements.append({"type": "text", "text": ")"})
+
         return {
             "type": "rich_text",
-            "elements": [{"type": "rich_text_section", "elements": [{"type": "user", "user_id": slack_id}]}],
+            "elements": [{"type": "rich_text_section", "elements": elements}],
         }
     return {"type": "raw_text", "text": str(fallback_name)}
 
@@ -115,6 +131,11 @@ def send_blocks_in_chunks(slack, channel, blocks):
     for i in range(0, len(blocks), chunk_size):
         chunk = blocks[i : i + chunk_size]
         slack.slack_app.client.chat_postMessage(channel=channel, blocks=chunk)
+
+
+# ==========================================
+# DAILY WORKLOAD REMINDER (Markdown List)
+# ==========================================
 
 
 def send_daily_workload_reminder():
@@ -144,12 +165,10 @@ def send_daily_workload_reminder():
     underallocated_users = []
 
     for emp in employees:
-        # Check for Holidays!
         if check_if_date_is_holiday(date, emp.name):
             continue
 
         leaves = leave_map.get(emp.name, [])
-        # Check if they are on leave today
         on_leave = any(leave.get("from_date") <= date <= leave.get("to_date") for leave in leaves)
         if on_leave:
             continue
@@ -164,8 +183,8 @@ def send_daily_workload_reminder():
 
         if unallocated > 0:
             user_slack_id = None
-            if mention_users:
-                user_slack_id = slack.get_slack_user_id(employee_id=emp.name)
+            if mention_users and emp.user_id:
+                user_slack_id = frappe.db.get_value("User Meta", {"user": emp.user_id}, "custom_slack_userid")
 
             pm_slack_id, pm_name = get_pm_details(slack, emp.reports_to, mention_users)
 
@@ -182,75 +201,101 @@ def send_daily_workload_reminder():
     if not underallocated_users:
         return
 
-    # Sort by highest hours unallocated
-    underallocated_users.sort(key=lambda x: x["unallocated"], reverse=True)
+    # Group users by Reporting Manager and aggregate their unallocated time
+    grouped_data = {}
+    for u in underallocated_users:
+        pm = u["pm_name"]
+        if pm not in grouped_data:
+            grouped_data[pm] = {"pm_slack_id": u["pm_slack_id"], "engineers": [], "total_unallocated": 0}
+        grouped_data[pm]["engineers"].append(u)
+        grouped_data[pm]["total_unallocated"] += u["unallocated"]
 
-    intro_blocks = [
+    # Sort managers by highest total unallocated time
+    sorted_managers = sorted(grouped_data.items(), key=lambda x: x[1]["total_unallocated"], reverse=True)
+
+    # Sort engineers within managers by unallocated time
+    for _, data in sorted_managers:
+        data["engineers"].sort(key=lambda x: x["unallocated"], reverse=True)
+
+    section_texts = format_daily_workload_groups(sorted_managers)
+    blocks = format_daily_workload_blocks(len(underallocated_users), section_texts)
+
+    send_blocks_in_chunks(slack, target_channel, blocks)
+
+
+def format_daily_workload_groups(sorted_managers: list) -> list:
+    """Format daily groups into chunked text strings (below Slack's 3000 char limit)."""
+    sections = []
+    current_text = ""
+
+    for pm_name, data in sorted_managers:
+        pm_mention = get_mention_text(data["pm_slack_id"], pm_name)
+        pm_text = f"*{pm_mention}*\n"
+
+        for index, emp in enumerate(data["engineers"], start=1):
+            eng_mention = get_mention_text(emp["slack_id"], emp["name"])
+            emp_text = f"  {index}. {eng_mention} - _{emp['unallocated']:g}h_\n"
+
+            # Check if adding this will exceed Slack's limit
+            if len(current_text) + len(pm_text) + len(emp_text) > 2900:
+                if current_text:
+                    sections.append(current_text.strip())
+                    current_text = ""
+                pm_text = f"*{pm_mention}* _(cont.)_\n"
+
+            pm_text += emp_text
+
+        current_text += pm_text + "\n"
+
+    if current_text:
+        sections.append(current_text.strip())
+
+    return sections
+
+
+def format_daily_workload_blocks(employee_count: int, section_texts: list) -> list:
+    """Format the daily workload summary into Slack blocks."""
+    blocks = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": ":chart_with_upwards_trend: Daily Workload Alert", "emoji": True},
+            "text": {
+                "type": "plain_text",
+                "text": f":chart_with_upwards_trend: {employee_count} Underallocated Engineer{'s' if employee_count > 1 else ''} Today",
+                "emoji": True,
+            },
         },
-        {"type": "divider"},
+    ]
+
+    for text in section_texts:
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": text,
+                },
+            }
+        )
+
+    blocks.append({"type": "divider"})
+    blocks.append(
         {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": "The following engineers have less than 8 hours allocated today:"},
-        },
-    ]
-
-    header_row = [
-        {"type": "raw_text", "text": "Engineer"},
-        {"type": "raw_text", "text": "Unallocated Hours"},
-        {"type": "raw_text", "text": "Project Manager"},
-    ]
-
-    chunk_size = 90
-    first_message = True
-    total_chunks = (len(underallocated_users) + chunk_size - 1) // chunk_size
-
-    for i in range(0, len(underallocated_users), chunk_size):
-        chunk = underallocated_users[i : i + chunk_size]
-        rows = [header_row]
-
-        for u in chunk:
-            rows.append(
-                [
-                    get_mention_cell(u.get("slack_id"), u.get("name")),
-                    {"type": "raw_text", "text": f"{u['unallocated']:g}h"},
-                    get_mention_cell(u.get("pm_slack_id"), u.get("pm_name")),
-                ]
-            )
-
-        table_block = {
-            "type": "table",
-            "column_settings": [
-                {"is_wrapped": True},  # Engineer
-                {"align": "center"},  # Unallocated Hours
-                {"is_wrapped": True},  # Project Manager
-            ],
-            "rows": rows,
-        }
-
-        # Include header texts only on the first payload sent to slack
-        payload_blocks = intro_blocks.copy() if first_message else []
-        payload_blocks.append(table_block)
-
-        # Include footer texts only on the last payload sent to slack
-        if i // chunk_size == total_chunks - 1:
-            payload_blocks.append({"type": "divider"})
-            payload_blocks.append(
+            "type": "context",
+            "elements": [
                 {
-                    "type": "context",
-                    "elements": [
-                        {
-                            "type": "mrkdwn",
-                            "text": ":bulb: _Please ensure all allocations are updated in the PMS system._",
-                        }
-                    ],
+                    "type": "mrkdwn",
+                    "text": ":bulb: _Please ensure all allocations are updated in the PMS system._",
                 }
-            )
+            ],
+        }
+    )
 
-        slack.slack_app.client.chat_postMessage(channel=target_channel, blocks=payload_blocks)
-        first_message = False
+    return blocks
+
+
+# ==========================================
+# WEEKLY WORKLOAD REMINDER (Table Format)
+# ==========================================
 
 
 def send_weekly_workload_reminder():
@@ -325,8 +370,8 @@ def send_weekly_workload_reminder():
 
         if has_underallocation:
             user_slack_id = None
-            if mention_users:
-                user_slack_id = slack.get_slack_user_id(employee_id=emp.name)
+            if mention_users and emp.user_id:
+                user_slack_id = frappe.db.get_value("User Meta", {"user": emp.user_id}, "custom_slack_userid")
 
             pm_slack_id, pm_name = get_pm_details(slack, emp.reports_to, mention_users)
 
@@ -343,8 +388,8 @@ def send_weekly_workload_reminder():
     if not table_data:
         return
 
-    # Sort by highest total missing hours across the entire week
-    table_data.sort(key=lambda x: sum(x["days"]), reverse=True)
+    # Group by Reporting Manager alphabetically, then sort by highest unallocated hours
+    table_data.sort(key=lambda x: (x["pm_name"], -sum(x["days"])))
 
     intro_blocks = [
         {"type": "header", "text": {"type": "plain_text", "text": ":date: Weekly Workload Alert", "emoji": True}},
@@ -355,15 +400,13 @@ def send_weekly_workload_reminder():
         },
     ]
 
-    header_row = [
-        {"type": "raw_text", "text": "Engineer"},
-        {"type": "raw_text", "text": "Mon"},
-        {"type": "raw_text", "text": "Tue"},
-        {"type": "raw_text", "text": "Wed"},
-        {"type": "raw_text", "text": "Thu"},
-        {"type": "raw_text", "text": "Fri"},
-        {"type": "raw_text", "text": "Project Manager"},
-    ]
+    # Build dynamic headers with dates (e.g. "Mon (Oct 14)")
+    header_row = [{"type": "raw_text", "text": "Engineer"}]
+    for i in range(5):
+        cur_date = getdate(add_days(monday, i))
+        # Use strftime to get the abbreviated day and month/date format
+        header_row.append({"type": "raw_text", "text": cur_date.strftime("%a (%b %d)")})
+    header_row.append({"type": "raw_text", "text": "Reporting Manager"})
 
     chunk_size = 90
     first_message = True
@@ -374,12 +417,15 @@ def send_weekly_workload_reminder():
         rows = [header_row]
 
         for d in chunk:
-            row = [get_mention_cell(d.get("slack_id"), d.get("name"))]
+            # First column: Name (@handle)
+            row = [get_mention_cell(d.get("slack_id"), d.get("name"), include_name=True)]
+
             for u in d["days"]:
                 val = f"{u:g}h" if u > 0 else "-"
                 row.append({"type": "raw_text", "text": val})
 
-            row.append(get_mention_cell(d.get("pm_slack_id"), d.get("pm_name")))
+            # Last column: Reporting Manager (repeats on every row)
+            row.append(get_mention_cell(d.get("pm_slack_id"), d.get("pm_name"), include_name=False))
             rows.append(row)
 
         table_block = {
@@ -391,7 +437,7 @@ def send_weekly_workload_reminder():
                 {"align": "center"},  # Wed
                 {"align": "center"},  # Thu
                 {"align": "center"},  # Fri
-                {"is_wrapped": True},  # Project Manager
+                {"is_wrapped": True},  # Reporting Manager
             ],
             "rows": rows,
         }

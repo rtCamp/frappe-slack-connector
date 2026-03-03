@@ -234,7 +234,7 @@ def format_daily_workload_groups(sorted_managers: list) -> list:
 
         for index, emp in enumerate(data["engineers"], start=1):
             eng_mention = get_mention_text(emp["slack_id"], emp["name"])
-            emp_text = f"  {index}. {eng_mention} - _{emp['unallocated']:g}h unallocated_\n"
+            emp_text = f"  {index}. {eng_mention} - _{emp['unallocated']:g}h_\n"
 
             # Check if adding this will exceed Slack's limit
             if len(current_text) + len(pm_text) + len(emp_text) > 2900:

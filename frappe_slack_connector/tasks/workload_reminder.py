@@ -3,7 +3,7 @@ from frappe import _ as translate
 from frappe.utils import add_days, get_weekday, getdate
 
 from frappe_slack_connector.db.employee import check_if_date_is_holiday
-from frappe_slack_connector.db.timesheet import is_next_pms_installed
+from frappe_slack_connector.db.timesheet import get_employee_daily_working_norm, is_next_pms_installed
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.slack.app import SlackIntegration
 
@@ -21,9 +21,6 @@ except ImportError:
             ),
             exc=NotImplementedError,
         )
-
-
-STANDARD_HOURS = 8
 
 
 def get_workload_data(start_date, end_date):
@@ -139,7 +136,7 @@ def send_blocks_in_chunks(slack, channel, blocks):
 
 
 def send_daily_workload_reminder():
-    """Triggered daily. Alerts if today's allocation < 8 hours."""
+    """Triggered daily. Alerts if today's allocation is incomplete."""
     slack_settings = frappe.get_single("Slack Settings")
     if not slack_settings.send_daily_allocation_updates:
         return
@@ -165,6 +162,8 @@ def send_daily_workload_reminder():
     underallocated_users = []
 
     for emp in employees:
+        daily_norm = get_employee_daily_working_norm(emp.name)
+
         if check_if_date_is_holiday(date, emp.name):
             continue
 
@@ -179,7 +178,7 @@ def send_daily_workload_reminder():
             if a.get("allocation_start_date") <= date <= a.get("allocation_end_date")
         ]
         total_allocated = sum(a.get("hours_allocated_per_day") or 0 for a in allocs)
-        unallocated = max(0, STANDARD_HOURS - total_allocated)
+        unallocated = max(0, daily_norm - total_allocated)
 
         if unallocated > 0:
             user_slack_id = None
@@ -337,6 +336,8 @@ def send_weekly_workload_reminder():
     table_data = []
 
     for emp in employees:
+        daily_norm = get_employee_daily_working_norm(emp.name)
+
         leaves = leave_map.get(emp.name, [])
         allocs = allocation_map.get(emp.name, [])
 
@@ -362,7 +363,7 @@ def send_weekly_workload_reminder():
             ]
             total_allocated = sum(a.get("hours_allocated_per_day") or 0 for a in cur_allocs)
 
-            unallocated = max(0, STANDARD_HOURS - total_allocated)
+            unallocated = max(0, daily_norm - total_allocated)
             day_unallocated.append(unallocated)
 
             if unallocated > 0:
@@ -396,7 +397,7 @@ def send_weekly_workload_reminder():
         {"type": "divider"},
         {
             "type": "section",
-            "text": {"type": "mrkdwn", "text": "The following engineers have less than 8 hours allocated this week:"},
+            "text": {"type": "mrkdwn", "text": "The following engineers have incomplete allocations this week:"},
         },
     ]
 

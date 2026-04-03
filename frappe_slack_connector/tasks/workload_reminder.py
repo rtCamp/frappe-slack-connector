@@ -1,6 +1,6 @@
 import frappe
 from frappe import _ as translate
-from frappe.utils import add_days, get_weekday, getdate
+from frappe.utils import add_days, get_url, get_weekday, getdate
 
 from frappe_slack_connector.db.employee import check_if_date_is_holiday
 from frappe_slack_connector.db.timesheet import get_employee_daily_working_norm, is_next_pms_installed
@@ -277,13 +277,14 @@ def format_daily_workload_blocks(employee_count: int, section_texts: list) -> li
         )
 
     blocks.append({"type": "divider"})
+    link = get_url() + "/next-pms/resource-management/team"
     blocks.append(
         {
             "type": "context",
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": ":bulb: _Please ensure all allocations are updated in the PMS system._",
+                    "text": f":bulb: _Please ensure all allocations are updated in the PMS system._ <{link}|link>",
                 }
             ],
         }

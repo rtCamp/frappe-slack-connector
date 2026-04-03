@@ -299,7 +299,7 @@ def format_daily_workload_blocks(employee_count: int, section_texts: list) -> li
 
 
 def send_weekly_workload_reminder():
-    """Triggered weekly. Generates a table of underallocated hours for the week."""
+    """Triggered weekly. Generates a table of underallocated hours for next week."""
     slack_settings = frappe.get_single("Slack Settings")
     if not slack_settings.send_weekly_allocation_updates:
         return
@@ -322,12 +322,9 @@ def send_weekly_workload_reminder():
     target_channel = slack_settings.workload_channel_id or "#workload"
     mention_users = slack_settings.workload_mention_users
 
-    # Establish the Monday to Friday for the evaluated week
+    # Establish Monday to Friday for the next calendar week
     weekday = date.weekday()
-    if weekday > 4:  # Run on weekend -> evaluates the next week
-        monday = add_days(date, (7 - weekday) % 7)
-    else:  # Run on weekday -> evaluates the current week
-        monday = add_days(date, -weekday)
+    monday = add_days(date, 7 - weekday)
 
     end_date = add_days(monday, 4)  # Friday
 
@@ -398,7 +395,7 @@ def send_weekly_workload_reminder():
         {"type": "divider"},
         {
             "type": "section",
-            "text": {"type": "mrkdwn", "text": "The following engineers have incomplete allocations this week:"},
+            "text": {"type": "mrkdwn", "text": "The following engineers have incomplete allocations next week:"},
         },
     ]
 
@@ -413,7 +410,6 @@ def send_weekly_workload_reminder():
     chunk_size = 90
     first_message = True
     total_chunks = (len(table_data) + chunk_size - 1) // chunk_size
-
     for i in range(0, len(table_data), chunk_size):
         chunk = table_data[i : i + chunk_size]
         rows = [header_row]

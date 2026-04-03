@@ -37,7 +37,7 @@ def get_workload_data(start_date, end_date):
     employees = frappe.get_all(
         "Employee",
         filters={"status": "Active", "designation": ["in", designations]},
-        fields=["name", "employee_name", "reports_to", "user_id"],
+        fields=["name", "employee_name", "designation", "reports_to", "user_id"],
     )
 
     employee_names = [emp.name for emp in employees]
@@ -191,6 +191,7 @@ def send_daily_workload_reminder():
                 {
                     "slack_id": user_slack_id,
                     "name": emp.employee_name,
+                    "designation": emp.designation,
                     "unallocated": unallocated,
                     "pm_slack_id": pm_slack_id,
                     "pm_name": pm_name,
@@ -233,7 +234,8 @@ def format_daily_workload_groups(sorted_managers: list) -> list:
 
         for index, emp in enumerate(data["engineers"], start=1):
             eng_mention = get_mention_text(emp["slack_id"], emp["name"])
-            emp_text = f"  {index}. {eng_mention} - _{emp['unallocated']:g}h_\n"
+            designation = emp.get("designation") or "No Designation"
+            emp_text = f"  {index}. {eng_mention} - {designation} - _{emp['unallocated']:g}h_\n"
 
             # Check if adding this will exceed Slack's limit
             if len(current_text) + len(pm_text) + len(emp_text) > 2900:

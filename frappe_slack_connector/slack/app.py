@@ -192,3 +192,34 @@ class SlackIntegration:
         """
         slack_user = self.get_slack_user(*args, **kwargs)
         return slack_user.get("id") if slack_user else None
+
+    def get_slack_channels(self, limit: int = 200) -> list[dict]:
+        """
+        Get all active Slack channels from the workspace
+        Uses pagination to handle large numbers of channels
+        """
+        channels = []
+        cursor = None
+
+        while True:
+            try:
+                kwargs = {"types": "public_channel,private_channel", "exclude_archived": True, "limit": limit}
+                if cursor:
+                    kwargs["cursor"] = cursor
+
+                result = self.slack_app.client.conversations_list(**kwargs)
+
+                channels.extend([{"id": ch["id"], "name": ch["name"]} for ch in result.get("channels", [])])
+
+                cursor = result.get("response_metadata", {}).get("next_cursor")
+                if not cursor:
+                    break
+
+            except Exception as e:
+                generate_error_log(
+                    title="Error fetching Slack channels",
+                    exception=e,
+                )
+                break
+
+        return channels

@@ -81,3 +81,66 @@ def sync_slack_job(notify: bool = False):
             msgprint=notify,
             realtime=notify,
         )
+
+
+@frappe.whitelist()
+def sync_slack_channels():
+    """
+    Sync Slack channels into Slack Channel doctype
+    """
+    frappe.msgprint(_("Syncing Slack channels..."))
+    frappe.enqueue(sync_slack_channels_job, queue="long", notify=True)
+
+
+def sync_slack_channels_job(notify: bool = False):
+    """
+    Background job to sync Slack channels into Slack Channel doctype
+    """
+    try:
+        slack = SlackIntegration()
+        channels = slack.get_slack_channels()
+
+        if not channels:
+            return
+
+        # Fetch all existing channels in ONE query
+        existing = frappe.db.get_all(
+            "Slack Channel",
+            fields=["name", "channel_id", "channel_name"],
+        )
+        existing_map = {
+            ch["channel_name"]: {"name": ch["name"], "channel_id": ch["channel_id"], "channel_name": ch["channel_name"]}
+            for ch in existing
+        }
+
+        for ch in channels:
+            if ch["name"] in existing_map:
+                # Only update if something changed
+                if existing_map[ch["name"]]["channel_name"] != ch["name"]:
+                    frappe.db.set_value("Slack Channel", existing_map[ch["name"]]["name"], "channel_name", ch["name"])
+                # else skip — nothing changed
+            else:
+                frappe.get_doc(
+                    {
+                        "doctype": "Slack Channel",
+                        "channel_id": ch["id"],
+                        "channel_name": ch["name"],
+                    }
+                ).insert(ignore_permissions=True)
+
+        frappe.db.commit()
+
+        if notify:
+            frappe.msgprint(
+                _("Synced {0} Slack channels successfully").format(len(channels)),
+                realtime=True,
+                indicator="green",
+            )
+
+    except Exception as e:
+        generate_error_log(
+            title="Error syncing Slack channels",
+            exception=e,
+            msgprint=notify,
+            realtime=notify,
+        )

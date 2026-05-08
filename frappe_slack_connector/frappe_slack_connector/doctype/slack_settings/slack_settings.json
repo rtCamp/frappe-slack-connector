@@ -27,7 +27,12 @@
   "timesheet_daily_notification_time",
   "reminder_template",
   "allowed_departments",
-  "last_timesheet_notification_date"
+  "last_timesheet_notification_date",
+  "resource_allocation_section",
+  "send_daily_allocation_updates",
+  "send_weekly_allocation_updates",
+  "workload_mention_users",
+  "workload_channel_id"
  ],
  "fields": [
   {
@@ -180,12 +185,41 @@
    "fieldtype": "Check",
    "label": "Mention User",
    "mandatory_depends_on": "eval:doc.send_attendance_updates"
+  },
+  {
+   "description": "This section requires https://github.com/rtCamp/next-pms app",
+   "fieldname": "resource_allocation_section",
+   "fieldtype": "Section Break",
+   "label": "Resource Allocation"
+  },
+  {
+   "default": "0",
+   "fieldname": "send_daily_allocation_updates",
+   "fieldtype": "Check",
+   "label": "Send Daily Allocation Updates"
+  },
+  {
+   "default": "0",
+   "fieldname": "send_weekly_allocation_updates",
+   "fieldtype": "Check",
+   "label": "Send Weekly Allocation Updates"
+  },
+  {
+   "default": "0",
+   "fieldname": "workload_mention_users",
+   "fieldtype": "Check",
+   "label": "Mention Users"
+  },
+  {
+   "fieldname": "workload_channel_id",
+   "fieldtype": "Data",
+   "label": "Workload Channel ID"
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2025-05-27 18:54:28.174707",
+ "modified": "2026-02-23 18:43:41.334908",
  "modified_by": "Administrator",
  "module": "Frappe Slack Connector",
  "name": "Slack Settings",

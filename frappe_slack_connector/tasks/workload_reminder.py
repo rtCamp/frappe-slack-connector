@@ -286,7 +286,7 @@ def format_daily_workload_blocks(employee_count: int, section_texts: list) -> li
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": f":bulb: _Please ensure all allocations are updated in the PMS system._ <{link}|link>",
+                    "text": f":bulb: _Please ensure all allocations are updated in the <{link}|PMS system>._",
                 }
             ],
         }

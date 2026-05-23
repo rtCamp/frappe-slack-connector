@@ -1,5 +1,6 @@
 import frappe
 from frappe.model.workflow import apply_workflow
+from frappe.query_builder import DocType
 from frappe.utils import today
 
 
@@ -13,52 +14,39 @@ def custom_fields_exist() -> bool:
 
 def get_employees_on_leave() -> list:
     """
-    Get all employees on leave today
+    Get all active employees on leave today
     """
     current_date = today()
 
-    fields = [
-        "employee",
-        "employee_name",
-        "leave_type",
-        "from_date",
-        "to_date",
-        "status",
-        "half_day",
-        "half_day_date",
-    ]
+    LA = DocType("Leave Application")
+    Emp = DocType("Employee")
+
+    query = (
+        frappe.qb.from_(LA)
+        .inner_join(Emp)
+        .on(LA.employee == Emp.name)
+        .where(Emp.status == "Active")
+        .where(LA.from_date <= current_date)
+        .where(LA.to_date >= current_date)
+        .where(LA.status.isin(["Open", "Approved"]))
+        .where(LA.docstatus < 2)
+        .select(
+            LA.employee,
+            LA.employee_name,
+            LA.leave_type,
+            LA.from_date,
+            LA.to_date,
+            LA.status,
+            LA.half_day,
+            LA.half_day_date,
+        )
+        .orderby(LA.to_date)
+    )
 
     if custom_fields_exist():
-        fields.append("custom_first_halfsecond_half")
+        query = query.select(LA.custom_first_halfsecond_half)
 
-    # 1. Fetch only Active employees
-    active_employees = frappe.get_all(
-        "Employee",
-        filters={"status": "Active"},
-        pluck="name"
-    )
-
-    # Performance safeguard: If no active employees exist, skip the main query
-    if not active_employees:
-        return []
-
-    # 2. Query Leave Application doctype, filtering by the active employees list
-    leave_applications = frappe.get_all(
-        "Leave Application",
-        filters={
-            "from_date": ("<=", current_date),
-            "to_date": (">=", current_date),
-            "status": (
-                "in",
-                ["Open", "Approved"],
-            ),
-            "employee": ("in", active_employees), # <-- NEW FILTER ADDED HERE
-        },
-        fields=fields,
-        order_by="to_date asc",
-    )
-
-    return leave_applications
+    return query.run(as_dict=True)
 
 
 def approve_leave(leave_id: str) -> None:

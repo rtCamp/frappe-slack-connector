@@ -153,6 +153,14 @@ doc_events = {
 # ---------------
 
 scheduler_events = {
+    "cron": {
+        "30 7 * * *": [
+            "frappe_slack_connector.tasks.workload_reminder.send_weekly_workload_reminder",
+        ],
+        "0 8 * * *": [
+            "frappe_slack_connector.tasks.workload_reminder.send_daily_workload_reminder",
+        ],
+    },
     "all": [
         "frappe_slack_connector.tasks.attendance_summary.attendance_channel",
     ],

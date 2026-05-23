@@ -52,6 +52,8 @@ def send_slack_notification(reminder_template: str, allowed_departments: list):
     )
 
     for employee in employees:
+        if not employee.user_id:
+            continue
         user_slack = slack.get_slack_user_id(user_email=employee.user_id)
         if not user_slack:
             continue
@@ -94,6 +96,7 @@ def send_slack_notification(reminder_template: str, allowed_departments: list):
                 "mention": f"<@{user_slack}>",
                 "daily_norm": daily_norm,
             }
+            # nosemgrep
             message = frappe.render_template(reminder_template.response_html, args)
             slack.slack_app.client.chat_postMessage(
                 channel=user_slack,

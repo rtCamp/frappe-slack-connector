@@ -1,5 +1,7 @@
+import time
 from unittest.mock import patch
 
+import frappe
 from frappe.tests import IntegrationTestCase
 
 from frappe_slack_connector.slack.app import SlackIntegration
@@ -9,6 +11,7 @@ from frappe_slack_connector.tests import (
     TEST_SLACK_USER_ID,
     TEST_SLACK_USERNAME,
     TEST_USER,
+    build_signed_slack_request,
     build_slack_client_mock,
     make_test_user,
     make_test_user_meta,
@@ -328,3 +331,58 @@ class TestGetSlackChannels(IntegrationTestCase):
         slack = _build_integration(client)
         result = slack.get_slack_channels()
         self.assertEqual(result, [{"id": "C9", "name": "real"}])
+
+
+class TestVerifySlackRequest(IntegrationTestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        _seed_slack_settings()
+
+    def test_returns_silently_when_signature_and_timestamp_are_valid(self):
+        """verify_slack_request returns None without raising when the supplied signature matches and the timestamp is fresh."""
+        body, headers = build_signed_slack_request("payload=ok")
+        slack = _build_integration(build_slack_client_mock())
+        # Returns None on success.
+        self.assertIsNone(
+            slack.verify_slack_request(
+                signature=headers["X-Slack-Signature"],
+                timestamp=headers["X-Slack-Request-Timestamp"],
+                req_data=body,
+            )
+        )
+
+    def test_raises_permission_error_on_signature_mismatch(self):
+        """verify_slack_request raises frappe.PermissionError when the supplied signature does not match the computed HMAC."""
+        body, headers = build_signed_slack_request("payload=ok")
+        slack = _build_integration(build_slack_client_mock())
+        with self.assertRaises(frappe.PermissionError):
+            slack.verify_slack_request(
+                signature="v0=wrong",
+                timestamp=headers["X-Slack-Request-Timestamp"],
+                req_data=body,
+            )
+
+    def test_raises_permission_error_when_timestamp_older_than_five_minutes(self):
+        """verify_slack_request raises frappe.PermissionError when the timestamp is more than 300 seconds old (replay protection)."""
+        old_ts = int(time.time()) - (6 * 60)
+        body, headers = build_signed_slack_request("payload=old", timestamp=old_ts)
+        slack = _build_integration(build_slack_client_mock())
+        with self.assertRaises(frappe.PermissionError):
+            slack.verify_slack_request(
+                signature=headers["X-Slack-Signature"],
+                timestamp=headers["X-Slack-Request-Timestamp"],
+                req_data=body,
+            )
+
+    def test_uses_hmac_compare_digest_for_constant_time_comparison(self):
+        """verify_slack_request compares signatures via hmac.compare_digest (constant-time)."""
+        body, headers = build_signed_slack_request("payload=ok")
+        slack = _build_integration(build_slack_client_mock())
+        with patch("hmac.compare_digest", return_value=True) as mock_cmp:
+            slack.verify_slack_request(
+                signature=headers["X-Slack-Signature"],
+                timestamp=headers["X-Slack-Request-Timestamp"],
+                req_data=body,
+            )
+        mock_cmp.assert_called_once()

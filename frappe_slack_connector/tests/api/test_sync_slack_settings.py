@@ -63,21 +63,33 @@ class TestSyncSlackJob(IntegrationTestCase):
         mock_slack.get_slack_users.return_value = {
             "old@x.com": {"id": "U-OLD-NEW", "name": "old_user"},
         }
-        existing = [frappe._dict({"name": "UM-001", "user": "old@x.com"})]
+        existing_user_metas = [frappe._dict({"name": "UM-001", "user": "old@x.com"})]
+
+        # sync_slack_job calls frappe.get_all twice (User Meta + Employee). Route by doctype
+        # so the Employee branch sees an empty list and doesn't fall into the error-handling path.
+        def get_all_router(doctype, *args, **kwargs):
+            if doctype == "User Meta":
+                return existing_user_metas
+            if doctype == "Employee":
+                return [frappe._dict({"user_id": "old@x.com", "employee_name": "Old"})]
+            return []
+
         mock_new_doc = MagicMock()
         with (
             patch(f"{SYNC_MODULE}.SlackIntegration", return_value=mock_slack),
-            patch(f"{SYNC_MODULE}.frappe.get_all", return_value=existing),
+            patch(f"{SYNC_MODULE}.frappe.get_all", side_effect=get_all_router),
             patch(f"{SYNC_MODULE}.frappe.db.set_value") as mock_set_value,
             patch(f"{SYNC_MODULE}.frappe.get_doc", return_value=mock_new_doc),
             patch(f"{SYNC_MODULE}.frappe.db.commit"),
             patch(f"{SYNC_MODULE}.frappe.msgprint"),
-            patch(f"{SYNC_MODULE}.generate_error_log"),
+            patch(f"{SYNC_MODULE}.generate_error_log") as mock_log,
         ):
             sync_slack_job(notify=False)
         mock_set_value.assert_called_once()
         # Update path was taken; the User Meta insert helper on mock_new_doc was not invoked.
         mock_new_doc.insert.assert_not_called()
+        # And the error-handling path was not triggered.
+        mock_log.assert_not_called()
 
     def test_msgprints_realtime_success_when_notify_true(self):
         """When notify=True, sync_slack_job emits a realtime msgprint after a successful sync."""

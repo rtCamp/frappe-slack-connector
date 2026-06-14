@@ -36,6 +36,7 @@ class TestSendDailyWorkloadReminder(IntegrationTestCase):
         with (
             patch(f"{WORKLOAD_MODULE}.frappe.get_single", return_value=settings),
             patch(f"{WORKLOAD_MODULE}.is_next_pms_installed", return_value=True),
+            patch(f"{WORKLOAD_MODULE}.IMPORT_SUCCESS", True),
             patch(f"{WORKLOAD_MODULE}.SlackIntegration") as mock_slack_class,
         ):
             send_daily_workload_reminder()
@@ -60,6 +61,7 @@ class TestSendDailyWorkloadReminder(IntegrationTestCase):
         with (
             patch(f"{WORKLOAD_MODULE}.frappe.get_single", return_value=settings),
             patch(f"{WORKLOAD_MODULE}.is_next_pms_installed", return_value=True),
+            patch(f"{WORKLOAD_MODULE}.IMPORT_SUCCESS", True),
             patch(f"{WORKLOAD_MODULE}.getdate", return_value=date_cls(2026, 6, 13)),  # Saturday
             patch(f"{WORKLOAD_MODULE}.SlackIntegration") as mock_slack_class,
         ):
@@ -73,6 +75,7 @@ class TestSendDailyWorkloadReminder(IntegrationTestCase):
         with (
             patch(f"{WORKLOAD_MODULE}.frappe.get_single", return_value=settings),
             patch(f"{WORKLOAD_MODULE}.is_next_pms_installed", return_value=True),
+            patch(f"{WORKLOAD_MODULE}.IMPORT_SUCCESS", True),
             patch(f"{WORKLOAD_MODULE}.getdate", return_value=date_cls(2026, 6, 15)),  # Monday
             patch(f"{WORKLOAD_MODULE}.SlackIntegration", return_value=mock_slack),
             patch(f"{WORKLOAD_MODULE}.get_workload_data", return_value=([], {}, {})),
@@ -88,6 +91,7 @@ class TestSendWeeklyWorkloadReminder(IntegrationTestCase):
         with (
             patch(f"{WORKLOAD_MODULE}.frappe.get_single", return_value=settings),
             patch(f"{WORKLOAD_MODULE}.is_next_pms_installed", return_value=True),
+            patch(f"{WORKLOAD_MODULE}.IMPORT_SUCCESS", True),
             patch(f"{WORKLOAD_MODULE}.SlackIntegration") as mock_slack_class,
         ):
             send_weekly_workload_reminder()
@@ -121,6 +125,7 @@ class TestSendWeeklyWorkloadReminder(IntegrationTestCase):
                 side_effect=get_single_router,
             ),
             patch(f"{WORKLOAD_MODULE}.is_next_pms_installed", return_value=True),
+            patch(f"{WORKLOAD_MODULE}.IMPORT_SUCCESS", True),
             patch(f"{WORKLOAD_MODULE}.getdate", return_value=date_cls(2026, 6, 17)),
             patch(f"{WORKLOAD_MODULE}.get_weekday", return_value="Wednesday"),
             patch(f"{WORKLOAD_MODULE}.SlackIntegration") as mock_slack_class,

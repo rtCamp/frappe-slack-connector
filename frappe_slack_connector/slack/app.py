@@ -34,7 +34,10 @@ class SlackIntegration:
                 title="Slack Config not set in the Slack Settings",
                 msgprint=True,
             )
-        self.slack_app = App(token=self.SLACK_BOT_TOKEN)
+        self.slack_app = App(
+            token=self.SLACK_BOT_TOKEN,
+            signing_secret=self.SLACK_SIGNATURE,
+        )
 
     def __check_slack_config(self) -> bool:
         """

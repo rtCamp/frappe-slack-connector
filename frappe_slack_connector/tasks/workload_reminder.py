@@ -279,7 +279,7 @@ def format_daily_workload_blocks(employee_count: int, section_texts: list) -> li
         )
 
     blocks.append({"type": "divider"})
-    link = get_url() + "/next-pms/resource-management/team"
+    link = get_url() + "/next-pms/allocations/team"
     blocks.append(
         {
             "type": "context",

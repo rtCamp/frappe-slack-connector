@@ -42,7 +42,7 @@ def set_password_field(doctype, name, fieldname, value):
         set_encrypted_password(doctype, name, value, fieldname)
     else:
         remove_encrypted_password(doctype, name, fieldname)
-    frappe.db.set_value(doctype, name, fieldname, value or "", update_modified=False)
+    frappe.db.set_single_value(doctype, fieldname, value or "")
 
 
 def make_test_user(email, user_type="System User"):

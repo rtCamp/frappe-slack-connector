@@ -11,6 +11,8 @@ def sync_slack_data():
     Sync the Slack data with the User Meta
     Enqueues the background job to sync
     """
+    frappe.has_permission("Slack Settings", "write", throw=True)
+
     frappe.msgprint(_("Syncing Slack data..."))
     frappe.enqueue(sync_slack_job, queue="long", notify=True)
 
@@ -119,6 +121,8 @@ def sync_slack_channels():
     """
     Sync Slack channels into Slack Channel doctype
     """
+    frappe.has_permission("Slack Settings", "write", throw=True)
+
     frappe.msgprint(_("Syncing Slack channels..."))
     frappe.enqueue(sync_slack_channels_job, queue="long", notify=True)
 

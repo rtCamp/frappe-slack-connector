@@ -31,7 +31,18 @@ def get_employees_on_leave() -> list:
     if custom_fields_exist():
         fields.append("custom_first_halfsecond_half")
 
-    # Query Leave Application doctype
+    # 1. Fetch only Active employees
+    active_employees = frappe.get_all(
+        "Employee",
+        filters={"status": "Active"},
+        pluck="name"
+    )
+
+    # Performance safeguard: If no active employees exist, skip the main query
+    if not active_employees:
+        return []
+
+    # 2. Query Leave Application doctype, filtering by the active employees list
     leave_applications = frappe.get_all(
         "Leave Application",
         filters={
@@ -41,6 +52,7 @@ def get_employees_on_leave() -> list:
                 "in",
                 ["Open", "Approved"],
             ),
+            "employee": ("in", active_employees), # <-- NEW FILTER ADDED HERE
         },
         fields=fields,
         order_by="to_date asc",

@@ -10,17 +10,31 @@ on:
       - version-16
       - develop
 
+permissions:
+  contents: read
+
 jobs:
   gitleaks:
     name: Gitleaks
     runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: 8.30.1
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
+      # The gitleaks CLI is MIT licensed and needs no license key, unlike
+      # gitleaks-action which hard-fails on organisation repos when
+      # GITLEAKS_LICENSE is unavailable. GitHub never exposes repository
+      # secrets to pull requests from forks or to Dependabot, so every
+      # external contribution was failing this check for the wrong reason.
+      - name: Install gitleaks
+        run: |
+          curl -sSfL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+
       - name: Run Gitleaks
-        uses: gitleaks/gitleaks-action@v3
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+        run: gitleaks git --no-banner --redact --verbose --exit-code 1 .

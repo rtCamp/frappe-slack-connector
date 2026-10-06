@@ -1,8 +1,14 @@
 from unittest.mock import MagicMock, patch
 
+import frappe
 from frappe.tests import IntegrationTestCase
+from frappe.utils import today
 
-from frappe_slack_connector.db.leave_application import approve_leave, reject_leave
+from frappe_slack_connector.db.leave_application import (
+    approve_leave,
+    get_employees_on_leave,
+    reject_leave,
+)
 
 LEAVE_DB_MODULE = "frappe_slack_connector.db.leave_application"
 
@@ -81,3 +87,69 @@ class TestRejectLeave(IntegrationTestCase):
         ):
             reject_leave("HR-LAP-0006")
         mock_leave.add_comment.assert_called_once_with(comment_type="Info", text="rejected via Slack")
+
+
+class TestGetEmployeesOnLeave(IntegrationTestCase):
+    """Rows are written with ``db_insert`` so no Leave Application / Employee
+    controller validation (allocations, approvers, holiday lists) runs. The
+    function under test only reads the two tables, so that is all it needs."""
+
+    ACTIVE_EMPLOYEE = "_T-FSC-EMP-ACTIVE"
+    LEFT_EMPLOYEE = "_T-FSC-EMP-LEFT"
+
+    @classmethod
+    def setUpClass(cls):
+        # Fixture rows are inserted once per class: IntegrationTestCase rolls
+        # the database back at class teardown, not after every test.
+        super().setUpClass()
+        company = frappe.defaults.get_global_default("company")
+        leave_type = frappe.get_all("Leave Type", pluck="name", limit=1)[0]
+        day = today()
+
+        for name, status in (
+            (cls.ACTIVE_EMPLOYEE, "Active"),
+            (cls.LEFT_EMPLOYEE, "Left"),
+        ):
+            frappe.get_doc(
+                {
+                    "doctype": "Employee",
+                    "name": name,
+                    "first_name": name,
+                    "employee_name": name,
+                    "status": status,
+                    "company": company,
+                    "gender": "Other",
+                    "date_of_birth": "1990-01-01",
+                    "date_of_joining": "2020-01-01",
+                    "relieving_date": day if status == "Left" else None,
+                }
+            ).db_insert()
+
+            frappe.get_doc(
+                {
+                    "doctype": "Leave Application",
+                    "name": f"_T-FSC-LAP-{status.upper()}",
+                    "employee": name,
+                    "employee_name": name,
+                    "leave_type": leave_type,
+                    "company": company,
+                    "from_date": day,
+                    "to_date": day,
+                    "posting_date": day,
+                    "status": "Approved",
+                    "docstatus": 1,
+                }
+            ).db_insert()
+
+    def test_excludes_employees_who_are_not_active(self):
+        """An approved leave for an employee whose status is no longer Active must not be reported."""
+        on_leave = {row.employee for row in get_employees_on_leave()}
+        self.assertIn(self.ACTIVE_EMPLOYEE, on_leave)
+        self.assertNotIn(self.LEFT_EMPLOYEE, on_leave)
+
+    def test_returns_empty_list_when_nobody_is_on_leave(self):
+        """When no Leave Application covers today the function returns [] without querying Employee."""
+        with patch(f"{LEAVE_DB_MODULE}.frappe.get_all", return_value=[]) as mock_get_all:
+            self.assertEqual(get_employees_on_leave(), [])
+        mock_get_all.assert_called_once()
+        self.assertEqual(mock_get_all.call_args.args[0], "Leave Application")

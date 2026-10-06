@@ -170,6 +170,7 @@ scheduler_events = {
     "weekly": [
         "frappe_slack_connector.api.sync_slack_settings.sync_slack_job",
     ],
+    "daily": ["frappe_slack_connector.api.sync_slack_settings.sync_slack_channels_job"],
     # "monthly": ["frappe_slack_connector.tasks.monthly"],
 }
 

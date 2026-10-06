@@ -1,9 +1,9 @@
 import frappe
 from frappe import _ as translate
-from frappe.utils import add_days, get_weekday, getdate
+from frappe.utils import add_days, get_url, get_weekday, getdate
 
 from frappe_slack_connector.db.employee import check_if_date_is_holiday
-from frappe_slack_connector.db.timesheet import is_next_pms_installed
+from frappe_slack_connector.db.timesheet import get_employee_daily_working_norm, is_next_pms_installed
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.slack.app import SlackIntegration
 
@@ -23,9 +23,6 @@ except ImportError:
         )
 
 
-STANDARD_HOURS = 8
-
-
 def get_workload_data(start_date, end_date):
     """Fetch employees, their allocations, and leaves in the given date range."""
 
@@ -40,7 +37,7 @@ def get_workload_data(start_date, end_date):
     employees = frappe.get_all(
         "Employee",
         filters={"status": "Active", "designation": ["in", designations]},
-        fields=["name", "employee_name", "reports_to", "user_id"],
+        fields=["name", "employee_name", "designation", "reports_to", "user_id"],
     )
 
     employee_names = [emp.name for emp in employees]
@@ -139,7 +136,7 @@ def send_blocks_in_chunks(slack, channel, blocks):
 
 
 def send_daily_workload_reminder():
-    """Triggered daily. Alerts if today's allocation < 8 hours."""
+    """Triggered daily. Alerts if today's allocation is incomplete."""
     slack_settings = frappe.get_single("Slack Settings")
     if not slack_settings.send_daily_allocation_updates:
         return
@@ -165,6 +162,8 @@ def send_daily_workload_reminder():
     underallocated_users = []
 
     for emp in employees:
+        daily_norm = get_employee_daily_working_norm(emp.name)
+
         if check_if_date_is_holiday(date, emp.name):
             continue
 
@@ -179,7 +178,7 @@ def send_daily_workload_reminder():
             if a.get("allocation_start_date") <= date <= a.get("allocation_end_date")
         ]
         total_allocated = sum(a.get("hours_allocated_per_day") or 0 for a in allocs)
-        unallocated = max(0, STANDARD_HOURS - total_allocated)
+        unallocated = max(0, daily_norm - total_allocated)
 
         if unallocated > 0:
             user_slack_id = None
@@ -192,6 +191,7 @@ def send_daily_workload_reminder():
                 {
                     "slack_id": user_slack_id,
                     "name": emp.employee_name,
+                    "designation": emp.designation,
                     "unallocated": unallocated,
                     "pm_slack_id": pm_slack_id,
                     "pm_name": pm_name,
@@ -234,7 +234,8 @@ def format_daily_workload_groups(sorted_managers: list) -> list:
 
         for index, emp in enumerate(data["engineers"], start=1):
             eng_mention = get_mention_text(emp["slack_id"], emp["name"])
-            emp_text = f"  {index}. {eng_mention} - _{emp['unallocated']:g}h_\n"
+            designation = emp.get("designation") or "No Designation"
+            emp_text = f"  {index}. {eng_mention} - {designation} - _{emp['unallocated']:g}h_\n"
 
             # Check if adding this will exceed Slack's limit
             if len(current_text) + len(pm_text) + len(emp_text) > 2900:
@@ -278,13 +279,14 @@ def format_daily_workload_blocks(employee_count: int, section_texts: list) -> li
         )
 
     blocks.append({"type": "divider"})
+    link = get_url() + "/next-pms/allocations/team"
     blocks.append(
         {
             "type": "context",
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": ":bulb: _Please ensure all allocations are updated in the PMS system._",
+                    "text": f":bulb: _Please ensure all allocations are updated in the <{link}|PMS system>._",
                 }
             ],
         }
@@ -299,7 +301,7 @@ def format_daily_workload_blocks(employee_count: int, section_texts: list) -> li
 
 
 def send_weekly_workload_reminder():
-    """Triggered weekly. Generates a table of underallocated hours for the week."""
+    """Triggered weekly. Generates a table of underallocated hours for next week."""
     slack_settings = frappe.get_single("Slack Settings")
     if not slack_settings.send_weekly_allocation_updates:
         return
@@ -322,12 +324,9 @@ def send_weekly_workload_reminder():
     target_channel = slack_settings.workload_channel_id or "#workload"
     mention_users = slack_settings.workload_mention_users
 
-    # Establish the Monday to Friday for the evaluated week
+    # Establish Monday to Friday for the next calendar week
     weekday = date.weekday()
-    if weekday > 4:  # Run on weekend -> evaluates the next week
-        monday = add_days(date, (7 - weekday) % 7)
-    else:  # Run on weekday -> evaluates the current week
-        monday = add_days(date, -weekday)
+    monday = add_days(date, 7 - weekday)
 
     end_date = add_days(monday, 4)  # Friday
 
@@ -337,6 +336,8 @@ def send_weekly_workload_reminder():
     table_data = []
 
     for emp in employees:
+        daily_norm = get_employee_daily_working_norm(emp.name)
+
         leaves = leave_map.get(emp.name, [])
         allocs = allocation_map.get(emp.name, [])
 
@@ -362,7 +363,7 @@ def send_weekly_workload_reminder():
             ]
             total_allocated = sum(a.get("hours_allocated_per_day") or 0 for a in cur_allocs)
 
-            unallocated = max(0, STANDARD_HOURS - total_allocated)
+            unallocated = max(0, daily_norm - total_allocated)
             day_unallocated.append(unallocated)
 
             if unallocated > 0:
@@ -396,7 +397,7 @@ def send_weekly_workload_reminder():
         {"type": "divider"},
         {
             "type": "section",
-            "text": {"type": "mrkdwn", "text": "The following engineers have less than 8 hours allocated this week:"},
+            "text": {"type": "mrkdwn", "text": "The following engineers have incomplete allocations next week:"},
         },
     ]
 
@@ -411,7 +412,6 @@ def send_weekly_workload_reminder():
     chunk_size = 90
     first_message = True
     total_chunks = (len(table_data) + chunk_size - 1) // chunk_size
-
     for i in range(0, len(table_data), chunk_size):
         chunk = table_data[i : i + chunk_size]
         rows = [header_row]

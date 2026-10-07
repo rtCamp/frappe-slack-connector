@@ -12,7 +12,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write # gitleaks-action comments on the PR when it finds something
 
 jobs:
   # Repository secrets are available here: pushes, and pull requests from
@@ -26,6 +25,9 @@ jobs:
       (github.event.pull_request.head.repo.full_name == github.repository &&
        github.actor != 'dependabot[bot]')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # gitleaks-action comments on the PR when it finds something
     steps:
       - uses: actions/checkout@v6
         with:
@@ -41,6 +43,10 @@ jobs:
   # opened by Dependabot. gitleaks-action hard-fails on organisation repos
   # without GITLEAKS_LICENSE, so run the MIT-licensed CLI instead and actually
   # scan these contributions rather than failing them on the missing key.
+  #
+  # The PR author controls the checked-out tree, so nothing in it may weaken
+  # the scan: the PR's .gitleaks.toml and .gitleaksignore are not read, and
+  # gitleaks:allow comments are not honoured.
   gitleaks-cli:
     name: Gitleaks
     if: >-
@@ -70,4 +76,17 @@ jobs:
           gitleaks version
 
       - name: Run Gitleaks
-        run: gitleaks git --no-banner --redact --verbose --exit-code 1 .
+        env:
+          # Takes precedence over <source>/.gitleaks.toml, so the PR cannot
+          # allowlist its own findings. Scan with the built-in rules only.
+          GITLEAKS_CONFIG_TOML: |
+            [extend]
+            useDefault = true
+        run: |
+          # gitleaks always loads <source>/.gitleaksignore, even when
+          # --gitleaks-ignore-path points elsewhere (cmd/root.go in 8.30.1),
+          # so drop the PR's copy. The scan reads git history, not the
+          # working tree, so this hides nothing from it.
+          rm -f .gitleaksignore
+          gitleaks git --no-banner --redact --verbose --exit-code 1 \
+            --ignore-gitleaks-allow .

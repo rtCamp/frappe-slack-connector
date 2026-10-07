@@ -12,10 +12,41 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write # gitleaks-action comments on the PR when it finds something
 
 jobs:
-  gitleaks:
+  # Repository secrets are available here: pushes, and pull requests from
+  # branches in this repository that were not opened by Dependabot. Keep the
+  # licensed action for these so we retain PR comments and Dependabot-managed
+  # version bumps.
+  gitleaks-action:
     name: Gitleaks
+    if: >-
+      github.event_name == 'push' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       github.actor != 'dependabot[bot]')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  # No repository secrets here: pull requests from forks, and pull requests
+  # opened by Dependabot. gitleaks-action hard-fails on organisation repos
+  # without GITLEAKS_LICENSE, so run the MIT-licensed CLI instead and actually
+  # scan these contributions rather than failing them on the missing key.
+  gitleaks-cli:
+    name: Gitleaks
+    if: >-
+      github.event_name == 'pull_request' &&
+      (github.event.pull_request.head.repo.full_name != github.repository ||
+       github.actor == 'dependabot[bot]')
     runs-on: ubuntu-latest
     env:
       GITLEAKS_VERSION: 8.30.1
@@ -28,11 +59,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      # The gitleaks CLI is MIT licensed and needs no license key, unlike
-      # gitleaks-action which hard-fails on organisation repos when
-      # GITLEAKS_LICENSE is unavailable. GitHub never exposes repository
-      # secrets to pull requests from forks or to Dependabot, so every
-      # external contribution was failing this check for the wrong reason.
       - name: Install gitleaks
         run: |
           archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"

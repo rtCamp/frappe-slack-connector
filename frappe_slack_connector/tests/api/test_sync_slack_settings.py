@@ -169,3 +169,52 @@ class TestSyncSlackChannelsJob(IntegrationTestCase):
             c for c in mock_msgprint.call_args_list if c.kwargs.get("realtime") and c.kwargs.get("indicator") == "green"
         ]
         self.assertEqual(len(success_calls), 1)
+
+
+class TestSyncEndpointsHttpMethod(IntegrationTestCase):
+    """The sync endpoints enqueue background jobs, which escape the rollback
+    Frappe applies to GET requests, so they must only be reachable via POST.
+    `frappe.handler.is_valid_http_method` is the check the request handler
+    runs before calling a whitelisted function; exercise it against the real
+    registry rather than calling the functions directly."""
+
+    ENDPOINTS = (sync_slack_data, sync_slack_channels)
+
+    def _with_request_method(self, method):
+        return patch.object(frappe.local, "request", MagicMock(method=method), create=True)
+
+    def test_endpoints_are_registered_as_post_only(self):
+        """Both sync endpoints declare methods=["POST"] on @frappe.whitelist."""
+        for fn in self.ENDPOINTS:
+            with self.subTest(fn=fn.__name__):
+                self.assertEqual(frappe.allowed_http_methods_for_whitelisted_func[fn], ["POST"])
+
+    def test_get_is_rejected_before_any_job_is_enqueued(self):
+        """A GET request fails the handler's HTTP-method check with PermissionError."""
+        from frappe.handler import is_valid_http_method
+
+        for fn in self.ENDPOINTS:
+            with (
+                self.subTest(fn=fn.__name__),
+                self._with_request_method("GET"),
+                patch(f"{SYNC_MODULE}.frappe.enqueue") as mock_enqueue,
+                self.assertRaises(frappe.PermissionError),
+            ):
+                is_valid_http_method(fn)
+            mock_enqueue.assert_not_called()
+
+    def test_post_passes_the_check_and_enqueues(self):
+        """A POST request passes the handler's HTTP-method check and the endpoint enqueues its job."""
+        from frappe.handler import is_valid_http_method
+
+        for fn, job in ((sync_slack_data, sync_slack_job), (sync_slack_channels, sync_slack_channels_job)):
+            with (
+                self.subTest(fn=fn.__name__),
+                self._with_request_method("POST"),
+                patch(f"{SYNC_MODULE}.frappe.enqueue") as mock_enqueue,
+                patch(f"{SYNC_MODULE}.frappe.msgprint"),
+            ):
+                is_valid_http_method(fn)
+                fn()
+            mock_enqueue.assert_called_once()
+            self.assertIs(mock_enqueue.call_args.args[0], job)

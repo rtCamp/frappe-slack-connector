@@ -5,7 +5,7 @@ from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.slack.app import SlackIntegration
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def sync_slack_data():
     """
     Sync the Slack data with the User Meta
@@ -116,7 +116,7 @@ def sync_slack_job(notify: bool = False):
         )
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def sync_slack_channels():
     """
     Sync Slack channels into Slack Channel doctype

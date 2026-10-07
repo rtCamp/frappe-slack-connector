@@ -1,6 +1,6 @@
 import frappe
+from erpnext.setup.doctype.employee.employee import get_holiday_list_for_employee
 from frappe.utils import datetime
-from hrms.hr.utils import get_holiday_list_for_employee
 
 from frappe_slack_connector.helpers.error import generate_error_log
 
@@ -85,7 +85,7 @@ def check_if_date_is_holiday(date: datetime.date, employee: str) -> bool:
     """
     Check if the given date is a non-working day for the given employee
     """
-    holiday_list = get_holiday_list_for_employee(employee)
+    holiday_list = get_holiday_list_for_employee(employee, raise_exception=False, as_on=date)
     is_holiday = frappe.db.exists(
         "Holiday",
         {

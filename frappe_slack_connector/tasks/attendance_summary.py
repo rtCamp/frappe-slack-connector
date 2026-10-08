@@ -14,6 +14,28 @@ from frappe_slack_connector.helpers.standard_date import standard_date_fmt
 from frappe_slack_connector.slack.app import SlackIntegration
 
 
+def get_default_holiday_list() -> str | None:
+    """
+    Holiday list of the default company, which the attendance summary
+    treats as the company-wide calendar
+    """
+    company = frappe.defaults.get_global_default("default_company")
+    if not company:
+        return None
+    return frappe.get_cached_value("Company", company, "default_holiday_list")
+
+
+def is_company_holiday(date: str) -> bool:
+    """
+    Whether the date is a holiday in the default company's holiday list.
+    Without a holiday list only weekends count as non-working days
+    """
+    holiday_list = get_default_holiday_list()
+    if not holiday_list:
+        return False
+    return is_holiday(holiday_list, date)
+
+
 def attendance_channel() -> None:
     """
     Server script to post the attendance summary to the Slack channel
@@ -31,7 +53,7 @@ def attendance_channel() -> None:
     if (
         slack_settings.send_attendance_updates != 1
         or current_day > 4  # sat = 5, sun = 6
-        or is_holiday(current_date)
+        or is_company_holiday(current_date)
         or (
             slack_settings.last_attendance_date is not None
             and slack_settings.last_attendance_date == frappe.utils.nowdate()

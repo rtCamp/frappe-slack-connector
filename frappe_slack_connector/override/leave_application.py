@@ -6,6 +6,7 @@ from frappe.utils import convert_utc_to_system_timezone, get_url_to_form, getdat
 
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
+from frappe_slack_connector.helpers.str_utils import escape_slack_mrkdwn
 from frappe_slack_connector.slack.app import SlackIntegration
 from frappe_slack_connector.tasks.attendance_summary import get_leave_type
 
@@ -129,6 +130,11 @@ def post_same_day_leave_to_attendance_thread(doc: Document, slack: SlackIntegrat
     removed if the leave is rejected or cancelled later the same day.
     Returns the ``ts`` of the reply, or None when nothing was posted
     """
+    # Data Import of backdated rows and leaves created already decided
+    # (e.g. Rejected) are not announcements
+    if frappe.flags.in_import or doc.status not in ("Open", "Approved"):
+        return None
+
     today = getdate(frappe.utils.today())
     slack_settings = frappe.get_single("Slack Settings")
     if (
@@ -149,7 +155,7 @@ def post_same_day_leave_to_attendance_thread(doc: Document, slack: SlackIntegrat
 
     slack = slack or SlackIntegration()
     user_slack = slack.get_slack_user_id(employee_id=doc.employee)
-    name = f"<@{user_slack}>" if user_slack and slack_settings.mention_user else doc.employee_name
+    name = f"<@{user_slack}>" if user_slack and slack_settings.mention_user else escape_slack_mrkdwn(doc.employee_name)
     day_period = get_leave_type(doc, on_date=today)
 
     response = slack.slack_app.client.chat_postMessage(
@@ -236,28 +242,74 @@ def _reply_posted_today(reply_ts: str) -> bool:
     return getdate(posted_at) == getdate(frappe.utils.today())
 
 
+def restore_attendance_reply_ts(doc: Document, method=None):
+    """
+    Keep the stored reply ts from being erased by a stale save
+
+    The ts is written by a background job with ``db.set_value`` after the
+    doc was created, so a form loaded before that (or a client that sends
+    the whole doc) carries an empty value, and ``db_update`` would write
+    every column back. The database is the source of truth for this field:
+    only the background jobs write or clear it, so copy it onto the doc
+    whenever the in-memory value is empty
+    """
+    if doc.is_new() or doc.get(ATTENDANCE_REPLY_TS_FIELD):
+        return
+
+    stored_ts = frappe.db.get_value("Leave Application", doc.name, ATTENDANCE_REPLY_TS_FIELD)
+    if stored_ts:
+        doc.set(ATTENDANCE_REPLY_TS_FIELD, stored_ts)
+
+
+def _enqueue_attendance_reply_removal(doc: Document):
+    """
+    Enqueue the removal of the attendance thread reply stored on the leave
+    if it was posted today. A reply from an earlier day is history and is
+    left alone. Never raises: a bad ts or a queue outage must not block the
+    user's action
+    """
+    try:
+        reply_ts = doc.get(ATTENDANCE_REPLY_TS_FIELD)
+        if not reply_ts or not _reply_posted_today(reply_ts):
+            return
+
+        # Only delete once the status change is committed: on_update runs
+        # before on_submit, which can still throw and roll back
+        frappe.enqueue(
+            remove_attendance_reply_bg,
+            queue="short",
+            enqueue_after_commit=True,
+            doc=doc,
+        )
+    except Exception as e:
+        generate_error_log(
+            title="Error scheduling attendance thread reply removal",
+            exception=e,
+        )
+
+
 def on_update_remove_attendance_reply(doc: Document, method=None):
     """
     Remove the same-day attendance thread reply when the leave is rejected
-    or cancelled on the day the reply was posted. A reply from an earlier
-    day is history and is left alone
+    or cancelled on the day the reply was posted
 
-    Wired to both ``on_update`` and ``on_cancel``: Frappe only runs
-    ``on_cancel`` for a cancel, and HRMS sets status to Cancelled in
-    ``before_cancel``
+    Wired to ``on_update``, ``on_update_after_submit``, ``on_cancel`` and
+    ``on_discard``: Frappe only runs ``on_cancel`` for a cancel, HRMS sets
+    status to Cancelled in ``before_cancel`` and ``on_discard``, and a
+    workflow may move a submitted leave to Rejected
     """
     if not doc.has_value_changed("status") or doc.status not in ("Rejected", "Cancelled"):
         return
 
-    reply_ts = doc.get(ATTENDANCE_REPLY_TS_FIELD)
-    if not reply_ts or not _reply_posted_today(reply_ts):
-        return
+    _enqueue_attendance_reply_removal(doc)
 
-    frappe.enqueue(
-        remove_attendance_reply_bg,
-        queue="short",
-        doc=doc,
-    )
+
+def on_trash_remove_attendance_reply(doc: Document, method=None):
+    """
+    Remove the same-day attendance thread reply when the leave is deleted
+    (deleting a draft runs neither ``on_update`` nor ``on_cancel``)
+    """
+    _enqueue_attendance_reply_removal(doc)
 
 
 def remove_attendance_reply_bg(doc: Document):

@@ -716,7 +716,7 @@ class TestLeaveApplicationHooks(IntegrationTestCase):
         restore = f"{LEAVE_OVERRIDE_MODULE}.restore_attendance_reply_ts"
         remove = f"{LEAVE_OVERRIDE_MODULE}.on_update_remove_attendance_reply"
         trash = f"{LEAVE_OVERRIDE_MODULE}.on_trash_remove_attendance_reply"
-        for event in ("before_validate", "before_update_after_submit"):
+        for event in ("before_validate", "before_update_after_submit", "before_cancel"):
             self.assertIn(restore, events.get(event, []), event)
         for event in ("on_update", "on_update_after_submit", "on_cancel", "on_discard"):
             self.assertIn(remove, events.get(event, []), event)

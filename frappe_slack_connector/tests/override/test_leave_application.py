@@ -1,11 +1,15 @@
 import contextlib
 from unittest.mock import MagicMock, patch
 
+import frappe
 from frappe.tests import IntegrationTestCase
+from slack_sdk.errors import SlackApiError
 
+from frappe_slack_connector.db.leave_application import APPLICANT_CHANNEL_FIELD, APPLICANT_MSG_TS_FIELD
 from frappe_slack_connector.override.leave_application import (
     after_insert,
     on_update_notify_applicant,
+    restore_applicant_message_ref,
     send_leave_decision_to_applicant,
     send_leave_notification_bg,
     send_leave_notification_to_applicant,
@@ -29,8 +33,11 @@ def _build_leave_doc(
     half_day_date=None,
     creation="2026-06-09 09:00:00",
     status="Open",
+    docstatus=0,
     status_changed=False,
-    modified_by="hr@x.com",
+    docstatus_changed=False,
+    in_insert=False,
+    modified_by="approver@x.com",
 ):
     """Build a MagicMock that mimics a Leave Application doc with the fields the override code reads."""
     doc = MagicMock()
@@ -46,8 +53,11 @@ def _build_leave_doc(
     doc.half_day_date = half_day_date
     doc.creation = creation
     doc.status = status
+    doc.docstatus = docstatus
     doc.modified_by = modified_by
-    doc.has_value_changed.side_effect = lambda fieldname: status_changed if fieldname == "status" else False
+    doc.flags.in_insert = in_insert
+    changed = {"status": status_changed, "docstatus": docstatus_changed}
+    doc.has_value_changed.side_effect = lambda fieldname: changed.get(fieldname, False)
     return doc
 
 
@@ -65,6 +75,7 @@ def _build_slack_user_lookup(*, employee_slack_id=TEST_SLACK_USER_ID, approver_s
 def _run_enqueued_inline(fn, **kwargs):
     """Stand-in for frappe.enqueue that runs the job synchronously with its kwargs."""
     kwargs.pop("queue", None)
+    kwargs.pop("enqueue_after_commit", None)
     return fn(**kwargs)
 
 
@@ -244,9 +255,80 @@ class TestSendLeaveNotificationToApplicant(IntegrationTestCase):
         with (
             patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
             patch(f"{LEAVE_OVERRIDE_MODULE}.store_applicant_message_ref") as mock_store,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=None),
         ):
             send_leave_notification_to_applicant(doc)
         mock_store.assert_called_once_with(doc.name, channel="D0FSC0001", ts="1700000000.000001")
+        self.assertEqual(
+            mock_slack.slack_app.client.chat_postMessage.call_args.kwargs["text"], "Leave request submitted"
+        )
+        mock_slack.slack_app.client.chat_update.assert_not_called()
+
+    def test_renders_decision_when_leave_is_already_decided_at_insert(self):
+        """A leave created directly as Approved (submitted) gets a confirmation DM that already shows the decision."""
+        doc = _build_leave_doc(status="Approved", docstatus=1, modified_by="approver@x.com")
+        mock_slack = MagicMock()
+        mock_slack.get_slack_user_id.side_effect = _build_slack_user_lookup()
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.store_applicant_message_ref"),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_single_value", return_value=1),
+        ):
+            send_leave_notification_to_applicant(doc)
+        kwargs = mock_slack.slack_app.client.chat_postMessage.call_args.kwargs
+        self.assertEqual(kwargs["blocks"][0]["text"]["text"], ":white_check_mark: Leave Request Approved")
+        self.assertIn("*Status:* Approved by <@U-approver>", kwargs["blocks"][-1]["text"]["text"])
+        self.assertEqual(kwargs["text"], "Your leave request has been approved")
+        mock_slack.slack_app.client.chat_update.assert_not_called()
+
+    def test_updates_fresh_dm_when_leave_was_decided_while_job_was_queued(self):
+        """If the DB shows the leave already decided right after the submission DM is posted, the new message is updated in place with the decision."""
+        doc = _build_leave_doc()
+        mock_slack = MagicMock()
+        mock_slack.get_slack_user_id.side_effect = _build_slack_user_lookup()
+        mock_slack.slack_app.client.chat_postMessage.return_value = {
+            "ok": True,
+            "channel": "D0FSC0001",
+            "ts": "1700000000.000001",
+        }
+
+        def get_value(doctype, *args, **kwargs):
+            if doctype == "Leave Application":
+                return frappe._dict(
+                    status="Rejected", docstatus=1, modified_by="approver@x.com", leave_approver="approver@x.com"
+                )
+            return "Approver Person"
+
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.store_applicant_message_ref") as mock_store,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", side_effect=get_value),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_single_value", return_value=0),
+        ):
+            send_leave_notification_to_applicant(doc)
+        mock_store.assert_called_once_with(doc.name, channel="D0FSC0001", ts="1700000000.000001")
+        mock_slack.slack_app.client.chat_update.assert_called_once()
+        kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
+        self.assertEqual((kwargs["channel"], kwargs["ts"]), ("D0FSC0001", "1700000000.000001"))
+        self.assertEqual(kwargs["blocks"][0]["text"]["text"], ":x: Leave Request Rejected")
+        self.assertIn("*Status:* Rejected by Approver Person", kwargs["blocks"][-1]["text"]["text"])
+
+    def test_does_not_update_fresh_dm_when_leave_is_still_open(self):
+        """When the DB still shows the leave as Open after posting, no chat_update follows."""
+        doc = _build_leave_doc()
+        mock_slack = MagicMock()
+        mock_slack.get_slack_user_id.return_value = TEST_SLACK_USER_ID
+        mock_slack.slack_app.client.chat_postMessage.return_value = {"ok": True, "channel": "D0FSC0001", "ts": "1.1"}
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.store_applicant_message_ref"),
+            patch(
+                f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value",
+                return_value=frappe._dict(status="Open", docstatus=0, modified_by="x", leave_approver="y"),
+            ),
+        ):
+            send_leave_notification_to_applicant(doc)
+        mock_slack.slack_app.client.chat_update.assert_not_called()
 
     def test_skips_dm_and_logs_when_employee_has_no_slack_id(self):
         """When the employee has no Slack ID, no chat_postMessage is attempted and the failure is logged."""
@@ -277,40 +359,152 @@ class TestSendLeaveNotificationToApplicant(IntegrationTestCase):
 
 
 class TestOnUpdateNotifyApplicant(IntegrationTestCase):
-    def test_enqueues_decision_job_when_status_changes_to_approved(self):
-        """on_update_notify_applicant enqueues send_leave_decision_to_applicant on the short queue when status changes to Approved."""
-        doc = _build_leave_doc(status="Approved", status_changed=True)
+    def test_enqueues_decision_job_on_submit_with_approved_status(self):
+        """Submitting an approved leave (status changed on this save) enqueues send_leave_decision_to_applicant on the short queue after commit."""
+        doc = _build_leave_doc(status="Approved", docstatus=1, status_changed=True, modified_by="approver@x.com")
         with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
             on_update_notify_applicant(doc, method="on_update")
         mock_enqueue.assert_called_once()
         self.assertIs(mock_enqueue.call_args.args[0], send_leave_decision_to_applicant)
         kwargs = mock_enqueue.call_args.kwargs
         self.assertEqual(kwargs["queue"], "short")
+        self.assertTrue(kwargs["enqueue_after_commit"])
         self.assertIs(kwargs["doc"], doc)
         self.assertEqual(kwargs["status"], "Approved")
         self.assertEqual(kwargs["decided_by"], "approver@x.com")
 
-    def test_does_not_enqueue_when_status_is_unchanged(self):
-        """An edit to an already-approved leave that does not change status enqueues nothing."""
-        doc = _build_leave_doc(status="Approved", status_changed=False)
+    def test_enqueues_once_on_submit_when_status_was_set_in_an_earlier_save(self):
+        """Approved set on a draft save then submitted: the submit (docstatus changed, status unchanged) enqueues exactly once."""
+        doc = _build_leave_doc(status="Approved", docstatus=1, status_changed=False, docstatus_changed=True)
+        with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
+            on_update_notify_applicant(doc, method="on_update")
+        mock_enqueue.assert_called_once()
+        self.assertEqual(mock_enqueue.call_args.kwargs["status"], "Approved")
+
+    def test_does_not_enqueue_on_draft_save_with_approved_status(self):
+        """Approved on a draft (docstatus 0) is not a decision yet: HRMS applies the leave on submit, so nothing is enqueued."""
+        doc = _build_leave_doc(status="Approved", docstatus=0, status_changed=True)
+        with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
+            on_update_notify_applicant(doc, method="on_update")
+        mock_enqueue.assert_not_called()
+
+    def test_enqueues_on_draft_save_with_rejected_status(self):
+        """Rejected on a draft save (workflows that keep rejected leaves as drafts) enqueues the decision job."""
+        doc = _build_leave_doc(status="Rejected", docstatus=0, status_changed=True)
+        with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
+            on_update_notify_applicant(doc, method="on_update")
+        mock_enqueue.assert_called_once()
+        self.assertEqual(mock_enqueue.call_args.kwargs["status"], "Rejected")
+
+    def test_does_not_enqueue_when_nothing_changed(self):
+        """An edit to an already-approved, submitted leave that changes neither status nor docstatus enqueues nothing."""
+        doc = _build_leave_doc(status="Approved", docstatus=1, status_changed=False, docstatus_changed=False)
         with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
             on_update_notify_applicant(doc, method="on_update")
         mock_enqueue.assert_not_called()
 
     def test_does_not_enqueue_when_status_changes_to_open(self):
         """A status change to a non-decision status (Open) enqueues nothing."""
-        doc = _build_leave_doc(status="Open", status_changed=True)
+        doc = _build_leave_doc(status="Open", docstatus=0, status_changed=True)
+        with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
+            on_update_notify_applicant(doc, method="on_update")
+        mock_enqueue.assert_not_called()
+
+    def test_does_not_enqueue_during_insert(self):
+        """on_update fired from insert() (flags.in_insert set) enqueues nothing; the submission DM renders the decision instead."""
+        doc = _build_leave_doc(status="Approved", docstatus=1, status_changed=True, in_insert=True)
         with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
             on_update_notify_applicant(doc, method="on_update")
         mock_enqueue.assert_not_called()
 
     def test_cancelled_passes_cancelling_user_as_decided_by(self):
-        """On cancellation the user who cancelled (modified_by) is passed as decided_by, not the leave approver."""
-        doc = _build_leave_doc(status="Cancelled", status_changed=True, modified_by="hr@x.com")
+        """On cancellation the acting user (modified_by) is passed as decided_by."""
+        doc = _build_leave_doc(status="Cancelled", docstatus=2, status_changed=True, modified_by="hr@x.com")
         with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
             on_update_notify_applicant(doc, method="on_cancel")
         self.assertEqual(mock_enqueue.call_args.kwargs["status"], "Cancelled")
         self.assertEqual(mock_enqueue.call_args.kwargs["decided_by"], "hr@x.com")
+
+    def test_falls_back_to_leave_approver_when_modified_by_is_administrator(self):
+        """When the change was made by Administrator (e.g. a background job), decided_by falls back to the leave approver."""
+        doc = _build_leave_doc(status="Approved", docstatus=1, status_changed=True, modified_by="Administrator")
+        with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
+            on_update_notify_applicant(doc, method="on_update")
+        self.assertEqual(mock_enqueue.call_args.kwargs["decided_by"], "approver@x.com")
+
+    def test_real_document_submit_enqueues_decision_job(self):
+        """A real Leave Application document going Open/draft -> Approved/submitted (doc_before_save set) enqueues through the unpatched has_value_changed."""
+        doc = frappe.get_doc(
+            {
+                "doctype": "Leave Application",
+                "employee": "EMP-001",
+                "leave_approver": "approver@x.com",
+                "modified_by": "approver@x.com",
+                "status": "Approved",
+                "docstatus": 1,
+            }
+        )
+        doc._doc_before_save = frappe.get_doc({"doctype": "Leave Application", "status": "Open", "docstatus": 0})
+        with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
+            on_update_notify_applicant(doc, method="on_update")
+        mock_enqueue.assert_called_once()
+        kwargs = mock_enqueue.call_args.kwargs
+        self.assertEqual(kwargs["status"], "Approved")
+        self.assertEqual(kwargs["decided_by"], "approver@x.com")
+        self.assertTrue(kwargs["enqueue_after_commit"])
+
+
+class TestRestoreApplicantMessageRef(IntegrationTestCase):
+    def test_copies_stored_ref_onto_doc_when_in_memory_values_are_empty(self):
+        """A saved doc whose in-memory ref fields are empty gets the stored channel/ts copied from the database before it is written back."""
+        doc = frappe.get_doc({"doctype": "Leave Application"})
+        doc.name = "HR-LAP-RESTORE"
+        with (
+            patch.object(doc, "is_new", return_value=False),
+            patch(
+                f"{LEAVE_OVERRIDE_MODULE}.get_applicant_message_ref",
+                return_value=("D0FSC0001", "1700000000.000001"),
+            ) as mock_ref,
+        ):
+            restore_applicant_message_ref(doc, method="before_validate")
+        mock_ref.assert_called_once_with("HR-LAP-RESTORE")
+        self.assertEqual(doc.get(APPLICANT_CHANNEL_FIELD), "D0FSC0001")
+        self.assertEqual(doc.get(APPLICANT_MSG_TS_FIELD), "1700000000.000001")
+
+    def test_leaves_doc_untouched_when_in_memory_values_are_set(self):
+        """When the doc already carries a ref, the database is not consulted and the values are kept."""
+        doc = frappe.get_doc({"doctype": "Leave Application"})
+        doc.name = "HR-LAP-RESTORE"
+        doc.set(APPLICANT_CHANNEL_FIELD, "D0FSC0009")
+        doc.set(APPLICANT_MSG_TS_FIELD, "1700000000.000009")
+        with (
+            patch.object(doc, "is_new", return_value=False),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.get_applicant_message_ref") as mock_ref,
+        ):
+            restore_applicant_message_ref(doc, method="before_validate")
+        mock_ref.assert_not_called()
+        self.assertEqual(doc.get(APPLICANT_CHANNEL_FIELD), "D0FSC0009")
+        self.assertEqual(doc.get(APPLICANT_MSG_TS_FIELD), "1700000000.000009")
+
+    def test_skips_new_docs(self):
+        """A document that has not been inserted yet has nothing stored, so the database is not consulted."""
+        doc = frappe.get_doc({"doctype": "Leave Application"})
+        with patch(f"{LEAVE_OVERRIDE_MODULE}.get_applicant_message_ref") as mock_ref:
+            restore_applicant_message_ref(doc, method="before_validate")
+        mock_ref.assert_not_called()
+
+
+class TestDocEventHooks(IntegrationTestCase):
+    def test_leave_application_doc_events_are_registered(self):
+        """hooks.py registers the applicant-DM handlers on the Leave Application doc events Frappe actually fires."""
+        events = frappe.get_hooks("doc_events")["Leave Application"]
+        notify = f"{LEAVE_OVERRIDE_MODULE}.on_update_notify_applicant"
+        restore = f"{LEAVE_OVERRIDE_MODULE}.restore_applicant_message_ref"
+        self.assertIn(notify, events["on_update"])
+        self.assertIn(notify, events["on_cancel"])
+        self.assertIn(restore, events["before_validate"])
+        self.assertIn(restore, events["before_update_after_submit"])
+        self.assertIn(restore, events["before_cancel"])
 
 
 class TestSendLeaveDecisionToApplicant(IntegrationTestCase):
@@ -328,7 +522,7 @@ class TestSendLeaveDecisionToApplicant(IntegrationTestCase):
 
     def test_slack_approve_updates_applicant_dm_in_place(self):
         """Approving via the Slack button (status changed to Approved through the doc hook) edits the stored applicant DM with chat_update and posts no new message."""
-        doc = _build_leave_doc(status="Approved", status_changed=True)
+        doc = _build_leave_doc(status="Approved", docstatus=1, status_changed=True)
         mock_slack = MagicMock()
         mock_slack.get_slack_user_id.side_effect = _build_slack_user_lookup()
         with (
@@ -341,13 +535,14 @@ class TestSendLeaveDecisionToApplicant(IntegrationTestCase):
         kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
         self.assertEqual(kwargs["channel"], "D0FSC0001")
         self.assertEqual(kwargs["ts"], "1700000000.000001")
+        self.assertEqual(kwargs["text"], "Your leave request has been approved")
         self.assertIn("Leave Request Approved", kwargs["blocks"][0]["text"]["text"])
         status_line = kwargs["blocks"][-1]["text"]["text"]
         self.assertIn("*Status:* Approved by <@U-approver>", status_line)
 
     def test_desk_reject_updates_applicant_dm_in_place(self):
         """Rejecting from Desk (status changed to Rejected on submit) edits the stored applicant DM and names the approver when mentions are disabled."""
-        doc = _build_leave_doc(status="Rejected", status_changed=True)
+        doc = _build_leave_doc(status="Rejected", docstatus=1, status_changed=True)
         mock_slack = MagicMock()
         mock_slack.get_slack_user_id.side_effect = _build_slack_user_lookup()
         with (
@@ -423,3 +618,52 @@ class TestSendLeaveDecisionToApplicant(IntegrationTestCase):
             send_leave_decision_to_applicant(doc=doc, status="Approved", decided_by="approver@x.com")
         mock_log.assert_called_once()
         self.assertIsInstance(mock_log.call_args.kwargs["exception"], RuntimeError)
+
+    def test_posts_fresh_dm_when_stored_message_no_longer_exists(self):
+        """When chat_update fails with message_not_found, a fresh DM is posted with the decision and its reference stored."""
+        doc = _build_leave_doc(status="Approved", status_changed=True)
+        mock_slack = MagicMock()
+        mock_slack.get_slack_user_id.side_effect = _build_slack_user_lookup()
+        mock_slack.slack_app.client.chat_update.side_effect = SlackApiError(
+            "message_not_found", {"ok": False, "error": "message_not_found"}
+        )
+        mock_slack.slack_app.client.chat_postMessage.return_value = {"ok": True, "channel": "D0FSC0001", "ts": "2.2"}
+        with self._patched(mock_slack) as (mock_store, mock_log):
+            send_leave_decision_to_applicant(doc=doc, status="Approved", decided_by="approver@x.com")
+        mock_slack.slack_app.client.chat_update.assert_called_once()
+        mock_slack.slack_app.client.chat_postMessage.assert_called_once()
+        kwargs = mock_slack.slack_app.client.chat_postMessage.call_args.kwargs
+        self.assertEqual(kwargs["channel"], TEST_SLACK_USER_ID)
+        self.assertIn("Leave Request Approved", kwargs["blocks"][0]["text"]["text"])
+        mock_store.assert_called_once_with(doc.name, channel="D0FSC0001", ts="2.2")
+        # The missing message is recorded, but not as an exception.
+        mock_log.assert_called_once()
+        self.assertNotIn("exception", mock_log.call_args.kwargs)
+
+    def test_other_slack_api_errors_do_not_fall_back_to_a_fresh_dm(self):
+        """A chat_update SlackApiError other than a missing message/channel is logged as an error without posting a fresh DM."""
+        doc = _build_leave_doc(status="Approved", status_changed=True)
+        mock_slack = MagicMock()
+        mock_slack.get_slack_user_id.side_effect = _build_slack_user_lookup()
+        mock_slack.slack_app.client.chat_update.side_effect = SlackApiError(
+            "ratelimited", {"ok": False, "error": "ratelimited"}
+        )
+        with self._patched(mock_slack) as (mock_store, mock_log):
+            send_leave_decision_to_applicant(doc=doc, status="Approved", decided_by="approver@x.com")
+        mock_slack.slack_app.client.chat_postMessage.assert_not_called()
+        mock_store.assert_not_called()
+        mock_log.assert_called_once()
+        self.assertIsInstance(mock_log.call_args.kwargs["exception"], SlackApiError)
+
+    def test_escapes_mrkdwn_control_characters_in_full_name(self):
+        """A decider's full name containing &, < or > is escaped before being placed in the mrkdwn status line."""
+        doc = _build_leave_doc(status="Approved", status_changed=True)
+        mock_slack = MagicMock()
+        mock_slack.get_slack_user_id.side_effect = _build_slack_user_lookup(approver_slack_id=None)
+        with (
+            self._patched(mock_slack, mention_user=1),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value="Tom & Jerry <HR>"),
+        ):
+            send_leave_decision_to_applicant(doc=doc, status="Approved", decided_by="approver@x.com")
+        status_line = mock_slack.slack_app.client.chat_update.call_args.kwargs["blocks"][-1]["text"]["text"]
+        self.assertIn("Approved by Tom &amp; Jerry &lt;HR&gt;", status_line)

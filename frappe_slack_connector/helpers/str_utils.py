@@ -21,3 +21,10 @@ def truncate_text(text, limit=SlackIntegration.SLACK_CHAR_LIMIT):
     Truncate the text to the given limit
     """
     return text[:limit]
+
+
+def escape_mrkdwn(text) -> str:
+    """
+    Escape the characters Slack treats as control sequences in mrkdwn text
+    """
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")

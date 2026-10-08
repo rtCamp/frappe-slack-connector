@@ -1,14 +1,18 @@
 import frappe
 from frappe.model.document import Document
-from frappe.utils import get_url_to_form
+from frappe.utils import cint, get_url_to_form
+from slack_sdk.errors import SlackApiError
 
 from frappe_slack_connector.db.leave_application import (
+    APPLICANT_CHANNEL_FIELD,
+    APPLICANT_MSG_TS_FIELD,
     custom_fields_exist,
     get_applicant_message_ref,
     store_applicant_message_ref,
 )
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
+from frappe_slack_connector.helpers.str_utils import escape_mrkdwn
 from frappe_slack_connector.slack.app import SlackIntegration
 
 
@@ -37,6 +41,46 @@ APPLICANT_DECISION_HEADERS = {
     "Cancelled": ":no_entry_sign: Leave Request Cancelled",
 }
 
+# Slack errors meaning the stored applicant DM can no longer be edited
+MISSING_MESSAGE_ERRORS = ("message_not_found", "channel_not_found")
+
+
+def is_leave_decided(status: str | None, docstatus) -> bool:
+    """
+    Whether the leave has reached a decision worth showing the applicant.
+
+    HRMS only applies an approved leave on submit, so "Approved" counts once
+    the document is submitted; a rejection or cancellation is final as soon
+    as it is set (some workflows keep rejected leaves as drafts).
+    """
+    if status in ("Rejected", "Cancelled"):
+        return True
+    return status == "Approved" and cint(docstatus) == 1
+
+
+def _reached_decision(doc: Document) -> bool:
+    """
+    Whether this save is the one that takes the leave to its decision:
+    the submit for an approval (status or docstatus changed), the save that
+    sets Rejected, or the cancel
+    """
+    if doc.flags.in_insert or not is_leave_decided(doc.status, doc.docstatus):
+        return False
+    if cint(doc.docstatus) == 1:
+        return doc.has_value_changed("status") or doc.has_value_changed("docstatus")
+    return doc.has_value_changed("status")
+
+
+def _decided_by(modified_by: str | None, leave_approver: str | None) -> str | None:
+    """
+    The user who took the decision: the acting user (Desk, workflow and the
+    Slack handler all set it before the hooks run), falling back to the leave
+    approver when the change was made by Administrator or a background job
+    """
+    if modified_by and modified_by != "Administrator":
+        return modified_by
+    return leave_approver
+
 
 def on_update_notify_applicant(doc: Document, method: str | None = None):
     """
@@ -45,26 +89,45 @@ def on_update_notify_applicant(doc: Document, method: str | None = None):
 
     Hooked to ``on_update`` (approve/reject go through save/submit) and
     ``on_cancel`` (HRMS sets status to Cancelled in ``before_cancel``, and a
-    cancel does not fire ``on_update``).
+    cancel does not fire ``on_update``). Inserts are skipped: the submission
+    DM already renders the decision when a leave is created as decided.
     """
-    if doc.status not in APPLICANT_DECISION_HEADERS or not doc.has_value_changed("status"):
+    if not _reached_decision(doc):
         return
-    # Approval and rejection are the approver's decision; a cancellation may
-    # come from HR or the applicant, so report whoever performed it
-    decided_by = doc.modified_by if doc.status == "Cancelled" else doc.leave_approver
     frappe.enqueue(
         send_leave_decision_to_applicant,
         queue="short",
+        enqueue_after_commit=True,
         doc=doc,
         status=doc.status,
-        decided_by=decided_by,
+        decided_by=_decided_by(doc.modified_by, doc.leave_approver),
     )
+
+
+def restore_applicant_message_ref(doc: Document, method: str | None = None):
+    """
+    Keep the stored DM reference across saves made from a stale form.
+
+    ``db_update`` writes every in-memory column, so a form loaded before the
+    background job stored the reference would overwrite it with NULL. The
+    database is the source of truth: copy the stored values onto the doc
+    whenever the in-memory ones are empty.
+    """
+    if doc.is_new() or (doc.get(APPLICANT_CHANNEL_FIELD) and doc.get(APPLICANT_MSG_TS_FIELD)):
+        return
+    channel, ts = get_applicant_message_ref(doc.name)
+    if channel and ts:
+        doc.set(APPLICANT_CHANNEL_FIELD, channel)
+        doc.set(APPLICANT_MSG_TS_FIELD, ts)
 
 
 def send_leave_notification_to_applicant(doc: Document):
     """
     Send a confirmation message to the applicant and remember the message
-    so it can be updated in place once a decision is taken
+    so it can be updated in place once a decision is taken.
+
+    A leave that is already decided when the DM is sent (created directly as
+    approved, or decided before the job ran) renders the decision right away.
     """
     try:
         slack = SlackIntegration()
@@ -75,16 +138,45 @@ def send_leave_notification_to_applicant(doc: Document):
                 message=f"No Slack user found for employee {doc.employee} (Leave Application {doc.name})",
             )
             return
+        status = doc.status if is_leave_decided(doc.status, doc.docstatus) else None
+        status_by = _format_decider(slack, _decided_by(doc.modified_by, doc.leave_approver)) if status else None
         response = slack.slack_app.client.chat_postMessage(
             channel=user_id,
-            blocks=_applicant_blocks(doc, user_id),
+            text=_applicant_text(status),
+            blocks=_applicant_blocks(doc, user_id, status=status, status_by=status_by),
         )
-        store_applicant_message_ref(doc.name, channel=response.get("channel"), ts=response.get("ts"))
+        channel, ts = response.get("channel"), response.get("ts")
+        store_applicant_message_ref(doc.name, channel=channel, ts=ts)
+        if status is None and channel and ts:
+            _sync_decision_after_post(slack, doc, user_id, channel, ts)
     except Exception as e:
         generate_error_log(
             title="Error posting leave confirmation to applicant",
             exception=e,
         )
+
+
+def _sync_decision_after_post(slack: SlackIntegration, doc: Document, user_id: str, channel: str, ts: str):
+    """
+    The decision job may have run before this DM existed (parallel workers,
+    or a decision taken while the job was queued). Re-read the leave and,
+    if it has been decided meanwhile, update the fresh message right away.
+    """
+    row = frappe.db.get_value(
+        "Leave Application",
+        doc.name,
+        ["status", "docstatus", "modified_by", "leave_approver"],
+        as_dict=True,
+    )
+    if not row or not is_leave_decided(row.status, row.docstatus):
+        return
+    status_by = _format_decider(slack, _decided_by(row.modified_by, row.leave_approver))
+    slack.slack_app.client.chat_update(
+        channel=channel,
+        ts=ts,
+        text=_applicant_text(row.status),
+        blocks=_applicant_blocks(doc, user_id, status=row.status, status_by=status_by),
+    )
 
 
 def send_leave_decision_to_applicant(doc: Document, status: str, decided_by: str | None = None):
@@ -93,7 +185,7 @@ def send_leave_decision_to_applicant(doc: Document, status: str, decided_by: str
 
     Falls back to posting a fresh DM when no message reference is stored
     (leaves created before the reference was tracked, or whose first DM
-    failed to post).
+    failed to post) or when Slack no longer knows the stored message.
     """
     try:
         slack = SlackIntegration()
@@ -104,6 +196,7 @@ def send_leave_decision_to_applicant(doc: Document, status: str, decided_by: str
                 message=f"No Slack user found for employee {doc.employee} (Leave Application {doc.name})",
             )
             return
+        text = _applicant_text(status)
         blocks = _applicant_blocks(
             doc,
             user_id,
@@ -114,9 +207,17 @@ def send_leave_decision_to_applicant(doc: Document, status: str, decided_by: str
         # job receives a snapshot taken before the submission DM was stored
         channel, ts = get_applicant_message_ref(doc.name)
         if channel and ts:
-            slack.slack_app.client.chat_update(channel=channel, ts=ts, blocks=blocks)
-            return
-        response = slack.slack_app.client.chat_postMessage(channel=user_id, blocks=blocks)
+            try:
+                slack.slack_app.client.chat_update(channel=channel, ts=ts, text=text, blocks=blocks)
+                return
+            except SlackApiError as e:
+                if e.response.get("error") not in MISSING_MESSAGE_ERRORS:
+                    raise
+                generate_error_log(
+                    title="Applicant leave DM no longer exists, posting a fresh one",
+                    message=f"Leave Application {doc.name}: {e.response.get('error')} for {channel}/{ts}",
+                )
+        response = slack.slack_app.client.chat_postMessage(channel=user_id, text=text, blocks=blocks)
         store_applicant_message_ref(doc.name, channel=response.get("channel"), ts=response.get("ts"))
     except Exception as e:
         generate_error_log(
@@ -142,7 +243,16 @@ def _format_decider(slack: SlackIntegration, user_email: str | None) -> str | No
         slack_id = None
     if slack_id and frappe.db.get_single_value("Slack Settings", "mention_user"):
         return f"<@{slack_id}>"
-    return frappe.db.get_value("User", user_email, "full_name") or user_email
+    return escape_mrkdwn(frappe.db.get_value("User", user_email, "full_name") or user_email)
+
+
+def _applicant_text(status: str | None) -> str:
+    """
+    Plain-text fallback for the applicant DM, shown in notification previews
+    """
+    if status:
+        return f"Your leave request has been {status.lower()}"
+    return "Leave request submitted"
 
 
 def _applicant_blocks(doc: Document, user_slack: str, *, status: str | None = None, status_by: str | None = None):

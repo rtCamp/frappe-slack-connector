@@ -1,6 +1,6 @@
 import frappe
 from frappe.model.document import Document
-from frappe.utils import get_url_to_form
+from frappe.utils import flt, get_url_to_form, getdate
 
 from frappe_slack_connector.db.leave_application import custom_fields_exist
 from frappe_slack_connector.helpers.error import generate_error_log
@@ -135,9 +135,12 @@ def send_leave_notification_bg(doc: Document):
         user_slack = slack.get_slack_user_id(employee_id=doc.employee)
         mention_users = frappe.db.get_single_value("Slack Settings", "mention_user")
         mention = f"<@{user_slack}>" if user_slack else doc.employee_name
-        day_period = "Full Day"
-        if doc.half_day and doc.half_day_date == frappe.utils.today():
-            day_period = doc.custom_first_halfsecond_half if custom_fields_exist() else "Half Day"
+        day_period = format_leave_duration(doc)
+
+        # Leave Without Pay types have no allocation, so the balance is meaningless
+        leave_balance = None
+        if doc.leave_balance is not None and not frappe.db.get_value("Leave Type", doc.leave_type, "is_lwp"):
+            leave_balance = flt(doc.leave_balance)
 
         # if leave date is today and attendance notification is already sent,
         # send notification to attendance channel thread
@@ -174,11 +177,13 @@ def send_leave_notification_bg(doc: Document):
                     leave_link=get_url_to_form("Leave Application", doc.name),
                     employee_name=mention,
                     leave_type=doc.leave_type,
-                    is_half_day=doc.half_day,
+                    duration=day_period,
                     leave_submission_date=standard_date_fmt(doc.creation),
                     from_date=standard_date_fmt(doc.from_date),
                     to_date=standard_date_fmt(doc.to_date),
                     reason=doc.description,
+                    total_days=flt(doc.total_leave_days),
+                    leave_balance=leave_balance,
                 ),
             )
 
@@ -189,6 +194,23 @@ def send_leave_notification_bg(doc: Document):
         )
 
 
+def format_leave_duration(doc: Document) -> str:
+    """
+    Describe how much of the leave is taken: "Full Day", the half for a
+    single-day half-day leave, or the total days plus the half-day date
+    for a multi-day leave that includes one half day
+    """
+    if not doc.half_day:
+        return "Full Day"
+
+    period = doc.custom_first_halfsecond_half if custom_fields_exist() else None
+    if getdate(doc.from_date) == getdate(doc.to_date):
+        return period or "Half Day"
+
+    half_day_on = f"half day on {standard_date_fmt(doc.half_day_date)}" if doc.half_day_date else "one half day"
+    return f"{flt(doc.total_leave_days):g} days ({half_day_on}{', ' + period if period else ''})"
+
+
 def format_leave_application_blocks(
     *,
     leave_id: str,
@@ -197,14 +219,30 @@ def format_leave_application_blocks(
     leave_submission_date: str,
     from_date: str,
     to_date: str,
-    is_half_day: bool,
+    duration: str,
     reason: str = "",
     employee_link: str = "#",
     leave_link: str = "#",
+    total_days: float | None = None,
+    leave_balance: float | None = None,
 ) -> list:
     """
     Format the blocks for the leave application message
+
+    `leave_balance` is the balance recorded on the application when it was
+    submitted; pass None to omit it (e.g. for Leave Without Pay)
     """
+    details = [{"type": "mrkdwn", "text": f"*Duration:*\n:hourglass_flowing_sand: {duration}"}]
+    if total_days is not None:
+        details.append({"type": "mrkdwn", "text": f"*Requested:*\n{flt(total_days):g} day(s)"})
+    if leave_balance is not None:
+        details.append(
+            {
+                "type": "mrkdwn",
+                "text": f"*Balance before this request:*\n{flt(leave_balance):g} day(s)",
+            }
+        )
+
     blocks = [
         {
             "type": "header",
@@ -248,28 +286,33 @@ def format_leave_application_blocks(
                 {"type": "mrkdwn", "text": f"*To:*\n:date: {to_date}"},
             ],
         },
+        {"type": "section", "fields": details},
+    ]
+
+    # Warn the approver when the request cannot be covered by the recorded balance
+    if total_days is not None and leave_balance is not None and flt(total_days) > flt(leave_balance):
+        shortfall = flt(flt(total_days) - flt(leave_balance), 2)
+        resulting_balance = flt(flt(leave_balance) - flt(total_days), 2)
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": ":warning: *Insufficient balance:* this request exceeds the available balance "
+                    + f"by {shortfall:g} day(s). Approving it will take the balance to {resulting_balance:g}.",
+                },
+            }
+        )
+
+    blocks.append(
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
                 "text": f"*Reason:*\n>{reason if reason else 'No reason provided'}",
             },
-        },
-    ]
-
-    # Add a context menu indicating it is a half day
-    if is_half_day:
-        blocks.append(
-            {
-                "type": "context",
-                "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": "Half Day: :white_check_mark:",
-                    }
-                ],
-            }
-        )
+        }
+    )
 
     blocks.extend(
         [

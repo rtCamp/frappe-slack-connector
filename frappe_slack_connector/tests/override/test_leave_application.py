@@ -4,6 +4,7 @@ from frappe.tests import IntegrationTestCase
 
 from frappe_slack_connector.override.leave_application import (
     after_insert,
+    format_leave_application_blocks,
     send_leave_notification_bg,
     send_leave_notification_to_applicant,
 )
@@ -24,6 +25,9 @@ def _build_leave_doc(
     description="vacation",
     half_day=0,
     half_day_date=None,
+    first_half_second_half=None,
+    total_leave_days=3.0,
+    leave_balance=10.0,
     creation="2026-06-09 09:00:00",
 ):
     """Build a MagicMock that mimics a Leave Application doc with the fields the override code reads."""
@@ -38,8 +42,50 @@ def _build_leave_doc(
     doc.description = description
     doc.half_day = half_day
     doc.half_day_date = half_day_date
+    doc.custom_first_halfsecond_half = first_half_second_half
+    doc.total_leave_days = total_leave_days
+    doc.leave_balance = leave_balance
     doc.creation = creation
     return doc
+
+
+def _blocks_text(blocks):
+    """Concatenate every mrkdwn/plain_text string found in a list of Slack blocks."""
+    parts = []
+    for block in blocks:
+        text = block.get("text")
+        if isinstance(text, dict):
+            parts.append(text["text"])
+        for field in block.get("fields", []):
+            parts.append(field["text"])
+        for element in block.get("elements", []):
+            if isinstance(element.get("text"), str):
+                parts.append(element["text"])
+    return "\n".join(parts)
+
+
+def _get_approver_blocks(doc, *, custom_fields=False, is_lwp=0):
+    """Run send_leave_notification_bg with Slack and DB mocked and return the blocks posted to the approver DM."""
+    mock_slack = MagicMock()
+    mock_slack.SLACK_CHANNEL_ID = TEST_SLACK_CHANNEL_ID
+    mock_slack.get_slack_user_id.side_effect = ["U-approver", "U-applicant"]
+    settings = _build_slack_settings_mock(send_attendance_updates=0)
+    with (
+        patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+        patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_single_value", return_value=1),
+        patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=is_lwp) as mock_get_value,
+        patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.get_single", return_value=settings),
+        patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.utils.today", return_value="2026-06-10"),
+        patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.utils.nowdate", return_value="2026-06-10"),
+        patch(f"{LEAVE_OVERRIDE_MODULE}.custom_fields_exist", return_value=custom_fields),
+    ):
+        send_leave_notification_bg(doc)
+    mock_slack.slack_app.client.chat_postMessage.assert_called_once()
+    kwargs = mock_slack.slack_app.client.chat_postMessage.call_args.kwargs
+    assert kwargs["channel"] == "U-approver"
+    if mock_get_value.called:
+        assert mock_get_value.call_args.args == ("Leave Type", doc.leave_type, "is_lwp")
+    return kwargs["blocks"]
 
 
 def _build_slack_settings_mock(
@@ -185,6 +231,156 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         ):
             send_leave_notification_bg(doc)
         mock_slack.slack_app.client.chat_postMessage.assert_not_called()
+
+    def test_approver_dm_shows_requested_days_and_balance_before_request(self):
+        """The approver DM shows the requested days and the balance before the request for a leave type with an allocation."""
+        doc = _build_leave_doc(from_date="2026-06-15", to_date="2026-06-17", total_leave_days=3.0, leave_balance=10.0)
+        text = _blocks_text(_get_approver_blocks(doc))
+        self.assertIn("*Requested:*\n3 day(s)", text)
+        self.assertIn("*Balance before this request:*\n10 day(s)", text)
+
+    def test_approver_dm_warns_when_requested_days_exceed_balance(self):
+        """When total_leave_days exceeds leave_balance the approver DM carries the insufficient-balance warning with the shortfall and resulting balance."""
+        doc = _build_leave_doc(from_date="2026-06-15", to_date="2026-06-17", total_leave_days=3.0, leave_balance=1.0)
+        text = _blocks_text(_get_approver_blocks(doc))
+        self.assertIn(
+            ":warning: *Insufficient balance:* this request exceeds the available balance by 2 day(s). "
+            "Approving it will take the balance to -2.",
+            text,
+        )
+
+    def test_approver_dm_has_no_warning_when_balance_is_sufficient(self):
+        """No insufficient-balance warning is added when leave_balance covers total_leave_days (including when they are equal)."""
+        doc = _build_leave_doc(from_date="2026-06-15", to_date="2026-06-17", total_leave_days=3.0, leave_balance=3.0)
+        text = _blocks_text(_get_approver_blocks(doc))
+        self.assertNotIn("Insufficient balance", text)
+        self.assertIn("*Balance before this request:*\n3 day(s)", text)
+
+    def test_approver_dm_skips_balance_and_warning_for_leave_without_pay(self):
+        """For a Leave Type with is_lwp set, the approver DM shows neither the balance nor the warning, even when the balance is lower than the request."""
+        doc = _build_leave_doc(
+            from_date="2026-06-15",
+            to_date="2026-06-17",
+            leave_type="Leave Without Pay",
+            total_leave_days=3.0,
+            leave_balance=0.0,
+        )
+        text = _blocks_text(_get_approver_blocks(doc, is_lwp=1))
+        self.assertNotIn("Balance before this request", text)
+        self.assertNotIn("Insufficient balance", text)
+        self.assertIn("*Requested:*\n3 day(s)", text)
+
+    def test_approver_dm_shows_half_for_future_single_day_half_day_leave(self):
+        """A future single-day half-day leave is shown with its half (custom first/second half field) rather than as Full Day."""
+        doc = _build_leave_doc(
+            from_date="2026-06-15",
+            to_date="2026-06-15",
+            half_day=1,
+            half_day_date="2026-06-15",
+            first_half_second_half="Second Half",
+            total_leave_days=0.5,
+        )
+        text = _blocks_text(_get_approver_blocks(doc, custom_fields=True))
+        self.assertIn("*Duration:*\n:hourglass_flowing_sand: Second Half", text)
+        self.assertNotIn("Full Day", text)
+
+    def test_approver_dm_shows_half_day_for_future_single_day_leave_without_custom_fields(self):
+        """Without the custom half fields, a future single-day half-day leave is labelled Half Day."""
+        doc = _build_leave_doc(
+            from_date="2026-06-15",
+            to_date="2026-06-15",
+            half_day=1,
+            half_day_date="2026-06-15",
+            total_leave_days=0.5,
+        )
+        text = _blocks_text(_get_approver_blocks(doc, custom_fields=False))
+        self.assertIn("*Duration:*\n:hourglass_flowing_sand: Half Day", text)
+
+    def test_approver_dm_shows_half_day_date_for_multi_day_leave_with_one_half_day(self):
+        """A multi-day leave with one half day shows the total days and the half-day date, not Half Day for the whole leave."""
+        doc = _build_leave_doc(
+            from_date="2026-06-15",
+            to_date="2026-06-17",
+            half_day=1,
+            half_day_date="2026-06-16",
+            first_half_second_half="First Half",
+            total_leave_days=2.5,
+        )
+        text = _blocks_text(_get_approver_blocks(doc, custom_fields=True))
+        self.assertIn(
+            "*Duration:*\n:hourglass_flowing_sand: 2.5 days (half day on Jun 16, 2026 (Tue), First Half)",
+            text,
+        )
+        self.assertNotIn("*Duration:*\n:hourglass_flowing_sand: Half Day", text)
+        self.assertNotIn("*Duration:*\n:hourglass_flowing_sand: First Half\n", text)
+
+    def test_approver_dm_shows_full_day_for_leave_without_half_day(self):
+        """A leave with half_day unset is labelled Full Day."""
+        doc = _build_leave_doc(from_date="2026-06-15", to_date="2026-06-17", half_day=0)
+        text = _blocks_text(_get_approver_blocks(doc))
+        self.assertIn("*Duration:*\n:hourglass_flowing_sand: Full Day", text)
+
+
+class TestFormatLeaveApplicationBlocks(IntegrationTestCase):
+    def _default_kwargs(self, **overrides):
+        kwargs = {
+            "leave_id": "HR-LAP-0050",
+            "leave_link": "https://erp.example.com/app/leave-application/HR-LAP-0050",
+            "employee_name": "<@U-applicant>",
+            "leave_type": "Casual Leave",
+            "duration": "Full Day",
+            "leave_submission_date": "Jun 09, 2026 (Tue)",
+            "from_date": "Jun 15, 2026 (Mon)",
+            "to_date": "Jun 17, 2026 (Wed)",
+            "reason": "vacation",
+            "total_days": 3.0,
+            "leave_balance": 10.0,
+        }
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_default_case_block_structure(self):
+        """The default (sufficient balance) message has header, leave id, type/submitted, from/to, duration/requested/balance fields, reason, approve/reject actions and no warning."""
+        blocks = format_leave_application_blocks(**self._default_kwargs())
+        self.assertEqual(blocks[0]["type"], "header")
+        self.assertIn("New Leave Application", blocks[0]["text"]["text"])
+        self.assertIn("<@U-applicant> has submitted a new leave request.", blocks[1]["text"]["text"])
+        self.assertIn("HR-LAP-0050", blocks[2]["elements"][0]["text"])
+
+        field_sections = [b for b in blocks if b.get("type") == "section" and "fields" in b]
+        field_texts = [f["text"] for section in field_sections for f in section["fields"]]
+        self.assertIn("*Leave Type:*\n:rocket: Casual Leave", field_texts)
+        self.assertIn("*Submitted On:*\n:clock3: Jun 09, 2026 (Tue)", field_texts)
+        self.assertIn("*From:*\n:date: Jun 15, 2026 (Mon)", field_texts)
+        self.assertIn("*To:*\n:date: Jun 17, 2026 (Wed)", field_texts)
+        self.assertIn("*Duration:*\n:hourglass_flowing_sand: Full Day", field_texts)
+        self.assertIn("*Requested:*\n3 day(s)", field_texts)
+        self.assertIn("*Balance before this request:*\n10 day(s)", field_texts)
+
+        text = _blocks_text(blocks)
+        self.assertIn("*Reason:*\n>vacation", text)
+        self.assertNotIn("Insufficient balance", text)
+        self.assertNotIn("Half Day:", text)
+
+        actions = next(b for b in blocks if b.get("type") == "actions")
+        self.assertEqual(actions["block_id"], "leave_actions_block")
+        self.assertEqual([e["action_id"] for e in actions["elements"]], ["leave_approve", "leave_reject"])
+        self.assertTrue(all(e["value"] == "HR-LAP-0050" for e in actions["elements"]))
+
+    def test_omits_requested_and_balance_fields_when_not_provided(self):
+        """When total_days and leave_balance are None, only the duration field is added and no warning appears."""
+        blocks = format_leave_application_blocks(**self._default_kwargs(total_days=None, leave_balance=None))
+        text = _blocks_text(blocks)
+        self.assertIn("*Duration:*\n:hourglass_flowing_sand: Full Day", text)
+        self.assertNotIn("*Requested:*", text)
+        self.assertNotIn("Balance before this request", text)
+        self.assertNotIn("Insufficient balance", text)
+
+    def test_warning_uses_g_number_formatting(self):
+        """Shortfall and resulting balance are formatted with :g so fractional halves keep their decimals and whole numbers drop .0."""
+        blocks = format_leave_application_blocks(**self._default_kwargs(total_days=2.5, leave_balance=1.0))
+        text = _blocks_text(blocks)
+        self.assertIn("exceeds the available balance by 1.5 day(s). Approving it will take the balance to -1.5.", text)
 
 
 class TestSendLeaveNotificationToApplicant(IntegrationTestCase):

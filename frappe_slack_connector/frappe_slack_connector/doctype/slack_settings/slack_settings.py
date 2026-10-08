@@ -3,6 +3,9 @@
 
 # import frappe
 from frappe.model.document import Document
+from frappe.utils.jinja import validate_template
+
+CELEBRATION_TEMPLATE_FIELDS = ("birthday_message_template", "anniversary_message_template")
 
 # TODO: Add validation for slack and channel integration
 # Currently we are taking the channel name (not the id), so it is
@@ -19,4 +22,12 @@ class SlackSettings(Document):
         Check if the provided slack channel is valid, taking
         the slack_app_token and slack_bot_token from the document
         """
-        pass
+        self.validate_celebration_templates()
+
+    def validate_celebration_templates(self):
+        """
+        Reject a celebrations message template with a Jinja syntax error so
+        the daily job does not fail at post time
+        """
+        for fieldname in CELEBRATION_TEMPLATE_FIELDS:
+            validate_template(self.get(fieldname))

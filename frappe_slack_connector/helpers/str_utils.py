@@ -21,3 +21,14 @@ def truncate_text(text, limit=SlackIntegration.SLACK_CHAR_LIMIT):
     Truncate the text to the given limit
     """
     return text[:limit]
+
+
+def escape_slack_text(text) -> str:
+    """
+    Escape the three characters Slack treats as control characters in
+    message text (&, <, >) so user-supplied values such as names cannot be
+    read as mentions or links. Returns an empty string for None.
+    """
+    if not text:
+        return ""
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")

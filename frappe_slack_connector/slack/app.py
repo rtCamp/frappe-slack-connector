@@ -25,7 +25,7 @@ class SlackIntegration:
         settings = frappe.get_single("Slack Settings")
         self.SLACK_BOT_TOKEN = settings.get_password("slack_bot_token")
         self.SLACK_APP_TOKEN = settings.get_password("slack_app_token")
-        self.SLACK_CHANNEL_ID = settings.get_password("attendance_channel_id")
+        self.SLACK_CHANNEL_ID = settings.get_password("attendance_channel_id", raise_exception=False)
         self.SLACK_SIGNATURE = settings.get_password("slack_signing_token")
 
         # Still not set, raise an error

@@ -1,5 +1,6 @@
 import calendar
 import datetime
+from collections.abc import Callable
 
 import frappe
 from erpnext.setup.doctype.holiday_list.holiday_list import is_holiday
@@ -7,13 +8,17 @@ from frappe import _
 from frappe.utils import add_days, get_time, getdate
 
 from frappe_slack_connector.helpers.error import generate_error_log
+from frappe_slack_connector.helpers.str_utils import escape_slack_text
 from frappe_slack_connector.slack.app import SlackIntegration
 
 OPT_OUT_FIELD = "custom_skip_celebration_announcements"
 
-# Longest run of consecutive non-working days we roll back over when looking
-# for events that fell on a weekend or holiday.
+# Longest run of days we look back over, both for consecutive non-working
+# days and for catching up after days on which the job did not run.
 MAX_ROLLBACK_DAYS = 31
+
+# Slack rejects section blocks whose text is longer than this.
+SLACK_SECTION_TEXT_LIMIT = 3000
 
 DEFAULT_BIRTHDAY_TEMPLATE = (
     ":birthday: Happy birthday "
@@ -34,52 +39,60 @@ DEFAULT_ANNIVERSARY_TEMPLATE = (
 
 def celebrations_channel() -> None:
     """
-    Scheduler entry (runs every minute) that posts the daily birthday and
-    work-anniversary announcements to Slack.
-    Conditions:
+    Scheduler entry (runs every scheduler tick, i.e. every
+    `scheduler_interval`, 240s by default) that queues the daily birthday
+    and work-anniversary announcements.
+    Conditions, cheapest first:
      - At least one of the two event types is enabled
-     - Today is a working day (events on weekends and holidays are picked
-       up by send_celebrations on the next working day)
      - Today's announcements have not already been queued
      - The configured celebrations time has passed
-    The actual work is enqueued so the scheduler tick stays short.
+     - Today is a working day (events on weekends and holidays are picked
+       up by send_celebrations on the next working day)
+    The date is stamped before the job is queued so a second tick cannot
+    queue it again; the job itself is deduplicated by id as well.
     """
     slack_settings = frappe.get_single("Slack Settings")
     if not (slack_settings.send_birthday_updates or slack_settings.send_anniversary_updates):
         return
 
     current_date = frappe.utils.nowdate()
+    previous_run = slack_settings.last_celebrations_date
     if (
-        not is_working_day(getdate(current_date), get_default_holiday_list())
-        or (
-            slack_settings.last_celebrations_date is not None
-            and getdate(slack_settings.last_celebrations_date) == getdate(current_date)
-        )
+        (previous_run is not None and getdate(previous_run) == getdate(current_date))
         or frappe.utils.now_datetime().time() < get_time(slack_settings.celebrations_time or "09:00:00")
+        or not is_working_day(getdate(current_date), get_default_holiday_list())
     ):
         return
 
-    frappe.enqueue(send_celebrations, queue="short", date=current_date)
+    # Stamp without touching `modified` so this cannot collide with another
+    # full save of Slack Settings (e.g. the attendance summary) on the same tick.
+    frappe.db.set_single_value("Slack Settings", "last_celebrations_date", current_date, update_modified=False)
+    frappe.enqueue(
+        send_celebrations,
+        queue="short",
+        enqueue_after_commit=True,
+        job_id=f"celebrations::{current_date}",
+        deduplicate=True,
+        date=current_date,
+        previous_run=str(previous_run) if previous_run else None,
+    )
 
-    # Stamp the date as soon as the job is queued so the next scheduler tick
-    # does not queue it again, even when nobody has an event today.
-    slack_settings.last_celebrations_date = current_date
-    slack_settings.save(ignore_permissions=True)
 
-
-def send_celebrations(date: str | datetime.date) -> None:
+def send_celebrations(date: str | datetime.date, previous_run: str | datetime.date | None = None) -> None:
     """
     Background job: post one birthday message and one work-anniversary
-    message for every event that falls on `date` or on the run of
-    non-working days immediately before it. Nothing is posted for an event
-    type with no employees.
+    message for every event that falls on `date`, on the run of non-working
+    days immediately before it, or on any day since `previous_run` that was
+    missed. Nothing is posted for an event type with no employees.
     """
     run_date = getdate(date)
     slack_settings = frappe.get_single("Slack Settings")
-    slack = SlackIntegration()
-    channel = slack_settings.celebrations_channel_id or slack.SLACK_CHANNEL_ID
 
-    start_date, end_date = get_celebration_window(run_date, get_default_holiday_list())
+    start_date, end_date = get_celebration_window(
+        run_date,
+        get_default_holiday_list(),
+        previous_run=getdate(previous_run) if previous_run else None,
+    )
     employees = get_active_employees()
 
     birthdays = (
@@ -95,16 +108,26 @@ def send_celebrations(date: str | datetime.date) -> None:
     if not birthdays and not anniversaries:
         return
 
+    slack = SlackIntegration()
+    channel = slack_settings.celebrations_channel_id or slack.SLACK_CHANNEL_ID
+    if not channel:
+        generate_error_log(
+            title=_("Celebrations channel not set"),
+            message=_("Set the Celebrations Channel ID or the Attendance Channel ID in Slack Settings."),
+        )
+        return
+
     user_ids = {e.user_id for e in [*birthdays, *anniversaries] if e.user_id}
     slack_user_ids = get_slack_user_ids(list(user_ids))
     mention_users = bool(slack_settings.mention_user)
 
     def to_context(employee) -> dict:
         slack_userid = slack_user_ids.get(employee.user_id) if employee.user_id else None
+        name = escape_slack_text(employee.employee_name)
         context = {
-            "name": employee.employee_name,
-            "mention": f"<@{slack_userid}>" if slack_userid and mention_users else employee.employee_name,
-            "company": employee.company,
+            "name": name,
+            "mention": f"<@{slack_userid}>" if slack_userid and mention_users else name,
+            "company": escape_slack_text(employee.company),
             "date": employee.event_date,
         }
         if "years" in employee:
@@ -112,41 +135,59 @@ def send_celebrations(date: str | datetime.date) -> None:
         return context
 
     if birthdays:
-        post_blocks(
+        post_announcement(
             slack,
             channel,
-            build_birthday_blocks(
-                [to_context(e) for e in birthdays],
-                run_date,
-                template=slack_settings.birthday_message_template,
-            ),
+            build_birthday_blocks,
+            [to_context(e) for e in birthdays],
+            run_date,
+            template=slack_settings.birthday_message_template,
+            fallback_prefix=_("Birthdays"),
             error_title=_("Error posting birthday announcement to Slack"),
         )
 
     if anniversaries:
-        post_blocks(
+        post_announcement(
             slack,
             channel,
-            build_anniversary_blocks(
-                [to_context(e) for e in anniversaries],
-                run_date,
-                template=slack_settings.anniversary_message_template,
-            ),
+            build_anniversary_blocks,
+            [to_context(e) for e in anniversaries],
+            run_date,
+            template=slack_settings.anniversary_message_template,
+            fallback_prefix=_("Work anniversaries"),
             error_title=_("Error posting work anniversary announcement to Slack"),
         )
 
 
-def post_blocks(slack: SlackIntegration, channel: str, blocks: list, *, error_title: str) -> None:
+def post_announcement(
+    slack: SlackIntegration,
+    channel: str,
+    build_blocks: Callable,
+    employees: list,
+    run_date: datetime.date,
+    *,
+    template: str | None,
+    fallback_prefix: str,
+    error_title: str,
+) -> None:
     """
-    Post the blocks to the channel, logging (not raising) on failure so a
-    failed birthday post does not stop the anniversary post.
+    Render and post one announcement, logging (not raising) on failure so a
+    broken birthday template or post does not stop the anniversary post.
+    Nothing is posted when the template renders to an empty message.
     """
     try:
-        slack.slack_app.client.chat_postMessage(channel=channel, blocks=blocks)
+        blocks = build_blocks(employees, run_date, template=template)
+        if not blocks:
+            return
+        slack.slack_app.client.chat_postMessage(
+            channel=channel,
+            blocks=blocks,
+            text=f"{fallback_prefix}: {', '.join(e['name'] for e in employees)}",
+        )
     except Exception as e:
         generate_error_log(
             title=error_title,
-            message=_("Please check the celebrations channel ID and try again."),
+            message=_("Please check the celebrations channel ID and message template and try again."),
             exception=e,
         )
 
@@ -171,11 +212,16 @@ def is_working_day(day: datetime.date, holiday_list: str | None) -> bool:
     return not (holiday_list and is_holiday(holiday_list, day))
 
 
-def get_celebration_window(run_date: datetime.date, holiday_list: str | None) -> tuple[datetime.date, datetime.date]:
+def get_celebration_window(
+    run_date: datetime.date, holiday_list: str | None, previous_run: datetime.date | None = None
+) -> tuple[datetime.date, datetime.date]:
     """
     Return the (start, end) date range whose events are announced on
     `run_date`: `run_date` itself plus the run of non-working days
     immediately before it, so weekend and holiday events are not lost.
+    When `previous_run` (the last date the job ran) is given, the window
+    also covers every day since then, so days on which the job did not run
+    are caught up, looking back at most MAX_ROLLBACK_DAYS.
     """
     start = run_date
     previous = add_days(run_date, -1)
@@ -184,6 +230,9 @@ def get_celebration_window(run_date: datetime.date, holiday_list: str | None) ->
             break
         start = previous
         previous = add_days(previous, -1)
+    if previous_run is not None:
+        catch_up_start = max(add_days(previous_run, 1), add_days(run_date, -MAX_ROLLBACK_DAYS))
+        start = min(start, catch_up_start)
     return start, run_date
 
 
@@ -301,22 +350,56 @@ def _render(template: str | None, default: str, employees: list, run_date: datet
     return frappe.render_template(template or default, context).strip()
 
 
+def split_text(text: str, limit: int = SLACK_SECTION_TEXT_LIMIT) -> list[str]:
+    """
+    Split text into chunks of at most `limit` characters, preferring line
+    boundaries; a single line longer than `limit` is cut hard.
+    """
+    chunks = []
+    current = ""
+    for line in text.split("\n"):
+        while len(line) > limit:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(line[:limit])
+            line = line[limit:]
+        candidate = line if not current else f"{current}\n{line}"
+        if len(candidate) > limit:
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def _blocks(header: str, text: str) -> list:
+    """
+    A header block followed by one section block per chunk of `text`.
+    Returns an empty list when there is no text to post.
+    """
+    if not text.strip():
+        return []
     return [
         {
             "type": "header",
             "text": {"type": "plain_text", "text": header, "emoji": True},
         },
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": text},
-        },
+        *(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": chunk},
+            }
+            for chunk in split_text(text)
+        ),
     ]
 
 
 def build_birthday_blocks(employees: list, date: datetime.date, template: str | None = None) -> list:
     """
-    Slack blocks for the birthday announcement: a header plus one section
+    Slack blocks for the birthday announcement: a header plus the section(s)
     rendered from the Jinja template (or the default when empty)
     """
     return _blocks(":birthday: Birthdays", _render(template, DEFAULT_BIRTHDAY_TEMPLATE, employees, date))
@@ -324,7 +407,7 @@ def build_birthday_blocks(employees: list, date: datetime.date, template: str | 
 
 def build_anniversary_blocks(employees: list, date: datetime.date, template: str | None = None) -> list:
     """
-    Slack blocks for the work-anniversary announcement: a header plus one
-    section rendered from the Jinja template (or the default when empty)
+    Slack blocks for the work-anniversary announcement: a header plus the
+    section(s) rendered from the Jinja template (or the default when empty)
     """
     return _blocks(":tada: Work Anniversaries", _render(template, DEFAULT_ANNIVERSARY_TEMPLATE, employees, date))

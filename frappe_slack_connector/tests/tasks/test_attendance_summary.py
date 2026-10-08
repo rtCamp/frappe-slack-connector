@@ -7,6 +7,7 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import getdate
 
 from frappe_slack_connector.tasks.attendance_summary import (
+    ATTENDANCE_UPDATE_LOCK,
     attendance_channel,
     build_attendance_blocks,
     get_leave_type,
@@ -228,17 +229,42 @@ class TestSendNotification(IntegrationTestCase):
         mock_log.assert_called_once()
 
 
+def _post_and_update(rows, *, leave_notification_subject="Employees on Leave"):
+    """Run the morning post (send_notification) and then the in-place update (update_attendance_summary) against the same leave rows and Slack mock; return the mock Slack client."""
+    settings = _build_settings_mock(
+        last_attendance_date="2026-06-15",
+        last_attendance_msg_ts="1700000000.000777",
+        leave_notification_subject=leave_notification_subject,
+    )
+    mock_slack = MagicMock()
+    mock_slack.SLACK_CHANNEL_ID = TEST_SLACK_CHANNEL_ID
+    with (
+        patch(f"{ATTENDANCE_MODULE}.frappe.get_single", return_value=settings),
+        patch(f"{ATTENDANCE_MODULE}.SlackIntegration", return_value=mock_slack),
+        patch(
+            f"{ATTENDANCE_MODULE}.frappe.utils.now_datetime",
+            return_value=datetime(2026, 6, 15, 14, 32),
+        ),
+        _patch_block_inputs(rows),
+    ):
+        send_notification(leave_notification_subject)
+        update_attendance_summary()
+    return mock_slack.slack_app.client
+
+
 class TestBuildAttendanceBlocks(IntegrationTestCase):
-    def test_morning_and_update_blocks_differ_only_by_updated_at_context(self):
-        """For the same leave data, build_attendance_blocks with updated_at returns the morning blocks plus one trailing 'Updated at' context block and nothing else."""
+    def test_morning_post_and_in_place_update_differ_only_by_updated_at_context(self):
+        """For the same leave data, the blocks sent by update_attendance_summary (chat_update) equal the blocks posted by send_notification (chat_postMessage) plus one trailing 'Updated at' context block."""
         rows = [
             _build_leave_row(employee="EMP-001", employee_name="Alice", to_date="2026-06-17"),
             _build_leave_row(employee="EMP-002", employee_name="Bob"),
         ]
-        with _patch_block_inputs(rows):
-            morning = build_attendance_blocks("Employees on Leave")
-            updated = build_attendance_blocks("Employees on Leave", updated_at="14:32")
-        self.assertEqual(updated, [*morning, UPDATED_AT_BLOCK])
+        client = _post_and_update(rows)
+        posted = client.chat_postMessage.call_args.kwargs["blocks"]
+        updated = client.chat_update.call_args.kwargs["blocks"]
+        self.assertEqual([b["type"] for b in posted], ["header", "section"])
+        self.assertIn("2 Employees on Leave", posted[0]["text"]["text"])
+        self.assertEqual(updated, [*posted, UPDATED_AT_BLOCK])
 
     def test_morning_blocks_have_no_context_block(self):
         """Without updated_at, build_attendance_blocks returns only the header and section blocks (no context block)."""
@@ -249,13 +275,21 @@ class TestBuildAttendanceBlocks(IntegrationTestCase):
         self.assertIn("1 Employees on Leave", morning[0]["text"]["text"])
 
     def test_no_one_on_leave_update_appends_context_to_header_only_variant(self):
-        """When nobody is on leave, the update variant is the single 'No ...' header followed by the 'Updated at' context block."""
-        with _patch_block_inputs([]):
+        """When nobody is on leave, the morning post is the single 'No ...' header and the in-place update is that header followed by the 'Updated at' context block."""
+        client = _post_and_update([])
+        posted = client.chat_postMessage.call_args.kwargs["blocks"]
+        updated = client.chat_update.call_args.kwargs["blocks"]
+        self.assertEqual([b["type"] for b in posted], ["header"])
+        self.assertIn("No Employees on Leave", posted[0]["text"]["text"])
+        self.assertEqual(updated, [*posted, UPDATED_AT_BLOCK])
+
+    def test_build_attendance_blocks_without_updated_at_has_no_context_block(self):
+        """build_attendance_blocks only appends the context block when updated_at is given."""
+        with _patch_block_inputs([_build_leave_row()]):
             morning = build_attendance_blocks("Employees on Leave")
             updated = build_attendance_blocks("Employees on Leave", updated_at="14:32")
-        self.assertEqual([b["type"] for b in morning], ["header"])
-        self.assertIn("No Employees on Leave", morning[0]["text"]["text"])
-        self.assertEqual(updated, [*morning, UPDATED_AT_BLOCK])
+        self.assertNotIn("context", [b["type"] for b in morning])
+        self.assertEqual(updated[-1], UPDATED_AT_BLOCK)
 
 
 class TestUpdateAttendanceSummary(IntegrationTestCase):
@@ -305,6 +339,57 @@ class TestUpdateAttendanceSummary(IntegrationTestCase):
             update_attendance_summary()
         header_text = mock_slack.slack_app.client.chat_update.call_args.kwargs["blocks"][0]["text"]["text"]
         self.assertIn("Team Members on Leave", header_text)
+
+    def test_runs_whole_job_under_site_filelock(self):
+        """update_attendance_summary enters the fsc_attendance_summary_update file lock before reading settings, so concurrent refreshes are serialised and cannot overwrite a newer edit with an older read."""
+        settings = _build_settings_mock(
+            last_attendance_date="2026-06-15",
+            last_attendance_msg_ts="1700000000.000777",
+        )
+        mock_slack = MagicMock()
+        mock_slack.SLACK_CHANNEL_ID = TEST_SLACK_CHANNEL_ID
+        order = []
+        mock_lock = MagicMock()
+        mock_lock.return_value.__enter__.side_effect = lambda *a: order.append("lock")
+        # A MagicMock __exit__ is truthy and would swallow exceptions raised in the block
+        mock_lock.return_value.__exit__.return_value = False
+        with (
+            patch(f"{ATTENDANCE_MODULE}.filelock", mock_lock),
+            patch(
+                f"{ATTENDANCE_MODULE}.frappe.get_single",
+                side_effect=lambda *a, **k: (order.append("settings"), settings)[1],
+            ),
+            patch(f"{ATTENDANCE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(
+                f"{ATTENDANCE_MODULE}.frappe.utils.now_datetime",
+                return_value=datetime(2026, 6, 15, 14, 32),
+            ),
+            _patch_block_inputs([]),
+        ):
+            update_attendance_summary()
+        mock_lock.assert_called_once_with(ATTENDANCE_UPDATE_LOCK, timeout=60)
+        self.assertEqual(ATTENDANCE_UPDATE_LOCK, "fsc_attendance_summary_update")
+        self.assertEqual(order, ["lock", "settings"])
+        mock_lock.return_value.__exit__.assert_called_once()
+        mock_slack.slack_app.client.chat_update.assert_called_once()
+
+    def test_does_nothing_when_attendance_updates_disabled(self):
+        """update_attendance_summary re-checks send_attendance_updates and returns without building or editing when it is 0 (e.g. switched off between enqueue and run)."""
+        settings = _build_settings_mock(
+            send_attendance_updates=0,
+            last_attendance_date="2026-06-15",
+            last_attendance_msg_ts="1700000000.000777",
+        )
+        mock_slack = MagicMock()
+        with (
+            patch(f"{ATTENDANCE_MODULE}.frappe.get_single", return_value=settings),
+            patch(f"{ATTENDANCE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{ATTENDANCE_MODULE}.today", return_value="2026-06-15"),
+            patch(f"{ATTENDANCE_MODULE}.build_attendance_blocks") as mock_build,
+        ):
+            update_attendance_summary()
+        mock_build.assert_not_called()
+        mock_slack.slack_app.client.chat_update.assert_not_called()
 
     def test_does_nothing_when_summary_not_posted_today(self):
         """update_attendance_summary returns without touching Slack when last_attendance_msg_ts is missing or last_attendance_date is not today."""

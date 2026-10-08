@@ -4,6 +4,7 @@ import frappe
 from erpnext.setup.doctype.holiday_list.holiday_list import is_holiday
 from frappe import _
 from frappe.utils import get_time, getdate, today
+from frappe.utils.synchronization import filelock
 
 from frappe_slack_connector.db.leave_application import (
     custom_fields_exist,
@@ -12,6 +13,9 @@ from frappe_slack_connector.db.leave_application import (
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
 from frappe_slack_connector.slack.app import SlackIntegration
+
+# Name of the site-level lock that serialises in-place summary updates
+ATTENDANCE_UPDATE_LOCK = "fsc_attendance_summary_update"
 
 
 def attendance_channel() -> None:
@@ -171,33 +175,39 @@ def update_attendance_summary() -> None:
     the list and the header count stay accurate for the rest of the day.
     Does nothing when today's summary has not been posted yet: the morning
     post will pick up the current state on its own.
+
+    The whole job (read, build, edit) runs under a site-level file lock so
+    that concurrent refreshes (for example a bulk reject queues one job per
+    leave) cannot interleave and let an older read overwrite a newer edit.
     """
-    slack_settings = frappe.get_single("Slack Settings")
-    if (
-        not slack_settings.last_attendance_msg_ts
-        or not slack_settings.last_attendance_date
-        or getdate(slack_settings.last_attendance_date) != getdate(today())
-    ):
-        return
+    with filelock(ATTENDANCE_UPDATE_LOCK, timeout=60):
+        slack_settings = frappe.get_single("Slack Settings")
+        if (
+            slack_settings.send_attendance_updates != 1
+            or not slack_settings.last_attendance_msg_ts
+            or not slack_settings.last_attendance_date
+            or getdate(slack_settings.last_attendance_date) != getdate(today())
+        ):
+            return
 
-    slack = SlackIntegration()
-    blocks = build_attendance_blocks(
-        get_attendance_title(slack_settings),
-        updated_at=frappe.utils.now_datetime().strftime("%H:%M"),
-    )
+        slack = SlackIntegration()
+        blocks = build_attendance_blocks(
+            get_attendance_title(slack_settings),
+            updated_at=frappe.utils.now_datetime().strftime("%H:%M"),
+        )
 
-    try:
-        slack.slack_app.client.chat_update(
-            channel=slack.SLACK_CHANNEL_ID,
-            ts=slack_settings.last_attendance_msg_ts,
-            blocks=blocks,
-        )
-    except Exception as e:
-        generate_error_log(
-            title=_("Error updating attendance summary in Slack"),
-            message=_("Please check the channel ID and try again."),
-            exception=e,
-        )
+        try:
+            slack.slack_app.client.chat_update(
+                channel=slack.SLACK_CHANNEL_ID,
+                ts=slack_settings.last_attendance_msg_ts,
+                blocks=blocks,
+            )
+        except Exception as e:
+            generate_error_log(
+                title=_("Error updating attendance summary in Slack"),
+                message=_("Please check the channel ID and try again."),
+                exception=e,
+            )
 
 
 def get_leave_type(user_application: dict) -> str:

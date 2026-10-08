@@ -8,7 +8,8 @@ from frappe_slack_connector.helpers.standard_date import standard_date_fmt
 from frappe_slack_connector.slack.app import SlackIntegration
 from frappe_slack_connector.tasks.attendance_summary import update_attendance_summary
 
-# Statuses that take a leave out of the attendance summary
+# Statuses counted in the attendance summary, and those that take a leave out of it
+SUMMARY_INCLUDED_STATUSES = ("Open", "Approved")
 SUMMARY_EXCLUDED_STATUSES = ("Rejected", "Cancelled")
 
 
@@ -38,10 +39,15 @@ def on_update_refresh_attendance_summary(doc, method=None):
 
     Wired to ``on_update`` (Desk and Slack rejection, with or without a
     workflow), ``on_cancel`` (submitted leave cancelled) and ``on_discard``
-    (draft leave discarded). Only fires when the status actually changed,
-    so edits to an already-rejected leave do not rebuild the summary.
+    (draft leave discarded). Only fires when the status actually changed
+    from one the summary counts, so edits to an already-rejected leave and
+    Rejected -> Cancelled transitions do not rebuild the summary.
     """
     if doc.status not in SUMMARY_EXCLUDED_STATUSES or not doc.has_value_changed("status"):
+        return
+    previous_status = doc.get_value_before_save("status")
+    # No before-save copy means we cannot tell; refresh rather than go stale
+    if previous_status is not None and previous_status not in SUMMARY_INCLUDED_STATUSES:
         return
     enqueue_attendance_summary_refresh(doc)
 

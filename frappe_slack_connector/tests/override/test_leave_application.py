@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock, patch
 
+import frappe
 from frappe.tests import IntegrationTestCase
 
 from frappe_slack_connector.override.leave_application import (
@@ -12,6 +13,7 @@ from frappe_slack_connector.override.leave_application import (
 from frappe_slack_connector.tests import TEST_SLACK_CHANNEL_ID, TEST_SLACK_USER_ID
 
 LEAVE_OVERRIDE_MODULE = "frappe_slack_connector.override.leave_application"
+REFRESH_HANDLER_PATH = f"{LEAVE_OVERRIDE_MODULE}.on_update_refresh_attendance_summary"
 
 
 def _build_leave_doc(
@@ -29,15 +31,18 @@ def _build_leave_doc(
     creation="2026-06-09 09:00:00",
     status="Open",
     status_changed=True,
+    previous_status="Open",
 ):
     """Build a MagicMock that mimics a Leave Application doc with the fields the override code reads.
 
-    status_changed drives doc.has_value_changed("status"), which the refresh handler gates on.
+    status_changed drives doc.has_value_changed("status") and previous_status drives
+    doc.get_value_before_save("status"); the refresh handler gates on both.
     """
     doc = MagicMock()
     doc.name = name
     doc.status = status
     doc.has_value_changed.side_effect = lambda fieldname: status_changed if fieldname == "status" else False
+    doc.get_value_before_save.side_effect = lambda fieldname: previous_status if fieldname == "status" else None
     doc.employee = employee
     doc.employee_name = employee_name
     doc.leave_approver = leave_approver
@@ -203,6 +208,83 @@ class TestOnUpdateRefreshAttendanceSummary(IntegrationTestCase):
         settings = _build_slack_settings_mock(last_attendance_date="2026-06-10")
         mock_enqueue = self._run(doc, settings)
         mock_enqueue.assert_called_once()
+
+    def test_does_nothing_when_rejected_leave_is_cancelled(self):
+        """A Rejected -> Cancelled transition was never in the summary, so it does not enqueue a refresh (and does not read Slack Settings)."""
+        doc = _build_leave_doc(
+            from_date="2026-06-10", to_date="2026-06-10", status="Cancelled", previous_status="Rejected"
+        )
+        settings = _build_slack_settings_mock(last_attendance_date="2026-06-10")
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.get_single", return_value=settings) as mock_get_single,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.today", return_value="2026-06-10"),
+        ):
+            on_update_refresh_attendance_summary(doc, method="on_cancel")
+        mock_enqueue.assert_not_called()
+        mock_get_single.assert_not_called()
+
+    def test_enqueues_refresh_for_approved_to_cancelled_and_open_to_rejected(self):
+        """Transitions out of a counted status (Open or Approved) into Rejected or Cancelled enqueue the refresh."""
+        settings = _build_slack_settings_mock(last_attendance_date="2026-06-10")
+        for previous_status, status in (("Approved", "Cancelled"), ("Open", "Rejected"), ("Approved", "Rejected")):
+            doc = _build_leave_doc(
+                from_date="2026-06-10", to_date="2026-06-10", status=status, previous_status=previous_status
+            )
+            mock_enqueue = self._run(doc, settings)
+            mock_enqueue.assert_called_once()
+
+    def test_enqueues_refresh_when_previous_status_unknown(self):
+        """When there is no before-save copy (get_value_before_save returns None) the handler refreshes rather than risk a stale summary."""
+        doc = _build_leave_doc(from_date="2026-06-10", to_date="2026-06-10", status="Rejected", previous_status=None)
+        settings = _build_slack_settings_mock(last_attendance_date="2026-06-10")
+        mock_enqueue = self._run(doc, settings)
+        mock_enqueue.assert_called_once()
+
+    def test_enqueues_refresh_on_real_leave_application_doc(self):
+        """With a real (uninserted) Leave Application whose _doc_before_save copy is Open and whose status is Rejected, has_value_changed/get_value_before_save resolve naturally and the handler enqueues the refresh."""
+        fields = {
+            "doctype": "Leave Application",
+            "employee": "EMP-001",
+            "employee_name": "Alice",
+            "leave_type": "Casual Leave",
+            "from_date": "2026-06-10",
+            "to_date": "2026-06-10",
+            "posting_date": "2026-06-09",
+        }
+        doc = frappe.get_doc({**fields, "status": "Rejected"})
+        doc._doc_before_save = frappe.get_doc({**fields, "status": "Open"})
+        settings = _build_slack_settings_mock(last_attendance_date="2026-06-10")
+        mock_enqueue = self._run(doc, settings)
+        mock_enqueue.assert_called_once()
+        self.assertIs(mock_enqueue.call_args.args[0], update_attendance_summary)
+
+    def test_real_leave_application_doc_with_unchanged_status_does_nothing(self):
+        """With a real Leave Application whose before-save copy already has status Rejected, saving again does not enqueue the refresh."""
+        fields = {
+            "doctype": "Leave Application",
+            "employee": "EMP-001",
+            "employee_name": "Alice",
+            "leave_type": "Casual Leave",
+            "from_date": "2026-06-10",
+            "to_date": "2026-06-10",
+            "posting_date": "2026-06-09",
+            "status": "Rejected",
+        }
+        doc = frappe.get_doc(dict(fields))
+        doc._doc_before_save = frappe.get_doc(dict(fields))
+        settings = _build_slack_settings_mock(last_attendance_date="2026-06-10")
+        mock_enqueue = self._run(doc, settings)
+        mock_enqueue.assert_not_called()
+
+
+class TestDocEventHooks(IntegrationTestCase):
+    def test_refresh_handler_wired_to_update_cancel_and_discard(self):
+        """hooks.py registers on_update_refresh_attendance_summary for Leave Application on_update, on_cancel and on_discard (get_hooks returns a list per event)."""
+        leave_events = frappe.get_hooks("doc_events")["Leave Application"]
+        for event in ("on_update", "on_cancel", "on_discard"):
+            self.assertIn(REFRESH_HANDLER_PATH, leave_events[event], event)
+        self.assertIn(f"{LEAVE_OVERRIDE_MODULE}.after_insert", leave_events["after_insert"])
 
 
 class TestSendLeaveNotificationBg(IntegrationTestCase):

@@ -96,6 +96,27 @@ class TestGetEmployeesOnLeave(IntegrationTestCase):
 
     ACTIVE_EMPLOYEE = "_T-FSC-EMP-ACTIVE"
     LEFT_EMPLOYEE = "_T-FSC-EMP-LEFT"
+    OPEN_EMPLOYEE = "_T-FSC-EMP-OPEN"
+    REJECTED_EMPLOYEE = "_T-FSC-EMP-REJECTED"
+    CANCELLED_EMPLOYEE = "_T-FSC-EMP-CANCELLED"
+    DISCARDED_EMPLOYEE = "_T-FSC-EMP-DISCARDED"
+    FORCE_CANCELLED_EMPLOYEE = "_T-FSC-EMP-FORCE-CANCELLED"
+
+    # (employee, employee status, leave status, leave docstatus), one leave
+    # covering today per employee so each case can be asserted by employee.
+    FIXTURES = (
+        (ACTIVE_EMPLOYEE, "Active", "Approved", 1),
+        (LEFT_EMPLOYEE, "Left", "Approved", 1),
+        (OPEN_EMPLOYEE, "Active", "Open", 0),
+        (REJECTED_EMPLOYEE, "Active", "Rejected", 1),
+        # Submitted leave cancelled through the HRMS controller
+        (CANCELLED_EMPLOYEE, "Active", "Cancelled", 2),
+        # Draft leave discarded: HRMS on_discard sets status Cancelled
+        (DISCARDED_EMPLOYEE, "Active", "Cancelled", 2),
+        # Cancelled with flags.ignore_validate: before_cancel is skipped and
+        # status stays Approved while docstatus becomes 2
+        (FORCE_CANCELLED_EMPLOYEE, "Active", "Approved", 2),
+    )
 
     @classmethod
     def setUpClass(cls):
@@ -106,29 +127,26 @@ class TestGetEmployeesOnLeave(IntegrationTestCase):
         leave_type = frappe.get_all("Leave Type", pluck="name", limit=1)[0]
         day = today()
 
-        for name, status in (
-            (cls.ACTIVE_EMPLOYEE, "Active"),
-            (cls.LEFT_EMPLOYEE, "Left"),
-        ):
+        for name, employee_status, leave_status, docstatus in cls.FIXTURES:
             frappe.get_doc(
                 {
                     "doctype": "Employee",
                     "name": name,
                     "first_name": name,
                     "employee_name": name,
-                    "status": status,
+                    "status": employee_status,
                     "company": company,
                     "gender": "Other",
                     "date_of_birth": "1990-01-01",
                     "date_of_joining": "2020-01-01",
-                    "relieving_date": day if status == "Left" else None,
+                    "relieving_date": day if employee_status == "Left" else None,
                 }
             ).db_insert()
 
             frappe.get_doc(
                 {
                     "doctype": "Leave Application",
-                    "name": f"_T-FSC-LAP-{status.upper()}",
+                    "name": f"_T-FSC-LAP-{name.removeprefix('_T-FSC-EMP-')}",
                     "employee": name,
                     "employee_name": name,
                     "leave_type": leave_type,
@@ -136,8 +154,8 @@ class TestGetEmployeesOnLeave(IntegrationTestCase):
                     "from_date": day,
                     "to_date": day,
                     "posting_date": day,
-                    "status": "Approved",
-                    "docstatus": 1,
+                    "status": leave_status,
+                    "docstatus": docstatus,
                 }
             ).db_insert()
 
@@ -147,9 +165,34 @@ class TestGetEmployeesOnLeave(IntegrationTestCase):
         self.assertIn(self.ACTIVE_EMPLOYEE, on_leave)
         self.assertNotIn(self.LEFT_EMPLOYEE, on_leave)
 
+    def test_includes_open_and_approved_leave(self):
+        """Leave is approved by default, so both Open (draft) and Approved (submitted) leave covering today is reported."""
+        on_leave = {row.employee for row in get_employees_on_leave()}
+        self.assertIn(self.OPEN_EMPLOYEE, on_leave)
+        self.assertIn(self.ACTIVE_EMPLOYEE, on_leave)
+
+    def test_excludes_rejected_leave(self):
+        """A submitted leave with status Rejected covering today is not reported, so a rebuilt summary drops the person."""
+        on_leave = {row.employee for row in get_employees_on_leave()}
+        self.assertNotIn(self.REJECTED_EMPLOYEE, on_leave)
+
+    def test_excludes_cancelled_and_discarded_leave(self):
+        """A cancelled submitted leave and a discarded draft (both status Cancelled, docstatus 2) covering today are not reported."""
+        on_leave = {row.employee for row in get_employees_on_leave()}
+        self.assertNotIn(self.CANCELLED_EMPLOYEE, on_leave)
+        self.assertNotIn(self.DISCARDED_EMPLOYEE, on_leave)
+
+    def test_excludes_cancelled_docstatus_even_when_status_still_approved(self):
+        """A leave at docstatus 2 whose status was left at Approved (cancel with ignore_validate skips HRMS before_cancel) is excluded by the docstatus filter."""
+        on_leave = {row.employee for row in get_employees_on_leave()}
+        self.assertNotIn(self.FORCE_CANCELLED_EMPLOYEE, on_leave)
+
     def test_returns_empty_list_when_nobody_is_on_leave(self):
         """When no Leave Application covers today the function returns [] without querying Employee."""
         with patch(f"{LEAVE_DB_MODULE}.frappe.get_all", return_value=[]) as mock_get_all:
             self.assertEqual(get_employees_on_leave(), [])
         mock_get_all.assert_called_once()
         self.assertEqual(mock_get_all.call_args.args[0], "Leave Application")
+        filters = mock_get_all.call_args.kwargs["filters"]
+        self.assertEqual(filters["status"], ("in", ["Open", "Approved"]))
+        self.assertEqual(filters["docstatus"], ("!=", 2))

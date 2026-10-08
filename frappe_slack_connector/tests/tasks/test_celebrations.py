@@ -676,7 +676,8 @@ class TestSendCelebrations(IntegrationTestCase):
         mock_set, mock_make_key = self._run_with_real_claim(
             settings, [employee], claimed=True, slack_class=MagicMock(return_value=slack), set_mock=set_mock
         )
-        mock_make_key.assert_called_once_with("fsc_celebrations_posted::2026-06-15")
+        # Frappe internals (meta, singles) also call make_key, so only pin our call
+        mock_make_key.assert_any_call("fsc_celebrations_posted::2026-06-15")
         mock_set.assert_called_once_with("test|fsc_celebrations_posted::2026-06-15", 1, nx=True, ex=2 * 86400)
         self.assertEqual(order, ["claim", "post"])
 

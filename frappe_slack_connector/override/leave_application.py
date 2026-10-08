@@ -144,6 +144,7 @@ def send_leave_notification_bg(doc: Document):
         slack_settings = frappe.get_single("Slack Settings")
         if (
             doc.from_date == frappe.utils.today()
+            and slack.SLACK_CHANNEL_ID
             and slack_settings.send_attendance_updates == 1
             and slack_settings.last_attendance_date is not None
             and slack_settings.last_attendance_msg_ts is not None

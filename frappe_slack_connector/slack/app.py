@@ -39,15 +39,15 @@ class SlackIntegration:
             signing_secret=self.SLACK_SIGNATURE,
         )
 
+    # Required to construct the client; the attendance channel is optional
+    # and each feature that posts to it validates it itself.
+    REQUIRED_SLACK_ATTRS = ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SLACK_SIGNATURE")
+
     def __check_slack_config(self) -> bool:
         """
         Check if the Slack configuration is set up
         """
-        return all(
-            getattr(self, slack_attr) is not None
-            for slack_attr in self.__dict__.keys()
-            if slack_attr.startswith("SLACK_")
-        )
+        return all(getattr(self, slack_attr, None) is not None for slack_attr in self.REQUIRED_SLACK_ATTRS)
 
     def get_slack_users(self, limit: int = 500) -> dict:
         """

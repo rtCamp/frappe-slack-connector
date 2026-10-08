@@ -29,9 +29,10 @@ def applicant_message_fields_exist() -> bool:
 def get_applicant_message_ref(leave_id: str) -> tuple[str | None, str | None]:
     """
     Return the (channel, ts) of the applicant's Slack DM for the given leave,
-    or (None, None) when nothing is stored
+    or (None, None) when nothing is stored, the leave has no name yet, or
+    the row does not exist
     """
-    if not applicant_message_fields_exist():
+    if not leave_id or not applicant_message_fields_exist():
         return None, None
     row = frappe.db.get_value(
         "Leave Application",
@@ -39,7 +40,8 @@ def get_applicant_message_ref(leave_id: str) -> tuple[str | None, str | None]:
         [APPLICANT_CHANNEL_FIELD, APPLICANT_MSG_TS_FIELD],
         as_dict=True,
     )
-    if not row:
+    # get_value returns None (or an empty result) when the row is missing
+    if not row or not isinstance(row, dict):
         return None, None
     return row.get(APPLICANT_CHANNEL_FIELD) or None, row.get(APPLICANT_MSG_TS_FIELD) or None
 

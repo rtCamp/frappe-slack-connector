@@ -217,3 +217,22 @@ class TestApplicantMessageRef(IntegrationTestCase):
             self.assertEqual(get_applicant_message_ref("HR-LAP-0014"), (None, None))
         with patch(f"{LEAVE_DB_MODULE}.applicant_message_fields_exist", return_value=False):
             self.assertEqual(get_applicant_message_ref("HR-LAP-0015"), (None, None))
+
+    def test_get_returns_none_pair_for_missing_leave_id(self):
+        """get_applicant_message_ref returns (None, None) without querying when the leave has no name."""
+        with (
+            patch(f"{LEAVE_DB_MODULE}.applicant_message_fields_exist", return_value=True),
+            patch(f"{LEAVE_DB_MODULE}.frappe.db.get_value") as mock_get_value,
+        ):
+            self.assertEqual(get_applicant_message_ref(None), (None, None))
+            self.assertEqual(get_applicant_message_ref(""), (None, None))
+        mock_get_value.assert_not_called()
+
+    def test_get_returns_none_pair_when_row_is_missing(self):
+        """get_applicant_message_ref returns (None, None) when the Leave Application row does not exist (get_value gives None or an empty result)."""
+        for missing in (None, ()):
+            with (
+                patch(f"{LEAVE_DB_MODULE}.applicant_message_fields_exist", return_value=True),
+                patch(f"{LEAVE_DB_MODULE}.frappe.db.get_value", return_value=missing),
+            ):
+                self.assertEqual(get_applicant_message_ref("HR-LAP-MISSING"), (None, None))

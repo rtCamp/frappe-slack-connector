@@ -113,7 +113,9 @@ def restore_applicant_message_ref(doc: Document, method: str | None = None):
     database is the source of truth: copy the stored values onto the doc
     whenever the in-memory ones are empty.
     """
-    if doc.is_new() or (doc.get(APPLICANT_CHANNEL_FIELD) and doc.get(APPLICANT_MSG_TS_FIELD)):
+    # ``is_new`` relies on ``__islocal``, which only insert() sets; a document
+    # built in memory and never inserted has no name and nothing stored
+    if doc.is_new() or not doc.name or (doc.get(APPLICANT_CHANNEL_FIELD) and doc.get(APPLICANT_MSG_TS_FIELD)):
         return
     channel, ts = get_applicant_message_ref(doc.name)
     if channel and ts:

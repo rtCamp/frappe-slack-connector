@@ -132,14 +132,22 @@ def send_notification(attendance_title: str) -> str | None:
         )
 
 
-def get_leave_type(user_application: dict) -> str:
+def get_leave_type(user_application: dict, on_date=None) -> str:
     """
     Get the leave type based on the user's leave application
     For standalone installations, the custom fields are not available,
     so only use Full Day, and Half Day
     For rtCamp installation, use Full Day, First-Half, and Second-Half
+
+    The half day only counts when ``half_day_date`` falls on ``on_date``
+    (today by default). ``half_day_date`` may be a date or a string.
     """
-    if not user_application.half_day or user_application.half_day_date != getdate(today()):
+    on_date = getdate(on_date) if on_date else getdate(today())
+    if (
+        not user_application.half_day
+        or not user_application.half_day_date
+        or getdate(user_application.half_day_date) != on_date
+    ):
         return "Full Day"
     elif not custom_fields_exist():
         return "Half Day"

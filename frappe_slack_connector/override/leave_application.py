@@ -1,11 +1,17 @@
+from datetime import UTC, datetime
+
 import frappe
 from frappe.model.document import Document
-from frappe.utils import get_url_to_form
+from frappe.utils import convert_utc_to_system_timezone, get_url_to_form, getdate
 
-from frappe_slack_connector.db.leave_application import custom_fields_exist
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
 from frappe_slack_connector.slack.app import SlackIntegration
+from frappe_slack_connector.tasks.attendance_summary import get_leave_type
+
+# Custom field on Leave Application (fixtures/custom_field.json) holding the ts
+# of the reply posted in the attendance summary thread for a same-day leave
+ATTENDANCE_REPLY_TS_FIELD = "custom_slack_attendance_reply_ts"
 
 
 def after_insert(doc, method):
@@ -113,13 +119,65 @@ def format_leave_submission_blocks(
     return blocks
 
 
+def post_same_day_leave_to_attendance_thread(doc: Document, slack: SlackIntegration | None = None) -> str | None:
+    """
+    Reply in today's attendance summary thread when the leave covers today
+    and the summary has already been posted (a leave applied for before the
+    summary is simply included in the summary itself)
+
+    The reply ``ts`` is stored on the Leave Application so the reply can be
+    removed if the leave is rejected or cancelled later the same day.
+    Returns the ``ts`` of the reply, or None when nothing was posted
+    """
+    today = getdate(frappe.utils.today())
+    slack_settings = frappe.get_single("Slack Settings")
+    if (
+        slack_settings.send_attendance_updates != 1
+        or not slack_settings.last_attendance_msg_ts
+        or not slack_settings.last_attendance_date
+        or getdate(slack_settings.last_attendance_date) != today
+    ):
+        return None
+
+    # from_date/to_date may be strings or dates depending on how the doc was built
+    if not (getdate(doc.from_date) <= today <= getdate(doc.to_date)):
+        return None
+
+    # Match the summary, which only lists active employees
+    if frappe.db.get_value("Employee", doc.employee, "status") != "Active":
+        return None
+
+    slack = slack or SlackIntegration()
+    user_slack = slack.get_slack_user_id(employee_id=doc.employee)
+    name = f"<@{user_slack}>" if user_slack and slack_settings.mention_user else doc.employee_name
+    day_period = get_leave_type(doc, on_date=today)
+
+    response = slack.slack_app.client.chat_postMessage(
+        channel=slack.SLACK_CHANNEL_ID,
+        blocks=[
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"{name} is on leave today. _({day_period})_",
+                },
+            },
+        ],
+        thread_ts=slack_settings.last_attendance_msg_ts,
+        reply_broadcast=True,
+    )
+    reply_ts = response["ts"]
+    frappe.db.set_value("Leave Application", doc.name, ATTENDANCE_REPLY_TS_FIELD, reply_ts, update_modified=False)
+    return reply_ts
+
+
 def send_leave_notification_bg(doc: Document):
     """
     Send a slack message to the leave approver when
     a new leave application is submitted
 
     Also send a notification to the attendance channel thread if
-    the leave date is today and attendance notification is already sent
+    the leave covers today and attendance notification is already sent
     """
     slack = SlackIntegration()
     try:
@@ -132,38 +190,16 @@ def send_leave_notification_bg(doc: Document):
         approver_slack = None
 
     try:
-        user_slack = slack.get_slack_user_id(employee_id=doc.employee)
-        mention_users = frappe.db.get_single_value("Slack Settings", "mention_user")
-        mention = f"<@{user_slack}>" if user_slack else doc.employee_name
-        day_period = "Full Day"
-        if doc.half_day and doc.half_day_date == frappe.utils.today():
-            day_period = doc.custom_first_halfsecond_half if custom_fields_exist() else "Half Day"
+        post_same_day_leave_to_attendance_thread(doc, slack=slack)
+    except Exception as e:
+        generate_error_log(
+            title="Error posting same-day leave to attendance thread",
+            exception=e,
+        )
 
-        # if leave date is today and attendance notification is already sent,
-        # send notification to attendance channel thread
-        slack_settings = frappe.get_single("Slack Settings")
-        if (
-            doc.from_date == frappe.utils.today()
-            and slack_settings.send_attendance_updates == 1
-            and slack_settings.last_attendance_date is not None
-            and slack_settings.last_attendance_msg_ts is not None
-            and slack_settings.last_attendance_date == frappe.utils.nowdate()
-        ):
-            slack.slack_app.client.chat_postMessage(
-                channel=slack.SLACK_CHANNEL_ID,
-                blocks=[
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"{mention if mention_users else doc.employee_name} requested for leave today. "
-                            + f"_({day_period})_",
-                        },
-                    },
-                ],
-                thread_ts=slack_settings.last_attendance_msg_ts,
-                reply_broadcast=True,
-            )
+    try:
+        user_slack = slack.get_slack_user_id(employee_id=doc.employee)
+        mention = f"<@{user_slack}>" if user_slack else doc.employee_name
 
         # Send message to approver
         if approver_slack is not None:
@@ -187,6 +223,65 @@ def send_leave_notification_bg(doc: Document):
             title="Error posting message to Slack",
             exception=e,
         )
+
+
+def _reply_posted_today(reply_ts: str) -> bool:
+    """
+    Whether a Slack message ``ts`` falls on today's date in the site timezone
+    """
+    # A Slack ts is a Unix epoch in seconds (with a sequence suffix after the
+    # dot), so read it as UTC and shift it into the site timezone before
+    # comparing calendar dates
+    posted_at = convert_utc_to_system_timezone(datetime.fromtimestamp(float(reply_ts), tz=UTC))
+    return getdate(posted_at) == getdate(frappe.utils.today())
+
+
+def on_update_remove_attendance_reply(doc: Document, method=None):
+    """
+    Remove the same-day attendance thread reply when the leave is rejected
+    or cancelled on the day the reply was posted. A reply from an earlier
+    day is history and is left alone
+
+    Wired to both ``on_update`` and ``on_cancel``: Frappe only runs
+    ``on_cancel`` for a cancel, and HRMS sets status to Cancelled in
+    ``before_cancel``
+    """
+    if not doc.has_value_changed("status") or doc.status not in ("Rejected", "Cancelled"):
+        return
+
+    reply_ts = doc.get(ATTENDANCE_REPLY_TS_FIELD)
+    if not reply_ts or not _reply_posted_today(reply_ts):
+        return
+
+    frappe.enqueue(
+        remove_attendance_reply_bg,
+        queue="short",
+        doc=doc,
+    )
+
+
+def remove_attendance_reply_bg(doc: Document):
+    """
+    Delete the attendance thread reply stored on the leave and clear the
+    stored ts. Deleting a broadcast reply removes it from the thread and
+    the channel
+    """
+    reply_ts = doc.get(ATTENDANCE_REPLY_TS_FIELD)
+    if not reply_ts:
+        return
+
+    try:
+        slack = SlackIntegration()
+        slack.slack_app.client.chat_delete(channel=slack.SLACK_CHANNEL_ID, ts=reply_ts)
+    except Exception as e:
+        # The reply may already be gone (deleted by hand); log and move on
+        generate_error_log(
+            title="Error deleting attendance thread reply",
+            exception=e,
+        )
+
+    # The ts is only useful on the day it was posted, so clear it either way
+    frappe.db.set_value("Leave Application", doc.name, ATTENDANCE_REPLY_TS_FIELD, None, update_modified=False)
 
 
 def format_leave_application_blocks(

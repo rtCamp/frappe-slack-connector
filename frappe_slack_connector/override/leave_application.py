@@ -20,10 +20,13 @@ def after_insert(doc, method):
     Send a slack message to the leave approver when a new leave application
     is submitted
     """
+    # Rows created by Data Import are not announcements. Decide here: the
+    # background job runs with fresh frappe.local, where the flag is reset
     frappe.enqueue(
         send_leave_notification_bg,
         queue="short",
         doc=doc,
+        announce_in_thread=not frappe.flags.in_import,
     )
     frappe.enqueue(
         send_leave_notification_to_applicant,
@@ -130,9 +133,8 @@ def post_same_day_leave_to_attendance_thread(doc: Document, slack: SlackIntegrat
     removed if the leave is rejected or cancelled later the same day.
     Returns the ``ts`` of the reply, or None when nothing was posted
     """
-    # Data Import of backdated rows and leaves created already decided
-    # (e.g. Rejected) are not announcements
-    if frappe.flags.in_import or doc.status not in ("Open", "Approved"):
+    # A leave created already decided (e.g. Rejected) is not an announcement
+    if doc.status not in ("Open", "Approved"):
         return None
 
     today = getdate(frappe.utils.today())
@@ -177,13 +179,14 @@ def post_same_day_leave_to_attendance_thread(doc: Document, slack: SlackIntegrat
     return reply_ts
 
 
-def send_leave_notification_bg(doc: Document):
+def send_leave_notification_bg(doc: Document, announce_in_thread: bool = True):
     """
     Send a slack message to the leave approver when
     a new leave application is submitted
 
     Also send a notification to the attendance channel thread if
     the leave covers today and attendance notification is already sent
+    (skipped when ``announce_in_thread`` is False, e.g. for imported rows)
     """
     slack = SlackIntegration()
     try:
@@ -195,13 +198,14 @@ def send_leave_notification_bg(doc: Document):
         )
         approver_slack = None
 
-    try:
-        post_same_day_leave_to_attendance_thread(doc, slack=slack)
-    except Exception as e:
-        generate_error_log(
-            title="Error posting same-day leave to attendance thread",
-            exception=e,
-        )
+    if announce_in_thread:
+        try:
+            post_same_day_leave_to_attendance_thread(doc, slack=slack)
+        except Exception as e:
+            generate_error_log(
+                title="Error posting same-day leave to attendance thread",
+                exception=e,
+            )
 
     try:
         user_slack = slack.get_slack_user_id(employee_id=doc.employee)
@@ -244,23 +248,26 @@ def _reply_posted_today(reply_ts: str) -> bool:
 
 def restore_attendance_reply_ts(doc: Document, method=None):
     """
-    Keep the stored reply ts from being erased by a stale save
+    Keep the stored reply ts server-owned
 
-    The ts is written by a background job with ``db.set_value`` after the
-    doc was created, so a form loaded before that (or a client that sends
-    the whole doc) carries an empty value, and ``db_update`` would write
-    every column back. The database is the source of truth for this field:
-    only the background jobs write or clear it, so copy it onto the doc
-    whenever the in-memory value is empty
+    The field is hidden and read-only, but Frappe does not enforce
+    ``read_only`` on API writes, and the bot deletes whatever ts is stored
+    here. Only the background jobs may write or clear it with
+    ``db.set_value``, so the value a client sends is never trusted: a new
+    doc gets it blanked, and an existing doc gets the database value put
+    back (this also stops a form loaded before the job ran from erasing it
+    with ``db_update``, which writes every column)
     """
     # is_new() only knows about docs going through insert(); a doc built in
-    # memory and never inserted has no name, and must not query without one
-    if doc.is_new() or not doc.name or doc.get(ATTENDANCE_REPLY_TS_FIELD):
+    # memory and never inserted has no name either
+    if doc.is_new() or not doc.name:
+        doc.set(ATTENDANCE_REPLY_TS_FIELD, None)
         return
 
-    stored_ts = frappe.db.get_value("Leave Application", doc.name, ATTENDANCE_REPLY_TS_FIELD)
-    if stored_ts:
-        doc.set(ATTENDANCE_REPLY_TS_FIELD, stored_ts)
+    doc.set(
+        ATTENDANCE_REPLY_TS_FIELD,
+        frappe.db.get_value("Leave Application", doc.name, ATTENDANCE_REPLY_TS_FIELD),
+    )
 
 
 def _enqueue_attendance_reply_removal(doc: Document):
@@ -271,7 +278,10 @@ def _enqueue_attendance_reply_removal(doc: Document):
     user's action
     """
     try:
-        reply_ts = doc.get(ATTENDANCE_REPLY_TS_FIELD)
+        # Read the stored value, never the one on the doc (see
+        # restore_attendance_reply_ts), and hand it to the job so the job
+        # does not re-read a row that may be gone by then (on_trash)
+        reply_ts = frappe.db.get_value("Leave Application", doc.name, ATTENDANCE_REPLY_TS_FIELD)
         if not reply_ts or not _reply_posted_today(reply_ts):
             return
 
@@ -281,7 +291,8 @@ def _enqueue_attendance_reply_removal(doc: Document):
             remove_attendance_reply_bg,
             queue="short",
             enqueue_after_commit=True,
-            doc=doc,
+            leave_name=doc.name,
+            reply_ts=reply_ts,
         )
     except Exception as e:
         generate_error_log(
@@ -314,14 +325,22 @@ def on_trash_remove_attendance_reply(doc: Document, method=None):
     _enqueue_attendance_reply_removal(doc)
 
 
-def remove_attendance_reply_bg(doc: Document):
+def remove_attendance_reply_bg(leave_name: str, reply_ts: str):
     """
-    Delete the attendance thread reply stored on the leave and clear the
-    stored ts. Deleting a broadcast reply removes it from the thread and
-    the channel
+    Delete the attendance thread reply ``reply_ts`` posted for the leave
+    ``leave_name`` and clear the stored ts. Deleting a broadcast reply
+    removes it from the thread and the channel
     """
-    reply_ts = doc.get(ATTENDANCE_REPLY_TS_FIELD)
     if not reply_ts:
+        return
+
+    # The bot must only ever delete its own thread replies, never the
+    # summary message the thread hangs off
+    if reply_ts == frappe.db.get_single_value("Slack Settings", "last_attendance_msg_ts"):
+        generate_error_log(
+            title="Refused to delete the attendance summary",
+            message=f"Leave Application {leave_name} stores the summary ts {reply_ts} as its reply ts",
+        )
         return
 
     try:
@@ -335,7 +354,8 @@ def remove_attendance_reply_bg(doc: Document):
         )
 
     # The ts is only useful on the day it was posted, so clear it either way
-    frappe.db.set_value("Leave Application", doc.name, ATTENDANCE_REPLY_TS_FIELD, None, update_modified=False)
+    # (a no-op when the leave itself has been deleted)
+    frappe.db.set_value("Leave Application", leave_name, ATTENDANCE_REPLY_TS_FIELD, None, update_modified=False)
 
 
 def format_leave_application_blocks(

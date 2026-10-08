@@ -71,14 +71,17 @@ def _reached_decision(doc: Document) -> bool:
     return doc.has_value_changed("status")
 
 
-def _decided_by(modified_by: str | None, leave_approver: str | None) -> str | None:
+def _decided_by(modified_by: str | None, leave_approver: str | None, status: str | None = None) -> str | None:
     """
     The user who took the decision: the acting user (Desk, workflow and the
     Slack handler all set it before the hooks run), falling back to the leave
-    approver when the change was made by Administrator or a background job
+    approver when the change was made by Administrator or a background job.
+    A cancellation is not attributed to the approver; it may be anyone's.
     """
     if modified_by and modified_by != "Administrator":
         return modified_by
+    if status == "Cancelled":
+        return None
     return leave_approver
 
 
@@ -94,13 +97,20 @@ def on_update_notify_applicant(doc: Document, method: str | None = None):
     """
     if not _reached_decision(doc):
         return
+    status = doc.status
+    # A reject that saves and submits in one request fires this twice on the
+    # same document object (status change, then docstatus change); queue the
+    # decision once per status so parallel workers cannot both post a DM
+    if doc.flags.get("fsc_applicant_decision_queued") == status:
+        return
+    doc.flags.fsc_applicant_decision_queued = status
     frappe.enqueue(
         send_leave_decision_to_applicant,
         queue="short",
         enqueue_after_commit=True,
         doc=doc,
-        status=doc.status,
-        decided_by=_decided_by(doc.modified_by, doc.leave_approver),
+        status=status,
+        decided_by=_decided_by(doc.modified_by, doc.leave_approver, status),
     )
 
 
@@ -117,7 +127,13 @@ def restore_applicant_message_ref(doc: Document, method: str | None = None):
     # built in memory and never inserted has no name and nothing stored
     if doc.is_new() or not doc.name or (doc.get(APPLICANT_CHANNEL_FIELD) and doc.get(APPLICANT_MSG_TS_FIELD)):
         return
-    channel, ts = get_applicant_message_ref(doc.name)
+    # check_if_latest has already loaded the committed row (for update), so
+    # prefer it over a second query
+    previous = doc.get_doc_before_save()
+    if previous is not None:
+        channel, ts = previous.get(APPLICANT_CHANNEL_FIELD), previous.get(APPLICANT_MSG_TS_FIELD)
+    else:
+        channel, ts = get_applicant_message_ref(doc.name)
     if channel and ts:
         doc.set(APPLICANT_CHANNEL_FIELD, channel)
         doc.set(APPLICANT_MSG_TS_FIELD, ts)
@@ -141,7 +157,7 @@ def send_leave_notification_to_applicant(doc: Document):
             )
             return
         status = doc.status if is_leave_decided(doc.status, doc.docstatus) else None
-        status_by = _format_decider(slack, _decided_by(doc.modified_by, doc.leave_approver)) if status else None
+        status_by = _format_decider(slack, _decided_by(doc.modified_by, doc.leave_approver, status)) if status else None
         response = slack.slack_app.client.chat_postMessage(
             channel=user_id,
             text=_applicant_text(status),
@@ -172,7 +188,7 @@ def _sync_decision_after_post(slack: SlackIntegration, doc: Document, user_id: s
     )
     if not row or not is_leave_decided(row.status, row.docstatus):
         return
-    status_by = _format_decider(slack, _decided_by(row.modified_by, row.leave_approver))
+    status_by = _format_decider(slack, _decided_by(row.modified_by, row.leave_approver, row.status))
     slack.slack_app.client.chat_update(
         channel=channel,
         ts=ts,

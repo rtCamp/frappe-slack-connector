@@ -55,7 +55,7 @@ def _build_leave_doc(
     doc.status = status
     doc.docstatus = docstatus
     doc.modified_by = modified_by
-    doc.flags.in_insert = in_insert
+    doc.flags = frappe._dict(in_insert=in_insert)
     changed = {"status": status_changed, "docstatus": docstatus_changed}
     doc.has_value_changed.side_effect = lambda fieldname: changed.get(fieldname, False)
     return doc
@@ -425,6 +425,36 @@ class TestOnUpdateNotifyApplicant(IntegrationTestCase):
         self.assertEqual(mock_enqueue.call_args.kwargs["status"], "Cancelled")
         self.assertEqual(mock_enqueue.call_args.kwargs["decided_by"], "hr@x.com")
 
+    def test_rejected_save_then_submit_on_same_doc_enqueues_once(self):
+        """reject_leave saves (status changed) then submits (docstatus changed) the same doc object; only the first hook call enqueues."""
+        doc = _build_leave_doc(status="Rejected", docstatus=0, status_changed=True)
+        with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
+            on_update_notify_applicant(doc, method="on_update")
+            doc.docstatus = 1
+            doc.has_value_changed.side_effect = lambda fieldname: fieldname == "docstatus"
+            on_update_notify_applicant(doc, method="on_update")
+        mock_enqueue.assert_called_once()
+        self.assertEqual(mock_enqueue.call_args.kwargs["status"], "Rejected")
+
+    def test_different_status_on_same_doc_enqueues_again(self):
+        """An approve followed by a cancel on the same doc object enqueues a decision job for each status."""
+        doc = _build_leave_doc(status="Approved", docstatus=1, status_changed=True)
+        with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
+            on_update_notify_applicant(doc, method="on_update")
+            doc.status = "Cancelled"
+            doc.docstatus = 2
+            on_update_notify_applicant(doc, method="on_cancel")
+        self.assertEqual(mock_enqueue.call_count, 2)
+        statuses = [call.kwargs["status"] for call in mock_enqueue.call_args_list]
+        self.assertEqual(statuses, ["Approved", "Cancelled"])
+
+    def test_cancelled_by_administrator_is_not_attributed_to_the_approver(self):
+        """A cancellation made by Administrator passes decided_by=None rather than naming the leave approver."""
+        doc = _build_leave_doc(status="Cancelled", docstatus=2, status_changed=True, modified_by="Administrator")
+        with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
+            on_update_notify_applicant(doc, method="on_cancel")
+        self.assertIsNone(mock_enqueue.call_args.kwargs["decided_by"])
+
     def test_falls_back_to_leave_approver_when_modified_by_is_administrator(self):
         """When the change was made by Administrator (e.g. a background job), decided_by falls back to the leave approver."""
         doc = _build_leave_doc(status="Approved", docstatus=1, status_changed=True, modified_by="Administrator")
@@ -455,10 +485,31 @@ class TestOnUpdateNotifyApplicant(IntegrationTestCase):
 
 
 class TestRestoreApplicantMessageRef(IntegrationTestCase):
-    def test_copies_stored_ref_onto_doc_when_in_memory_values_are_empty(self):
-        """A saved doc whose in-memory ref fields are empty gets the stored channel/ts copied from the database before it is written back."""
+    def test_copies_ref_from_doc_before_save_when_in_memory_values_are_empty(self):
+        """A saved doc whose in-memory ref fields are empty gets the channel/ts from the already-loaded doc_before_save, without a second query."""
         doc = frappe.get_doc({"doctype": "Leave Application"})
         doc.name = "HR-LAP-RESTORE"
+        doc._doc_before_save = frappe.get_doc(
+            {
+                "doctype": "Leave Application",
+                APPLICANT_CHANNEL_FIELD: "D0FSC0001",
+                APPLICANT_MSG_TS_FIELD: "1700000000.000001",
+            }
+        )
+        with (
+            patch.object(doc, "is_new", return_value=False),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.get_applicant_message_ref") as mock_ref,
+        ):
+            restore_applicant_message_ref(doc, method="before_validate")
+        mock_ref.assert_not_called()
+        self.assertEqual(doc.get(APPLICANT_CHANNEL_FIELD), "D0FSC0001")
+        self.assertEqual(doc.get(APPLICANT_MSG_TS_FIELD), "1700000000.000001")
+
+    def test_falls_back_to_database_lookup_when_no_doc_before_save(self):
+        """Without a loaded doc_before_save, the stored channel/ts are read from the database and copied onto the doc."""
+        doc = frappe.get_doc({"doctype": "Leave Application"})
+        doc.name = "HR-LAP-RESTORE"
+        doc._doc_before_save = None
         with (
             patch.object(doc, "is_new", return_value=False),
             patch(
@@ -556,6 +607,16 @@ class TestSendLeaveDecisionToApplicant(IntegrationTestCase):
         self.assertIn("Leave Request Rejected", kwargs["blocks"][0]["text"]["text"])
         status_line = kwargs["blocks"][-1]["text"]["text"]
         self.assertIn("*Status:* Rejected by Approver Person", status_line)
+
+    def test_cancelled_without_decider_shows_bare_status(self):
+        """A cancellation with no attributable user renders the status line as just 'Cancelled'."""
+        doc = _build_leave_doc(status="Cancelled", docstatus=2, status_changed=True)
+        mock_slack = MagicMock()
+        mock_slack.get_slack_user_id.side_effect = _build_slack_user_lookup()
+        with self._patched(mock_slack, mention_user=1):
+            send_leave_decision_to_applicant(doc=doc, status="Cancelled", decided_by=None)
+        kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
+        self.assertEqual(kwargs["blocks"][-1]["text"]["text"], "*Status:* Cancelled")
 
     def test_cancelled_uses_cancelled_header(self):
         """A cancellation rewrites the header to 'Leave Request Cancelled' and names the user who cancelled."""

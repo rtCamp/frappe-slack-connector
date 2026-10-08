@@ -253,7 +253,9 @@ def restore_attendance_reply_ts(doc: Document, method=None):
     only the background jobs write or clear it, so copy it onto the doc
     whenever the in-memory value is empty
     """
-    if doc.is_new() or doc.get(ATTENDANCE_REPLY_TS_FIELD):
+    # is_new() only knows about docs going through insert(); a doc built in
+    # memory and never inserted has no name, and must not query without one
+    if doc.is_new() or not doc.name or doc.get(ATTENDANCE_REPLY_TS_FIELD):
         return
 
     stored_ts = frappe.db.get_value("Leave Application", doc.name, ATTENDANCE_REPLY_TS_FIELD)

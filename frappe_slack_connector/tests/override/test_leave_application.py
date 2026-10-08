@@ -624,6 +624,15 @@ class TestRestoreAttendanceReplyTs(IntegrationTestCase):
         mock_get_value.assert_not_called()
         self.assertEqual(doc.get(ATTENDANCE_REPLY_TS_FIELD), "1700000900.000001")
 
+    def test_skips_nameless_docs(self):
+        """A doc built in memory and never inserted reports is_new() False but has no name; the database must not be queried without one."""
+        doc = self._build_real_doc(name=None)
+        self.assertFalse(doc.is_new())
+        with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value") as mock_get_value:
+            restore_attendance_reply_ts(doc, method="before_validate")
+        mock_get_value.assert_not_called()
+        self.assertFalse(doc.get(ATTENDANCE_REPLY_TS_FIELD))
+
     def test_skips_new_docs(self):
         """A doc being inserted has nothing stored yet, so the database is not read."""
         doc = self._build_real_doc()

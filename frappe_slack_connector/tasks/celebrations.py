@@ -13,10 +13,13 @@ from frappe_slack_connector.slack.app import SlackIntegration
 
 OPT_OUT_FIELD = "custom_skip_celebration_announcements"
 
-# Longest run of days we look back over, both for consecutive non-working
-# days and for catching up after days on which the job did not run. Kept
+# Longest run of consecutive non-working days (weekend plus holidays, e.g.
+# a year-end shutdown) we roll back over so none of their events are lost.
+MAX_NON_WORKING_RUN_DAYS = 31
+
+# Longest gap we catch up after days on which the job did not run. Kept
 # short so (re-)enabling the feature after a gap cannot flood the channel.
-MAX_ROLLBACK_DAYS = 7
+MAX_CATCH_UP_DAYS = 7
 
 # Events further back than this are described by date instead of weekday
 # name in the template context, since "for Tuesday" would be ambiguous.
@@ -94,10 +97,6 @@ def send_celebrations(date: str | datetime.date, previous_run: str | datetime.da
     missed. Nothing is posted for an event type with no employees.
     """
     run_date = getdate(date)
-    if not claim_celebrations_day(run_date):
-        frappe.logger().info(f"Celebrations for {run_date} already posted, skipping duplicate job")
-        return
-
     slack_settings = frappe.get_single("Slack Settings")
 
     start_date, end_date = get_celebration_window(
@@ -127,6 +126,12 @@ def send_celebrations(date: str | datetime.date, previous_run: str | datetime.da
             title=_("Celebrations channel not set"),
             message=_("Set the Celebrations Channel ID or the Attendance Channel ID in Slack Settings."),
         )
+        return
+
+    # Claim only once everything needed to post is in place, so a config
+    # failure above does not burn the claim for the day.
+    if not claim_celebrations_day(run_date):
+        frappe.logger().info(f"Celebrations for {run_date} already posted, skipping duplicate job")
         return
 
     user_ids = {e.user_id for e in [*birthdays, *anniversaries] if e.user_id}
@@ -247,17 +252,17 @@ def get_celebration_window(
     immediately before it, so weekend and holiday events are not lost.
     When `previous_run` (the last date the job ran) is given, the window
     also covers every day since then, so days on which the job did not run
-    are caught up, looking back at most MAX_ROLLBACK_DAYS.
+    are caught up, looking back at most MAX_CATCH_UP_DAYS.
     """
     start = run_date
     previous = add_days(run_date, -1)
-    for _i in range(MAX_ROLLBACK_DAYS):
+    for _i in range(MAX_NON_WORKING_RUN_DAYS):
         if is_working_day(previous, holiday_list):
             break
         start = previous
         previous = add_days(previous, -1)
     if previous_run is not None:
-        catch_up_start = max(add_days(previous_run, 1), add_days(run_date, -MAX_ROLLBACK_DAYS))
+        catch_up_start = max(add_days(previous_run, 1), add_days(run_date, -MAX_CATCH_UP_DAYS))
         start = min(start, catch_up_start)
     return start, run_date
 

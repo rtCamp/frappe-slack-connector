@@ -129,6 +129,33 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         self.assertEqual(attendance_call.kwargs["channel"], TEST_SLACK_CHANNEL_ID)
         self.assertTrue(attendance_call.kwargs["reply_broadcast"])
 
+    def test_does_not_post_thread_reply_when_attendance_channel_empty(self):
+        """With no attendance channel configured (SLACK_CHANNEL_ID None) the thread reply is skipped but the approver DM is still sent."""
+        doc = _build_leave_doc(from_date="2026-06-10")
+        mock_slack = MagicMock()
+        mock_slack.SLACK_CHANNEL_ID = None
+        mock_slack.get_slack_user_id.side_effect = ["U-approver", "U-applicant"]
+        settings = _build_slack_settings_mock(send_attendance_updates=1, last_attendance_date="2026-06-10")
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_single_value", return_value=1),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.get_single", return_value=settings),
+            patch(
+                f"{LEAVE_OVERRIDE_MODULE}.frappe.utils.today",
+                return_value="2026-06-10",
+            ),
+            patch(
+                f"{LEAVE_OVERRIDE_MODULE}.frappe.utils.nowdate",
+                return_value="2026-06-10",
+            ),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.custom_fields_exist", return_value=False),
+        ):
+            send_leave_notification_bg(doc)
+        mock_slack.slack_app.client.chat_postMessage.assert_called_once()
+        approver_call = mock_slack.slack_app.client.chat_postMessage.call_args
+        self.assertEqual(approver_call.kwargs["channel"], "U-approver")
+        self.assertNotIn("thread_ts", approver_call.kwargs)
+
     def test_does_not_post_thread_reply_when_attendance_updates_disabled(self):
         """The attendance-channel thread reply does not fire when send_attendance_updates=0."""
         doc = _build_leave_doc(from_date="2026-06-10")

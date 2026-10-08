@@ -89,6 +89,16 @@ class TestCheckSlackConfig(IntegrationTestCase):
         )
         self.assertTrue(slack._SlackIntegration__check_slack_config())
 
+    def test_returns_false_when_signing_token_missing(self):
+        """__check_slack_config returns False when SLACK_SIGNATURE is None."""
+        slack = self._bare(
+            SLACK_BOT_TOKEN="b",
+            SLACK_APP_TOKEN="a",
+            SLACK_CHANNEL_ID="c",
+            SLACK_SIGNATURE=None,
+        )
+        self.assertFalse(slack._SlackIntegration__check_slack_config())
+
 
 class TestInitWithoutAttendanceChannel(IntegrationTestCase):
     def test_constructs_without_error_log_when_attendance_channel_empty(self):
@@ -102,16 +112,6 @@ class TestInitWithoutAttendanceChannel(IntegrationTestCase):
             slack = SlackIntegration()
         mock_log.assert_not_called()
         self.assertIsNone(slack.SLACK_CHANNEL_ID)
-
-    def test_returns_false_when_signing_token_missing(self):
-        """__check_slack_config returns False when SLACK_SIGNATURE is None."""
-        slack = self._bare(
-            SLACK_BOT_TOKEN="b",
-            SLACK_APP_TOKEN="a",
-            SLACK_CHANNEL_ID="c",
-            SLACK_SIGNATURE=None,
-        )
-        self.assertFalse(slack._SlackIntegration__check_slack_config())
 
 
 class TestGetSlackUsers(IntegrationTestCase):

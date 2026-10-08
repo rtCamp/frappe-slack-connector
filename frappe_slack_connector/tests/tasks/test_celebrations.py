@@ -1,3 +1,4 @@
+import json
 from datetime import date as date_cls
 from datetime import time
 from unittest.mock import MagicMock, patch
@@ -7,7 +8,8 @@ from frappe.tests import IntegrationTestCase
 
 from frappe_slack_connector.frappe_slack_connector.doctype.slack_settings.slack_settings import SlackSettings
 from frappe_slack_connector.tasks.celebrations import (
-    MAX_ROLLBACK_DAYS,
+    MAX_CATCH_UP_DAYS,
+    MAX_NON_WORKING_RUN_DAYS,
     OPT_OUT_FIELD,
     SLACK_SECTION_TEXT_LIMIT,
     build_anniversary_blocks,
@@ -88,12 +90,23 @@ def _build_slack_mock(post_side_effect=None):
     return slack
 
 
-def _build_cache_mock(claimed=True):
-    """A frappe.cache stand-in whose SET NX reports `claimed` and whose make_key returns a prefixed key."""
-    cache = MagicMock()
-    cache.make_key.side_effect = lambda key: f"test|{key}"
-    cache.set.return_value = claimed
-    return cache
+def _patch_cache_claim(claimed=True, set_mock=None):
+    """Patch only frappe.cache.set / make_key (never the whole cache object, which Frappe's meta loading uses).
+
+    Returns (set_patch, make_key_patch) context managers; `set` reports `claimed` for the SET NX call
+    unless an explicit `set_mock` is supplied.
+    """
+    return (
+        patch(f"{CELEBRATIONS_MODULE}.frappe.cache.set", set_mock or MagicMock(return_value=claimed)),
+        patch(f"{CELEBRATIONS_MODULE}.frappe.cache.make_key", side_effect=lambda key: f"test|{key}"),
+    )
+
+
+def _build_employee_meta(has_opt_out_field=True):
+    """A stand-in for frappe.get_meta("Employee") so tests never touch site meta."""
+    meta = MagicMock()
+    meta.has_field.return_value = has_opt_out_field
+    return meta
 
 
 def _section_text(blocks: list) -> str:
@@ -215,7 +228,7 @@ class TestCelebrationsChannel(IntegrationTestCase):
             patch(f"{CELEBRATIONS_MODULE}.get_time", return_value=time(9, 0)),
             patch(f"{CELEBRATIONS_MODULE}.frappe.enqueue", side_effect=run_inline),
             patch(f"{CELEBRATIONS_MODULE}.frappe.db.set_single_value") as mock_stamp,
-            patch(f"{CELEBRATIONS_MODULE}.frappe.cache", _build_cache_mock()),
+            patch(f"{CELEBRATIONS_MODULE}.claim_celebrations_day", return_value=True),
             patch(f"{CELEBRATIONS_MODULE}.SlackIntegration", return_value=slack),
             patch(f"{CELEBRATIONS_MODULE}.get_active_employees", return_value=[]),
         ):
@@ -228,10 +241,8 @@ class TestCelebrationsChannel(IntegrationTestCase):
 
 class TestGetActiveEmployees(IntegrationTestCase):
     def _query(self, has_opt_out_field):
-        meta = MagicMock()
-        meta.has_field.return_value = has_opt_out_field
         with (
-            patch(f"{CELEBRATIONS_MODULE}.frappe.get_meta", return_value=meta),
+            patch(f"{CELEBRATIONS_MODULE}.frappe.get_meta", return_value=_build_employee_meta(has_opt_out_field)),
             patch(f"{CELEBRATIONS_MODULE}.frappe.get_all", return_value=[]) as mock_get_all,
         ):
             result = get_active_employees()
@@ -291,12 +302,27 @@ class TestGetCelebrationWindow(IntegrationTestCase):
             start, end = get_celebration_window(MONDAY, None, previous_run=date_cls(2026, 6, 12))
         self.assertEqual((start, end), (SATURDAY, MONDAY))
 
-    def test_window_catch_up_is_capped_at_max_rollback_days(self):
+    def test_window_catch_up_is_capped_at_max_catch_up_days(self):
         """A previous_run far in the past (feature re-enabled after months) only extends the window back 7 days."""
-        self.assertEqual(MAX_ROLLBACK_DAYS, 7)
+        self.assertEqual(MAX_CATCH_UP_DAYS, 7)
         with patch(f"{CELEBRATIONS_MODULE}.is_holiday", return_value=False):
             start, end = get_celebration_window(MONDAY, None, previous_run=date_cls(2026, 1, 1))
         self.assertEqual((start, end), (date_cls(2026, 6, 8), MONDAY))
+
+    def test_window_covers_a_non_working_run_longer_than_the_catch_up_cap(self):
+        """A 12-day shutdown (holidays Wed 3 Jun to Fri 12 Jun plus the weekend) is rolled back in full on Monday 15 Jun."""
+        self.assertGreater(MAX_NON_WORKING_RUN_DAYS, MAX_CATCH_UP_DAYS)
+        shutdown_start = date_cls(2026, 6, 3)
+
+        def holiday(holiday_list, day):
+            return shutdown_start <= day <= date_cls(2026, 6, 12)
+
+        with patch(f"{CELEBRATIONS_MODULE}.is_holiday", side_effect=holiday):
+            start, end = get_celebration_window(MONDAY, "Acme Holidays", previous_run=date_cls(2026, 6, 2))
+        self.assertEqual((start, end), (shutdown_start, MONDAY))
+        employee = _build_employee(date_of_birth="1990-06-03")
+        result = get_employees_with_birthday(end, start_date=start, employees=[employee])
+        self.assertEqual([r.event_date for r in result], [shutdown_start])
 
     def test_window_crosses_the_year_boundary(self):
         """A Monday 1 Jan run has a window starting on Saturday 30 Dec of the previous year."""
@@ -601,13 +627,12 @@ class TestSendCelebrations(IntegrationTestCase):
         date="2026-06-15",
         previous_run=None,
         slack_class=None,
-        cache=None,
     ):
         slack = slack or _build_slack_mock()
         slack_class = slack_class or MagicMock(return_value=slack)
         with (
             patch(f"{CELEBRATIONS_MODULE}.frappe.get_single", return_value=settings),
-            patch(f"{CELEBRATIONS_MODULE}.frappe.cache", cache or _build_cache_mock()),
+            patch(f"{CELEBRATIONS_MODULE}.claim_celebrations_day", return_value=True),
             patch(f"{CELEBRATIONS_MODULE}.SlackIntegration", slack_class),
             patch(f"{CELEBRATIONS_MODULE}.get_active_employees", return_value=employees),
             patch(f"{CELEBRATIONS_MODULE}.get_slack_user_ids", return_value=slack_ids or {}),
@@ -626,37 +651,87 @@ class TestSendCelebrations(IntegrationTestCase):
         slack.slack_app.client.chat_postMessage.assert_not_called()
         slack_class.assert_not_called()
 
+    def _run_with_real_claim(self, settings, employees, *, claimed, slack_class, set_mock=None):
+        set_patch, make_key_patch = _patch_cache_claim(claimed, set_mock=set_mock)
+        with (
+            set_patch as mock_set,
+            make_key_patch as mock_make_key,
+            patch(f"{CELEBRATIONS_MODULE}.frappe.get_single", return_value=settings),
+            patch(f"{CELEBRATIONS_MODULE}.SlackIntegration", slack_class),
+            patch(f"{CELEBRATIONS_MODULE}.get_active_employees", return_value=employees),
+            patch(f"{CELEBRATIONS_MODULE}.get_slack_user_ids", return_value={}),
+            patch(f"{CELEBRATIONS_MODULE}.get_default_holiday_list", return_value=None),
+        ):
+            send_celebrations("2026-06-15")
+        return mock_set, mock_make_key
+
     def test_claims_the_day_in_redis_before_posting(self):
-        """send_celebrations claims the run date with SET NX and a 2-day TTL before doing anything else."""
-        cache = _build_cache_mock(claimed=True)
+        """send_celebrations claims the run date with SET NX and a 2-day TTL after the channel resolves and before the first post."""
+        order = []
+        slack = _build_slack_mock()
+        slack.slack_app.client.chat_postMessage.side_effect = lambda **kwargs: order.append("post") or {"ok": True}
+        set_mock = MagicMock(side_effect=lambda *args, **kwargs: order.append("claim") or True)
         employee = _build_employee(date_of_birth="1990-06-15")
         settings = _build_settings_mock(send_anniversary_updates=0)
-        slack = self._run(settings, [employee], cache=cache)
-        cache.make_key.assert_called_once_with("fsc_celebrations_posted::2026-06-15")
-        cache.set.assert_called_once_with("test|fsc_celebrations_posted::2026-06-15", 1, nx=True, ex=2 * 86400)
-        slack.slack_app.client.chat_postMessage.assert_called_once()
+        mock_set, mock_make_key = self._run_with_real_claim(
+            settings, [employee], claimed=True, slack_class=MagicMock(return_value=slack), set_mock=set_mock
+        )
+        mock_make_key.assert_called_once_with("fsc_celebrations_posted::2026-06-15")
+        mock_set.assert_called_once_with("test|fsc_celebrations_posted::2026-06-15", 1, nx=True, ex=2 * 86400)
+        self.assertEqual(order, ["claim", "post"])
+
+    def test_does_not_claim_the_day_when_nothing_to_post(self):
+        """With no events, the day is not claimed, so a later (corrected) run for the same date can still post."""
+        settings = _build_settings_mock()
+        with patch(f"{CELEBRATIONS_MODULE}.claim_celebrations_day") as mock_claim:
+            with (
+                patch(f"{CELEBRATIONS_MODULE}.frappe.get_single", return_value=settings),
+                patch(f"{CELEBRATIONS_MODULE}.SlackIntegration"),
+                patch(f"{CELEBRATIONS_MODULE}.get_active_employees", return_value=[]),
+                patch(f"{CELEBRATIONS_MODULE}.get_default_holiday_list", return_value=None),
+            ):
+                send_celebrations("2026-06-15")
+        mock_claim.assert_not_called()
+
+    def test_does_not_claim_the_day_when_no_channel_configured(self):
+        """A missing channel logs and returns before the claim, so fixing the channel and re-running the day still posts."""
+        employee = _build_employee(date_of_birth="1990-06-15")
+        settings = _build_settings_mock(send_anniversary_updates=0, celebrations_channel_id="")
+        slack = _build_slack_mock()
+        slack.SLACK_CHANNEL_ID = None
+        with (
+            patch(f"{CELEBRATIONS_MODULE}.claim_celebrations_day") as mock_claim,
+            patch(f"{CELEBRATIONS_MODULE}.generate_error_log"),
+            patch(f"{CELEBRATIONS_MODULE}.frappe.get_single", return_value=settings),
+            patch(f"{CELEBRATIONS_MODULE}.SlackIntegration", return_value=slack),
+            patch(f"{CELEBRATIONS_MODULE}.get_active_employees", return_value=[employee]),
+            patch(f"{CELEBRATIONS_MODULE}.get_default_holiday_list", return_value=None),
+        ):
+            send_celebrations("2026-06-15")
+        mock_claim.assert_not_called()
 
     def test_second_job_for_the_same_date_does_not_post(self):
         """If the day was already claimed (duplicate job for the same date), nothing is posted and an info line is logged."""
-        cache = _build_cache_mock(claimed=False)
+        slack = _build_slack_mock()
+        slack_class = MagicMock(return_value=slack)
         employee = _build_employee(date_of_birth="1990-06-15")
         settings = _build_settings_mock(send_anniversary_updates=0)
-        slack_class = MagicMock(return_value=_build_slack_mock())
         with (
             patch(f"{CELEBRATIONS_MODULE}.frappe.logger") as mock_logger,
             patch(f"{CELEBRATIONS_MODULE}.generate_error_log") as mock_log,
         ):
-            slack = self._run(settings, [employee], cache=cache, slack_class=slack_class)
+            self._run_with_real_claim(settings, [employee], claimed=False, slack_class=slack_class)
         slack.slack_app.client.chat_postMessage.assert_not_called()
-        slack_class.assert_not_called()
         mock_logger.return_value.info.assert_called_once()
         mock_log.assert_not_called()
 
     def test_claim_celebrations_day_returns_false_when_key_exists(self):
         """claim_celebrations_day maps the redis SET NX result to a bool."""
-        with patch(f"{CELEBRATIONS_MODULE}.frappe.cache", _build_cache_mock(claimed=None)):
+        set_patch, make_key_patch = _patch_cache_claim(claimed=None)
+        with set_patch, make_key_patch:
             self.assertFalse(claim_celebrations_day(MONDAY))
-        with patch(f"{CELEBRATIONS_MODULE}.frappe.cache", _build_cache_mock(claimed=True)):
+        set_patch, make_key_patch = _patch_cache_claim(claimed=True)
+        with set_patch, make_key_patch:
             self.assertTrue(claim_celebrations_day(MONDAY))
 
     def test_inactive_employees_are_not_announced(self):
@@ -677,8 +752,9 @@ class TestSendCelebrations(IntegrationTestCase):
         slack = _build_slack_mock()
         with (
             patch(f"{CELEBRATIONS_MODULE}.frappe.get_single", return_value=settings),
-            patch(f"{CELEBRATIONS_MODULE}.frappe.cache", _build_cache_mock()),
+            patch(f"{CELEBRATIONS_MODULE}.claim_celebrations_day", return_value=True),
             patch(f"{CELEBRATIONS_MODULE}.SlackIntegration", return_value=slack),
+            patch(f"{CELEBRATIONS_MODULE}.frappe.get_meta", return_value=_build_employee_meta()),
             patch(f"{CELEBRATIONS_MODULE}.frappe.get_all", side_effect=fake_get_all),
             patch(f"{CELEBRATIONS_MODULE}.get_default_holiday_list", return_value=None),
         ):
@@ -891,12 +967,16 @@ class TestSendCelebrations(IntegrationTestCase):
 
 class TestSlackSettingsTemplateValidation(IntegrationTestCase):
     def test_template_fields_are_code_fields(self):
-        """Both template fields are Code (Jinja) fields, which are exempt from the HTML sanitizer that would break Jinja."""
-        meta = frappe.get_meta("Slack Settings")
+        """Both template fields are Code (Jinja) fields in the doctype JSON on disk, which are exempt from the HTML sanitizer that would break Jinja."""
+        path = frappe.get_app_path(
+            "frappe_slack_connector", "frappe_slack_connector", "doctype", "slack_settings", "slack_settings.json"
+        )
+        with open(path) as f:
+            fields = {field["fieldname"]: field for field in json.load(f)["fields"]}
         for fieldname in ("birthday_message_template", "anniversary_message_template"):
-            field = meta.get_field(fieldname)
-            self.assertEqual(field.fieldtype, "Code", fieldname)
-            self.assertEqual(field.options, "Jinja", fieldname)
+            self.assertIn(fieldname, fields)
+            self.assertEqual(fields[fieldname]["fieldtype"], "Code", fieldname)
+            self.assertEqual(fields[fieldname]["options"], "Jinja", fieldname)
 
     def test_rejects_template_with_jinja_syntax_error(self):
         """validate_celebration_templates raises a ValidationError for a syntactically invalid template."""
@@ -932,7 +1012,7 @@ class TestSlackSettingsResetOnEnable(IntegrationTestCase):
         before = frappe._dict(send_birthday_updates=0, send_anniversary_updates=0)
         doc = self._doc(birthday=1, anniversary=0, before=before, last=date_cls(2026, 1, 1))
         with patch(f"{SLACK_SETTINGS_MODULE}.nowdate", return_value="2026-06-15"):
-            SlackSettings.reset_celebrations_date_on_enable(doc)
+            self.assertTrue(SlackSettings.reset_celebrations_date_on_enable(doc))
         self.assertEqual(frappe.utils.getdate(doc.last_celebrations_date), date_cls(2026, 6, 14))
 
     def test_sets_last_date_when_anniversary_updates_turned_on(self):
@@ -947,7 +1027,7 @@ class TestSlackSettingsResetOnEnable(IntegrationTestCase):
         """Saving with the toggles unchanged (e.g. editing a template) keeps last_celebrations_date."""
         before = frappe._dict(send_birthday_updates=1, send_anniversary_updates=1)
         doc = self._doc(birthday=1, anniversary=1, before=before, last=date_cls(2026, 6, 10))
-        SlackSettings.reset_celebrations_date_on_enable(doc)
+        self.assertFalse(SlackSettings.reset_celebrations_date_on_enable(doc))
         self.assertEqual(doc.last_celebrations_date, date_cls(2026, 6, 10))
 
     def test_leaves_last_date_alone_when_turned_off(self):
@@ -963,3 +1043,60 @@ class TestSlackSettingsResetOnEnable(IntegrationTestCase):
         with patch(f"{SLACK_SETTINGS_MODULE}.nowdate", return_value="2026-06-15"):
             SlackSettings.reset_celebrations_date_on_enable(doc)
         self.assertEqual(frappe.utils.getdate(doc.last_celebrations_date), date_cls(2026, 6, 14))
+
+
+class TestSlackSettingsKeepLatestDate(IntegrationTestCase):
+    def _keep(self, *, incoming, stored):
+        doc = frappe._dict(last_celebrations_date=incoming)
+        with patch(f"{SLACK_SETTINGS_MODULE}.frappe.db.get_single_value", return_value=stored) as mock_stored:
+            SlackSettings.keep_latest_celebrations_date(doc)
+        mock_stored.assert_called_once_with("Slack Settings", "last_celebrations_date")
+        return doc.get("last_celebrations_date")
+
+    def test_keeps_stored_date_when_it_is_later_than_the_incoming_one(self):
+        """A form loaded before today's post (incoming 14 Jun) must not overwrite the stamp the scheduler wrote (15 Jun)."""
+        result = self._keep(incoming=date_cls(2026, 6, 14), stored="2026-06-15")
+        self.assertEqual(frappe.utils.getdate(result), date_cls(2026, 6, 15))
+
+    def test_keeps_incoming_date_when_it_is_later(self):
+        """An incoming date later than the stored one is kept as is."""
+        result = self._keep(incoming=date_cls(2026, 6, 16), stored="2026-06-15")
+        self.assertEqual(result, date_cls(2026, 6, 16))
+
+    def test_uses_stored_date_when_incoming_is_empty(self):
+        """An empty incoming date is replaced by the stored one."""
+        result = self._keep(incoming=None, stored="2026-06-15")
+        self.assertEqual(frappe.utils.getdate(result), date_cls(2026, 6, 15))
+
+    def test_leaves_incoming_when_nothing_stored(self):
+        """With nothing stored in the DB the incoming value is untouched."""
+        result = self._keep(incoming=date_cls(2026, 6, 14), stored=None)
+        self.assertEqual(result, date_cls(2026, 6, 14))
+
+    def test_real_document_validate_keeps_later_stored_date(self):
+        """doc.validate() on the actual Slack Settings document (toggles unchanged) restores a later stored date."""
+        doc = frappe.get_single("Slack Settings")
+        doc.send_birthday_updates = 0
+        doc.send_anniversary_updates = 0
+        doc.birthday_message_template = None
+        doc.anniversary_message_template = None
+        doc.last_celebrations_date = date_cls(2026, 6, 14)
+        with patch(f"{SLACK_SETTINGS_MODULE}.frappe.db.get_single_value", return_value="2026-06-15"):
+            doc.validate()
+        self.assertEqual(frappe.utils.getdate(doc.last_celebrations_date), date_cls(2026, 6, 15))
+
+    def test_validate_does_not_override_a_toggle_reset(self):
+        """When a toggle was just switched on, validate keeps the yesterday reset even if the stored date is later."""
+        doc = frappe.get_single("Slack Settings")
+        doc.send_birthday_updates = 1
+        doc.send_anniversary_updates = 0
+        doc.birthday_message_template = None
+        doc.anniversary_message_template = None
+        doc._doc_before_save = frappe._dict(send_birthday_updates=0, send_anniversary_updates=0)
+        with (
+            patch(f"{SLACK_SETTINGS_MODULE}.nowdate", return_value="2026-06-15"),
+            patch(f"{SLACK_SETTINGS_MODULE}.frappe.db.get_single_value", return_value="2026-06-15") as mock_stored,
+        ):
+            doc.validate()
+        self.assertEqual(frappe.utils.getdate(doc.last_celebrations_date), date_cls(2026, 6, 14))
+        mock_stored.assert_not_called()

@@ -146,6 +146,12 @@ fixtures = [
 doc_events = {
     "Leave Application": {
         "after_insert": "frappe_slack_connector.override.leave_application.after_insert",
+        "on_update": [
+            "frappe_slack_connector.override.leave_application.on_update_notify_applicant",
+        ],
+        "on_cancel": [
+            "frappe_slack_connector.override.leave_application.on_update_notify_applicant",
+        ],
     },
 }
 

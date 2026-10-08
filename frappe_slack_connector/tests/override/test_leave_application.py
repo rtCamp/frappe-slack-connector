@@ -1,9 +1,12 @@
+import contextlib
 from unittest.mock import MagicMock, patch
 
 from frappe.tests import IntegrationTestCase
 
 from frappe_slack_connector.override.leave_application import (
     after_insert,
+    on_update_notify_applicant,
+    send_leave_decision_to_applicant,
     send_leave_notification_bg,
     send_leave_notification_to_applicant,
 )
@@ -25,6 +28,9 @@ def _build_leave_doc(
     half_day=0,
     half_day_date=None,
     creation="2026-06-09 09:00:00",
+    status="Open",
+    status_changed=False,
+    modified_by="hr@x.com",
 ):
     """Build a MagicMock that mimics a Leave Application doc with the fields the override code reads."""
     doc = MagicMock()
@@ -39,7 +45,27 @@ def _build_leave_doc(
     doc.half_day = half_day
     doc.half_day_date = half_day_date
     doc.creation = creation
+    doc.status = status
+    doc.modified_by = modified_by
+    doc.has_value_changed.side_effect = lambda fieldname: status_changed if fieldname == "status" else False
     return doc
+
+
+def _build_slack_user_lookup(*, employee_slack_id=TEST_SLACK_USER_ID, approver_slack_id="U-approver"):
+    """Return a get_slack_user_id side effect that resolves employees and user emails independently."""
+
+    def side_effect(*args, **kwargs):
+        if "employee_id" in kwargs:
+            return employee_slack_id
+        return approver_slack_id
+
+    return side_effect
+
+
+def _run_enqueued_inline(fn, **kwargs):
+    """Stand-in for frappe.enqueue that runs the job synchronously with its kwargs."""
+    kwargs.pop("queue", None)
+    return fn(**kwargs)
 
 
 def _build_slack_settings_mock(
@@ -193,7 +219,10 @@ class TestSendLeaveNotificationToApplicant(IntegrationTestCase):
         doc = _build_leave_doc()
         mock_slack = MagicMock()
         mock_slack.get_slack_user_id.return_value = TEST_SLACK_USER_ID
-        with patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack):
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.store_applicant_message_ref"),
+        ):
             send_leave_notification_to_applicant(doc)
         mock_slack.slack_app.client.chat_postMessage.assert_called_once()
         kwargs = mock_slack.slack_app.client.chat_postMessage.call_args.kwargs
@@ -201,3 +230,196 @@ class TestSendLeaveNotificationToApplicant(IntegrationTestCase):
         # The submission blocks include a header that reads "Leave Request Submitted".
         header_text = kwargs["blocks"][0]["text"]["text"]
         self.assertIn("Leave Request Submitted", header_text)
+
+    def test_stores_dm_channel_and_ts_after_posting(self):
+        """After the confirmation DM is posted, the returned channel and ts are stored on the Leave Application."""
+        doc = _build_leave_doc()
+        mock_slack = MagicMock()
+        mock_slack.get_slack_user_id.return_value = TEST_SLACK_USER_ID
+        mock_slack.slack_app.client.chat_postMessage.return_value = {
+            "ok": True,
+            "channel": "D0FSC0001",
+            "ts": "1700000000.000001",
+        }
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.store_applicant_message_ref") as mock_store,
+        ):
+            send_leave_notification_to_applicant(doc)
+        mock_store.assert_called_once_with(doc.name, channel="D0FSC0001", ts="1700000000.000001")
+
+    def test_skips_dm_and_logs_when_employee_has_no_slack_id(self):
+        """When the employee has no Slack ID, no chat_postMessage is attempted and the failure is logged."""
+        doc = _build_leave_doc()
+        mock_slack = MagicMock()
+        mock_slack.get_slack_user_id.return_value = None
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.generate_error_log") as mock_log,
+        ):
+            send_leave_notification_to_applicant(doc)
+        mock_slack.slack_app.client.chat_postMessage.assert_not_called()
+        mock_log.assert_called_once()
+
+    def test_logs_and_swallows_slack_errors(self):
+        """A Slack API failure while posting the confirmation DM is logged and does not propagate."""
+        doc = _build_leave_doc()
+        mock_slack = MagicMock()
+        mock_slack.get_slack_user_id.return_value = TEST_SLACK_USER_ID
+        mock_slack.slack_app.client.chat_postMessage.side_effect = RuntimeError("slack down")
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.generate_error_log") as mock_log,
+        ):
+            send_leave_notification_to_applicant(doc)
+        mock_log.assert_called_once()
+        self.assertIsInstance(mock_log.call_args.kwargs["exception"], RuntimeError)
+
+
+class TestOnUpdateNotifyApplicant(IntegrationTestCase):
+    def test_enqueues_decision_job_when_status_changes_to_approved(self):
+        """on_update_notify_applicant enqueues send_leave_decision_to_applicant on the short queue when status changes to Approved."""
+        doc = _build_leave_doc(status="Approved", status_changed=True)
+        with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
+            on_update_notify_applicant(doc, method="on_update")
+        mock_enqueue.assert_called_once()
+        self.assertIs(mock_enqueue.call_args.args[0], send_leave_decision_to_applicant)
+        kwargs = mock_enqueue.call_args.kwargs
+        self.assertEqual(kwargs["queue"], "short")
+        self.assertIs(kwargs["doc"], doc)
+        self.assertEqual(kwargs["status"], "Approved")
+        self.assertEqual(kwargs["decided_by"], "approver@x.com")
+
+    def test_does_not_enqueue_when_status_is_unchanged(self):
+        """An edit to an already-approved leave that does not change status enqueues nothing."""
+        doc = _build_leave_doc(status="Approved", status_changed=False)
+        with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
+            on_update_notify_applicant(doc, method="on_update")
+        mock_enqueue.assert_not_called()
+
+    def test_does_not_enqueue_when_status_changes_to_open(self):
+        """A status change to a non-decision status (Open) enqueues nothing."""
+        doc = _build_leave_doc(status="Open", status_changed=True)
+        with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
+            on_update_notify_applicant(doc, method="on_update")
+        mock_enqueue.assert_not_called()
+
+    def test_cancelled_passes_cancelling_user_as_decided_by(self):
+        """On cancellation the user who cancelled (modified_by) is passed as decided_by, not the leave approver."""
+        doc = _build_leave_doc(status="Cancelled", status_changed=True, modified_by="hr@x.com")
+        with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
+            on_update_notify_applicant(doc, method="on_cancel")
+        self.assertEqual(mock_enqueue.call_args.kwargs["status"], "Cancelled")
+        self.assertEqual(mock_enqueue.call_args.kwargs["decided_by"], "hr@x.com")
+
+
+class TestSendLeaveDecisionToApplicant(IntegrationTestCase):
+    @contextlib.contextmanager
+    def _patched(self, mock_slack, *, message_ref=("D0FSC0001", "1700000000.000001"), mention_user=1):
+        """Patch Slack, the stored message ref, the mention_user setting, the approver full-name lookup, the ref store and the error log; yield (store, log) mocks."""
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack))
+            stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.get_applicant_message_ref", return_value=message_ref))
+            stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_single_value", return_value=mention_user))
+            stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value="Approver Person"))
+            mock_store = stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.store_applicant_message_ref"))
+            mock_log = stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.generate_error_log"))
+            yield mock_store, mock_log
+
+    def test_slack_approve_updates_applicant_dm_in_place(self):
+        """Approving via the Slack button (status changed to Approved through the doc hook) edits the stored applicant DM with chat_update and posts no new message."""
+        doc = _build_leave_doc(status="Approved", status_changed=True)
+        mock_slack = MagicMock()
+        mock_slack.get_slack_user_id.side_effect = _build_slack_user_lookup()
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue", side_effect=_run_enqueued_inline),
+            self._patched(mock_slack, mention_user=1),
+        ):
+            on_update_notify_applicant(doc, method="on_update")
+        mock_slack.slack_app.client.chat_update.assert_called_once()
+        mock_slack.slack_app.client.chat_postMessage.assert_not_called()
+        kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
+        self.assertEqual(kwargs["channel"], "D0FSC0001")
+        self.assertEqual(kwargs["ts"], "1700000000.000001")
+        self.assertIn("Leave Request Approved", kwargs["blocks"][0]["text"]["text"])
+        status_line = kwargs["blocks"][-1]["text"]["text"]
+        self.assertIn("*Status:* Approved by <@U-approver>", status_line)
+
+    def test_desk_reject_updates_applicant_dm_in_place(self):
+        """Rejecting from Desk (status changed to Rejected on submit) edits the stored applicant DM and names the approver when mentions are disabled."""
+        doc = _build_leave_doc(status="Rejected", status_changed=True)
+        mock_slack = MagicMock()
+        mock_slack.get_slack_user_id.side_effect = _build_slack_user_lookup()
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue", side_effect=_run_enqueued_inline),
+            self._patched(mock_slack, mention_user=0),
+        ):
+            on_update_notify_applicant(doc, method="on_update")
+        mock_slack.slack_app.client.chat_update.assert_called_once()
+        mock_slack.slack_app.client.chat_postMessage.assert_not_called()
+        kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
+        self.assertIn("Leave Request Rejected", kwargs["blocks"][0]["text"]["text"])
+        status_line = kwargs["blocks"][-1]["text"]["text"]
+        self.assertIn("*Status:* Rejected by Approver Person", status_line)
+
+    def test_cancelled_uses_cancelled_header(self):
+        """A cancellation rewrites the header to 'Leave Request Cancelled' and names the user who cancelled."""
+        doc = _build_leave_doc(status="Cancelled", status_changed=True)
+        mock_slack = MagicMock()
+        mock_slack.get_slack_user_id.side_effect = _build_slack_user_lookup()
+        with self._patched(mock_slack, mention_user=0):
+            send_leave_decision_to_applicant(doc=doc, status="Cancelled", decided_by="hr@x.com")
+        kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
+        self.assertEqual(kwargs["blocks"][0]["text"]["text"], ":no_entry_sign: Leave Request Cancelled")
+        self.assertIn("*Status:* Cancelled by Approver Person", kwargs["blocks"][-1]["text"]["text"])
+
+    def test_posts_fresh_dm_when_no_stored_ts(self):
+        """A leave with no stored message ts gets a fresh chat_postMessage with the decision instead of chat_update, and the new ref is stored."""
+        doc = _build_leave_doc(status="Approved", status_changed=True)
+        mock_slack = MagicMock()
+        mock_slack.get_slack_user_id.side_effect = _build_slack_user_lookup()
+        mock_slack.slack_app.client.chat_postMessage.return_value = {
+            "ok": True,
+            "channel": "D0FSC0001",
+            "ts": "1700000000.000009",
+        }
+        with self._patched(mock_slack, message_ref=(None, None)) as (mock_store, _):
+            send_leave_decision_to_applicant(doc=doc, status="Approved", decided_by="approver@x.com")
+        mock_slack.slack_app.client.chat_update.assert_not_called()
+        mock_slack.slack_app.client.chat_postMessage.assert_called_once()
+        kwargs = mock_slack.slack_app.client.chat_postMessage.call_args.kwargs
+        self.assertEqual(kwargs["channel"], TEST_SLACK_USER_ID)
+        self.assertIn("Leave Request Approved", kwargs["blocks"][0]["text"]["text"])
+        mock_store.assert_called_once_with(doc.name, channel="D0FSC0001", ts="1700000000.000009")
+
+    def test_no_slack_id_logs_and_makes_no_slack_call(self):
+        """An employee with no Slack ID causes no exception and no Slack call; the failure is logged."""
+        doc = _build_leave_doc(status="Approved", status_changed=True)
+        mock_slack = MagicMock()
+        mock_slack.get_slack_user_id.side_effect = _build_slack_user_lookup(employee_slack_id=None)
+        with self._patched(mock_slack) as (_, mock_log):
+            send_leave_decision_to_applicant(doc=doc, status="Approved", decided_by="approver@x.com")
+        mock_slack.slack_app.client.chat_update.assert_not_called()
+        mock_slack.slack_app.client.chat_postMessage.assert_not_called()
+        mock_log.assert_called_once()
+
+    def test_falls_back_to_full_name_when_approver_has_no_slack_id(self):
+        """When mentions are enabled but the approver has no Slack ID, the status line uses the approver's full name."""
+        doc = _build_leave_doc(status="Approved", status_changed=True)
+        mock_slack = MagicMock()
+        mock_slack.get_slack_user_id.side_effect = _build_slack_user_lookup(approver_slack_id=None)
+        with self._patched(mock_slack, mention_user=1):
+            send_leave_decision_to_applicant(doc=doc, status="Approved", decided_by="approver@x.com")
+        kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
+        self.assertIn("*Status:* Approved by Approver Person", kwargs["blocks"][-1]["text"]["text"])
+
+    def test_logs_and_swallows_slack_errors(self):
+        """A Slack API failure while updating the DM is logged and does not propagate."""
+        doc = _build_leave_doc(status="Approved", status_changed=True)
+        mock_slack = MagicMock()
+        mock_slack.get_slack_user_id.side_effect = _build_slack_user_lookup()
+        mock_slack.slack_app.client.chat_update.side_effect = RuntimeError("slack down")
+        with self._patched(mock_slack) as (_, mock_log):
+            send_leave_decision_to_applicant(doc=doc, status="Approved", decided_by="approver@x.com")
+        mock_log.assert_called_once()
+        self.assertIsInstance(mock_log.call_args.kwargs["exception"], RuntimeError)

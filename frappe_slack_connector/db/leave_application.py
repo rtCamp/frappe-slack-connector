@@ -2,6 +2,12 @@ import frappe
 from frappe.model.workflow import apply_workflow
 from frappe.utils import today
 
+# Custom fields (shipped in fixtures/custom_field.json) that remember the
+# applicant's "Leave Request Submitted" Slack DM so it can be edited in place
+# once the leave is approved, rejected or cancelled.
+APPLICANT_CHANNEL_FIELD = "custom_slack_applicant_channel"
+APPLICANT_MSG_TS_FIELD = "custom_slack_applicant_msg_ts"
+
 
 def custom_fields_exist() -> bool:
     """
@@ -9,6 +15,50 @@ def custom_fields_exist() -> bool:
     """
     # Check if the custom fields exist in the Leave Application doctype
     return frappe.get_meta("Leave Application").has_field("custom_first_halfsecond_half")
+
+
+def applicant_message_fields_exist() -> bool:
+    """
+    Check if the fields that store the applicant's Slack DM reference exist
+    on the Leave Application doctype (they are added by this app's fixtures)
+    """
+    meta = frappe.get_meta("Leave Application")
+    return meta.has_field(APPLICANT_CHANNEL_FIELD) and meta.has_field(APPLICANT_MSG_TS_FIELD)
+
+
+def get_applicant_message_ref(leave_id: str) -> tuple[str | None, str | None]:
+    """
+    Return the (channel, ts) of the applicant's Slack DM for the given leave,
+    or (None, None) when nothing is stored
+    """
+    if not applicant_message_fields_exist():
+        return None, None
+    row = frappe.db.get_value(
+        "Leave Application",
+        leave_id,
+        [APPLICANT_CHANNEL_FIELD, APPLICANT_MSG_TS_FIELD],
+        as_dict=True,
+    )
+    if not row:
+        return None, None
+    return row.get(APPLICANT_CHANNEL_FIELD) or None, row.get(APPLICANT_MSG_TS_FIELD) or None
+
+
+def store_applicant_message_ref(leave_id: str, *, channel: str | None, ts: str | None) -> None:
+    """
+    Remember the applicant's Slack DM (channel, ts) on the Leave Application.
+
+    Written directly to the database without touching ``modified`` so that
+    storing the reference does not fire another ``on_update`` doc event.
+    """
+    if not (channel and ts) or not applicant_message_fields_exist():
+        return
+    frappe.db.set_value(
+        "Leave Application",
+        leave_id,
+        {APPLICANT_CHANNEL_FIELD: channel, APPLICANT_MSG_TS_FIELD: ts},
+        update_modified=False,
+    )
 
 
 def get_employees_on_leave() -> list:

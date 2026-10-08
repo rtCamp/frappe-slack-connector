@@ -83,6 +83,8 @@ class TestSubmitLeaveHandler(IntegrationTestCase):
                 f"{SUBMIT_LEAVE_MODULE}.get_employeeid_from_slackid",
                 return_value="EMP-001",
             ),
+            patch(f"{SUBMIT_LEAVE_MODULE}.get_userid_from_slackid", return_value="alice@x.com"),
+            patch(f"{SUBMIT_LEAVE_MODULE}.frappe.set_user"),
             patch(
                 f"{SUBMIT_LEAVE_MODULE}.get_leave_approver",
                 return_value="approver@x.com",
@@ -113,6 +115,8 @@ class TestSubmitLeaveHandler(IntegrationTestCase):
                 f"{SUBMIT_LEAVE_MODULE}.get_employeeid_from_slackid",
                 return_value="EMP-001",
             ),
+            patch(f"{SUBMIT_LEAVE_MODULE}.get_userid_from_slackid", return_value="alice@x.com"),
+            patch(f"{SUBMIT_LEAVE_MODULE}.frappe.set_user"),
             patch(
                 f"{SUBMIT_LEAVE_MODULE}.get_leave_approver",
                 return_value="approver@x.com",
@@ -136,6 +140,8 @@ class TestSubmitLeaveHandler(IntegrationTestCase):
                 f"{SUBMIT_LEAVE_MODULE}.get_employeeid_from_slackid",
                 return_value="EMP-001",
             ),
+            patch(f"{SUBMIT_LEAVE_MODULE}.get_userid_from_slackid", return_value="alice@x.com"),
+            patch(f"{SUBMIT_LEAVE_MODULE}.frappe.set_user"),
             patch(
                 f"{SUBMIT_LEAVE_MODULE}.get_leave_approver",
                 return_value="approver@x.com",
@@ -148,6 +154,49 @@ class TestSubmitLeaveHandler(IntegrationTestCase):
         body = mock_response.call_args.kwargs["body"]
         self.assertEqual(body["response_action"], "push")
         self.assertEqual(body["view"]["title"]["text"], "Error")
+
+    def test_switches_session_to_applicant_before_saving(self):
+        """handler resolves the Frappe user for the Slack user and calls frappe.set_user with it before the Leave Application is saved, so the save and the enqueued notification jobs do not run as Guest."""
+        payload = _build_submission_payload()
+        order = []
+        mock_leave_app = MagicMock()
+        mock_leave_app.save.side_effect = lambda **kwargs: order.append("save")
+        with (
+            patch(f"{SUBMIT_LEAVE_MODULE}.frappe.get_doc", return_value=mock_leave_app),
+            patch(f"{SUBMIT_LEAVE_MODULE}.get_employeeid_from_slackid", return_value="EMP-001"),
+            patch(f"{SUBMIT_LEAVE_MODULE}.get_userid_from_slackid", return_value="alice@x.com") as mock_userid,
+            patch(
+                f"{SUBMIT_LEAVE_MODULE}.frappe.set_user",
+                side_effect=lambda user: order.append(("set_user", user)),
+            ),
+            patch(f"{SUBMIT_LEAVE_MODULE}.get_leave_approver", return_value="approver@x.com"),
+            patch(f"{SUBMIT_LEAVE_MODULE}.custom_fields_exist", return_value=False),
+            patch(f"{SUBMIT_LEAVE_MODULE}.frappe.db.commit"),
+            patch(f"{SUBMIT_LEAVE_MODULE}.clear_messages"),
+        ):
+            handler(slack=MagicMock(), payload=payload)
+        mock_userid.assert_called_once_with("U001")
+        self.assertEqual(order, [("set_user", "alice@x.com"), "save"])
+        mock_leave_app.save.assert_called_once_with(ignore_permissions=True)
+
+    def test_returns_error_modal_and_does_not_save_when_slack_user_has_no_frappe_user(self):
+        """When no Frappe user maps to the Slack user, handler returns the error modal without switching user or creating the Leave Application."""
+        payload = _build_submission_payload()
+        with (
+            patch(f"{SUBMIT_LEAVE_MODULE}.frappe.get_doc") as mock_get_doc,
+            patch(f"{SUBMIT_LEAVE_MODULE}.get_employeeid_from_slackid", return_value="EMP-001"),
+            patch(f"{SUBMIT_LEAVE_MODULE}.get_userid_from_slackid", return_value=None),
+            patch(f"{SUBMIT_LEAVE_MODULE}.frappe.set_user") as mock_set_user,
+            patch(f"{SUBMIT_LEAVE_MODULE}.get_leave_approver", return_value="approver@x.com"),
+            patch(f"{SUBMIT_LEAVE_MODULE}.custom_fields_exist", return_value=False),
+            patch(f"{SUBMIT_LEAVE_MODULE}.send_http_response") as mock_response,
+        ):
+            handler(slack=MagicMock(), payload=payload)
+        mock_set_user.assert_not_called()
+        mock_get_doc.assert_not_called()
+        body = mock_response.call_args.kwargs["body"]
+        self.assertEqual(body["response_action"], "push")
+        self.assertIn("No user found for this Slack user", body["view"]["blocks"][2]["text"]["text"])
 
 
 class TestHalfDayCheckboxHandler(IntegrationTestCase):

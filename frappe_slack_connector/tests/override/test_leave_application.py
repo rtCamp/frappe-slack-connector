@@ -347,9 +347,11 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         self.assertIn("*Duration:*\n:hourglass_flowing_sand: Half day on Jun 16, 2026 (Tue)\n", text)
 
     def test_approver_dm_shows_zero_balance_and_warning_for_non_lwp_leave(self):
-        """A non-LWP leave with leave_balance=0.0 still shows the balance (0 day(s)) and the warning; zero is not treated as missing."""
+        """A non-LWP leave with leave_balance=0.0 shows the stored balance (0 day(s)) and the warning; zero is not treated as missing and does not trigger the HRMS lookup."""
         doc = _build_leave_doc(from_date="2026-06-15", to_date="2026-06-16", total_leave_days=2.0, leave_balance=0.0)
-        text = _blocks_text(_get_approver_blocks(doc))
+        mocks = _run_leave_notification_bg(doc, balance_on=99.0)
+        mocks["get_leave_balance_on"].assert_not_called()
+        text = _blocks_text(_approver_call(mocks["slack"]).kwargs["blocks"])
         self.assertIn("*Balance before this request:*\n0 day(s)", text)
         self.assertIn("exceeds the available balance by 2 day(s). Approving it will take the balance to -2.", text)
 
@@ -407,6 +409,24 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         self.assertIn(
             "*Duration:*\n:hourglass_flowing_sand: Half day on Jun 10, 2026 (Wed) — First Half", approver_text
         )
+
+    def test_attendance_thread_says_full_day_when_half_day_date_is_missing(self):
+        """A half_day leave starting today with no half_day_date is reported as _(Full Day)_ in the thread instead of resolving the missing date to today."""
+        doc = _build_leave_doc(
+            from_date="2026-06-10",
+            to_date="2026-06-12",
+            half_day=1,
+            half_day_date=None,
+            first_half_second_half="First Half",
+            total_leave_days=2.5,
+        )
+        mocks = _run_leave_notification_bg(doc, custom_fields=True, attendance_updates=1)
+        thread_call = next(
+            c
+            for c in mocks["slack"].slack_app.client.chat_postMessage.call_args_list
+            if c.kwargs.get("thread_ts") == "1700000000.000001"
+        )
+        self.assertIn("requested for leave today. _(Full Day)_", thread_call.kwargs["blocks"][0]["text"]["text"])
 
     def test_attendance_thread_says_full_day_when_half_day_falls_on_another_date(self):
         """For a multi-day leave starting today whose half day is on a later date, the attendance thread says _(Full Day)_ for today."""

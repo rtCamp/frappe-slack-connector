@@ -522,27 +522,67 @@ class TestRestoreApplicantMessageRef(IntegrationTestCase):
         self.assertEqual(doc.get(APPLICANT_CHANNEL_FIELD), "D0FSC0001")
         self.assertEqual(doc.get(APPLICANT_MSG_TS_FIELD), "1700000000.000001")
 
-    def test_leaves_doc_untouched_when_in_memory_values_are_set(self):
-        """When the doc already carries a ref, the database is not consulted and the values are kept."""
-        doc = frappe.get_doc({"doctype": "Leave Application"})
+    def test_replaces_client_supplied_ref_on_existing_doc(self):
+        """Client-supplied ref values on an existing doc are replaced with the committed ones even when non-empty."""
+        doc = frappe.get_doc(
+            {
+                "doctype": "Leave Application",
+                APPLICANT_CHANNEL_FIELD: TEST_SLACK_CHANNEL_ID,
+                APPLICANT_MSG_TS_FIELD: "1700000000.000009",
+            }
+        )
         doc.name = "HR-LAP-RESTORE"
-        doc.set(APPLICANT_CHANNEL_FIELD, "D0FSC0009")
-        doc.set(APPLICANT_MSG_TS_FIELD, "1700000000.000009")
-        with (
-            patch.object(doc, "is_new", return_value=False),
-            patch(f"{LEAVE_OVERRIDE_MODULE}.get_applicant_message_ref") as mock_ref,
-        ):
+        doc._doc_before_save = frappe.get_doc(
+            {
+                "doctype": "Leave Application",
+                APPLICANT_CHANNEL_FIELD: "D0FSC0001",
+                APPLICANT_MSG_TS_FIELD: "1700000000.000001",
+            }
+        )
+        with patch.object(doc, "is_new", return_value=False):
             restore_applicant_message_ref(doc, method="before_validate")
-        mock_ref.assert_not_called()
-        self.assertEqual(doc.get(APPLICANT_CHANNEL_FIELD), "D0FSC0009")
-        self.assertEqual(doc.get(APPLICANT_MSG_TS_FIELD), "1700000000.000009")
+        self.assertEqual(doc.get(APPLICANT_CHANNEL_FIELD), "D0FSC0001")
+        self.assertEqual(doc.get(APPLICANT_MSG_TS_FIELD), "1700000000.000001")
 
-    def test_skips_new_docs(self):
-        """A document that has not been inserted yet has nothing stored, so the database is not consulted."""
-        doc = frappe.get_doc({"doctype": "Leave Application"})
+    def test_clears_client_supplied_ref_when_nothing_is_stored(self):
+        """When the committed row holds no ref, client-supplied values on an existing doc are cleared."""
+        doc = frappe.get_doc(
+            {
+                "doctype": "Leave Application",
+                APPLICANT_CHANNEL_FIELD: TEST_SLACK_CHANNEL_ID,
+                APPLICANT_MSG_TS_FIELD: "1700000000.000009",
+            }
+        )
+        doc.name = "HR-LAP-RESTORE"
+        doc._doc_before_save = frappe.get_doc({"doctype": "Leave Application"})
+        with patch.object(doc, "is_new", return_value=False):
+            restore_applicant_message_ref(doc, method="before_validate")
+        self.assertIsNone(doc.get(APPLICANT_CHANNEL_FIELD))
+        self.assertIsNone(doc.get(APPLICANT_MSG_TS_FIELD))
+
+    def test_clears_client_supplied_ref_on_new_docs(self):
+        """Client-supplied ref values on a document being inserted are discarded and the database is not consulted."""
+        doc = frappe.get_doc(
+            {
+                "doctype": "Leave Application",
+                APPLICANT_CHANNEL_FIELD: TEST_SLACK_CHANNEL_ID,
+                APPLICANT_MSG_TS_FIELD: "1700000000.000009",
+            }
+        )
+        doc.set("__islocal", True)
         with patch(f"{LEAVE_OVERRIDE_MODULE}.get_applicant_message_ref") as mock_ref:
             restore_applicant_message_ref(doc, method="before_validate")
         mock_ref.assert_not_called()
+        self.assertIsNone(doc.get(APPLICANT_CHANNEL_FIELD))
+        self.assertIsNone(doc.get(APPLICANT_MSG_TS_FIELD))
+
+    def test_clears_client_supplied_ref_on_nameless_docs(self):
+        """A document with no name (never inserted) has nothing stored; client values are discarded without a lookup."""
+        doc = frappe.get_doc({"doctype": "Leave Application", APPLICANT_CHANNEL_FIELD: TEST_SLACK_CHANNEL_ID})
+        with patch(f"{LEAVE_OVERRIDE_MODULE}.get_applicant_message_ref") as mock_ref:
+            restore_applicant_message_ref(doc, method="before_validate")
+        mock_ref.assert_not_called()
+        self.assertIsNone(doc.get(APPLICANT_CHANNEL_FIELD))
 
 
 class TestDocEventHooks(IntegrationTestCase):
@@ -700,6 +740,43 @@ class TestSendLeaveDecisionToApplicant(IntegrationTestCase):
         # The missing message is recorded, but not as an exception.
         mock_log.assert_called_once()
         self.assertNotIn("exception", mock_log.call_args.kwargs)
+
+    def test_refuses_to_update_a_non_dm_channel_and_posts_fresh_dm(self):
+        """A stored reference that is not a direct-message channel is never edited; the decision goes out as a fresh DM instead."""
+        doc = _build_leave_doc(status="Approved", docstatus=1, status_changed=True)
+        mock_slack = MagicMock()
+        mock_slack.get_slack_user_id.side_effect = _build_slack_user_lookup()
+        mock_slack.slack_app.client.chat_postMessage.return_value = {"ok": True, "channel": "D0FSC0001", "ts": "3.3"}
+        with self._patched(mock_slack, message_ref=(TEST_SLACK_CHANNEL_ID, "1700000000.000001")) as (
+            mock_store,
+            mock_log,
+        ):
+            send_leave_decision_to_applicant(doc=doc, status="Approved", decided_by="approver@x.com")
+        mock_slack.slack_app.client.chat_update.assert_not_called()
+        mock_slack.slack_app.client.chat_postMessage.assert_called_once()
+        self.assertEqual(mock_slack.slack_app.client.chat_postMessage.call_args.kwargs["channel"], TEST_SLACK_USER_ID)
+        mock_store.assert_called_once_with(doc.name, channel="D0FSC0001", ts="3.3")
+        mock_log.assert_called_once()
+
+    def test_refuses_to_update_the_attendance_summary_message(self):
+        """A stored ts equal to Slack Settings.last_attendance_msg_ts is never edited, even in a DM-looking channel; a fresh DM is posted."""
+        doc = _build_leave_doc(status="Approved", docstatus=1, status_changed=True)
+        mock_slack = MagicMock()
+        mock_slack.get_slack_user_id.side_effect = _build_slack_user_lookup()
+        mock_slack.slack_app.client.chat_postMessage.return_value = {"ok": True, "channel": "D0FSC0001", "ts": "4.4"}
+
+        def get_single_value(doctype, fieldname):
+            return "1700000000.000001" if fieldname == "last_attendance_msg_ts" else 0
+
+        with (
+            self._patched(mock_slack, message_ref=("D0FSC0001", "1700000000.000001")) as (mock_store, mock_log),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_single_value", side_effect=get_single_value),
+        ):
+            send_leave_decision_to_applicant(doc=doc, status="Approved", decided_by="approver@x.com")
+        mock_slack.slack_app.client.chat_update.assert_not_called()
+        mock_slack.slack_app.client.chat_postMessage.assert_called_once()
+        mock_store.assert_called_once_with(doc.name, channel="D0FSC0001", ts="4.4")
+        mock_log.assert_called_once()
 
     def test_other_slack_api_errors_do_not_fall_back_to_a_fresh_dm(self):
         """A chat_update SlackApiError other than a missing message/channel is logged as an error without posting a fresh DM."""

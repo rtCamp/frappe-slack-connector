@@ -116,16 +116,21 @@ def on_update_notify_applicant(doc: Document, method: str | None = None):
 
 def restore_applicant_message_ref(doc: Document, method: str | None = None):
     """
-    Keep the stored DM reference across saves made from a stale form.
+    Keep the DM reference server-owned across every save.
 
-    ``db_update`` writes every in-memory column, so a form loaded before the
-    background job stored the reference would overwrite it with NULL. The
-    database is the source of truth: copy the stored values onto the doc
-    whenever the in-memory ones are empty.
+    The fields are hidden and read-only in the form, but Frappe does not
+    enforce that on API writes, and ``db_update`` writes every in-memory
+    column. A client could point the reference at any bot message (such as
+    the attendance summary) and have it overwritten on approval, and a form
+    loaded before the background job stored the reference would wipe it with
+    NULL. So: never accept client values on insert, and on update always
+    replace the in-memory values with the committed ones.
     """
     # ``is_new`` relies on ``__islocal``, which only insert() sets; a document
     # built in memory and never inserted has no name and nothing stored
-    if doc.is_new() or not doc.name or (doc.get(APPLICANT_CHANNEL_FIELD) and doc.get(APPLICANT_MSG_TS_FIELD)):
+    if doc.is_new() or not doc.name:
+        doc.set(APPLICANT_CHANNEL_FIELD, None)
+        doc.set(APPLICANT_MSG_TS_FIELD, None)
         return
     # check_if_latest has already loaded the committed row (for update), so
     # prefer it over a second query
@@ -134,9 +139,8 @@ def restore_applicant_message_ref(doc: Document, method: str | None = None):
         channel, ts = previous.get(APPLICANT_CHANNEL_FIELD), previous.get(APPLICANT_MSG_TS_FIELD)
     else:
         channel, ts = get_applicant_message_ref(doc.name)
-    if channel and ts:
-        doc.set(APPLICANT_CHANNEL_FIELD, channel)
-        doc.set(APPLICANT_MSG_TS_FIELD, ts)
+    doc.set(APPLICANT_CHANNEL_FIELD, channel or None)
+    doc.set(APPLICANT_MSG_TS_FIELD, ts or None)
 
 
 def send_leave_notification_to_applicant(doc: Document):
@@ -224,7 +228,7 @@ def send_leave_decision_to_applicant(doc: Document, status: str, decided_by: str
         # Read the reference from the database rather than from ``doc``: the
         # job receives a snapshot taken before the submission DM was stored
         channel, ts = get_applicant_message_ref(doc.name)
-        if channel and ts:
+        if channel and ts and _is_applicant_dm(doc, channel, ts):
             try:
                 slack.slack_app.client.chat_update(channel=channel, ts=ts, text=text, blocks=blocks)
                 return
@@ -242,6 +246,27 @@ def send_leave_decision_to_applicant(doc: Document, status: str, decided_by: str
             title="Error updating leave decision for applicant",
             exception=e,
         )
+
+
+def _is_applicant_dm(doc: Document, channel: str, ts: str) -> bool:
+    """
+    Only ever edit a message in a direct-message channel, and never the
+    attendance summary. The reference is server-written, but refuse anyway
+    so a bad value can only cost a fresh DM, never another message.
+    """
+    if not str(channel).startswith("D"):
+        generate_error_log(
+            title="Applicant leave DM reference is not a DM channel",
+            message=f"Leave Application {doc.name}: refusing to update {channel}/{ts}; posting a fresh DM instead",
+        )
+        return False
+    if ts == frappe.db.get_single_value("Slack Settings", "last_attendance_msg_ts"):
+        generate_error_log(
+            title="Applicant leave DM reference points at the attendance summary",
+            message=f"Leave Application {doc.name}: refusing to update {channel}/{ts}; posting a fresh DM instead",
+        )
+        return False
+    return True
 
 
 def _format_decider(slack: SlackIntegration, user_email: str | None) -> str | None:

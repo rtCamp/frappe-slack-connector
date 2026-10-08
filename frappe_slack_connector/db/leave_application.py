@@ -13,7 +13,12 @@ def custom_fields_exist() -> bool:
 
 def get_employees_on_leave() -> list:
     """
-    Get all employees on leave today
+    Get all employees on leave today.
+
+    Only employees whose status is ``Active`` are returned. A leave can be
+    approved while the employee is still active and the employee may then
+    leave the organisation before the leave date, so the Employee status is
+    checked at query time rather than trusting the Leave Application alone.
     """
     current_date = today()
 
@@ -31,7 +36,6 @@ def get_employees_on_leave() -> list:
     if custom_fields_exist():
         fields.append("custom_first_halfsecond_half")
 
-    # Query Leave Application doctype
     leave_applications = frappe.get_all(
         "Leave Application",
         filters={
@@ -46,7 +50,23 @@ def get_employees_on_leave() -> list:
         order_by="to_date asc",
     )
 
-    return leave_applications
+    if not leave_applications:
+        return []
+
+    # Filter on the (small) set of employees on leave today instead of
+    # loading every active employee in the company into memory.
+    active_employees = set(
+        frappe.get_all(
+            "Employee",
+            filters={
+                "name": ("in", {la.employee for la in leave_applications}),
+                "status": "Active",
+            },
+            pluck="name",
+        )
+    )
+
+    return [la for la in leave_applications if la.employee in active_employees]
 
 
 def approve_leave(leave_id: str) -> None:

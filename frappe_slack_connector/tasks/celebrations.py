@@ -1,48 +1,27 @@
-import calendar
-import datetime
 from collections.abc import Callable
 
 import frappe
-from erpnext.setup.doctype.holiday_list.holiday_list import is_holiday
 from frappe import _
-from frappe.utils import add_days, get_time, getdate
+from frappe.utils import get_time, getdate
+from hrms.controllers.employee_reminders import (
+    get_birthday_reminder_text_and_message,
+    get_employees_having_an_event_today,
+    get_work_anniversary_reminder_text,
+)
 
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.str_utils import escape_slack_text
 from frappe_slack_connector.slack.app import SlackIntegration
 
-OPT_OUT_FIELD = "custom_skip_celebration_announcements"
-
-# Longest run of consecutive non-working days (weekend plus holidays, e.g.
-# a year-end shutdown) we roll back over so none of their events are lost.
-MAX_NON_WORKING_RUN_DAYS = 31
-
-# Longest gap we catch up after days on which the job did not run. Kept
-# short so (re-)enabling the feature after a gap cannot flood the channel.
-MAX_CATCH_UP_DAYS = 7
-
-# Events further back than this are described by date instead of weekday
-# name in the template context, since "for Tuesday" would be ambiguous.
-WEEKDAY_NAME_MAX_AGE_DAYS = 6
-
-CLAIM_KEY_PREFIX = "fsc_celebrations_posted"
-CLAIM_TTL_SECONDS = 2 * 86400
-
-# Slack rejects section blocks whose text is longer than this.
-SLACK_SECTION_TEXT_LIMIT = 3000
-
 DEFAULT_BIRTHDAY_TEMPLATE = (
     ":birthday: Happy birthday "
-    "{% for e in employees %}{{ e.mention }}"
-    "{% if not e.is_today %} (for {{ e.day_name }}){% endif %}"
-    "{% if not loop.last %}, {% endif %}{% endfor %}"
+    "{% for e in employees %}{{ e.mention }}{% if not loop.last %}, {% endif %}{% endfor %}"
     "! :tada:"
 )
 
 DEFAULT_ANNIVERSARY_TEMPLATE = (
     ":tada: Happy work anniversary "
     "{% for e in employees %}{{ e.mention }} - {{ e.years }} year{{ '' if e.years == 1 else 's' }} at {{ e.company }}"
-    "{% if not e.is_today %} (on {{ e.day_name }}){% endif %}"
     "{% if not loop.last %}, {% endif %}{% endfor %}"
     "! :clap:"
 )
@@ -50,72 +29,42 @@ DEFAULT_ANNIVERSARY_TEMPLATE = (
 
 def celebrations_channel() -> None:
     """
-    Scheduler entry (runs every scheduler tick, i.e. every
-    `scheduler_interval`, 240s by default) that queues the daily birthday
-    and work-anniversary announcements.
-    Conditions, cheapest first:
-     - At least one of the two event types is enabled
-     - Today's announcements have not already been queued
+    Scheduler entry (every tick) that posts today's birthday and work
+    anniversary announcements to the Slack channel
+    Conditions:
+     - Celebration updates are enabled
+     - Today's announcements have not been posted yet
      - The configured celebrations time has passed
-     - Today is a working day (events on weekends and holidays are picked
-       up by send_celebrations on the next working day)
-    The date is stamped before the job is queued so a second tick cannot
-    queue it again; the job itself is deduplicated by id as well.
+    Then posts the announcements and stamps the date in Slack Settings
     """
     slack_settings = frappe.get_single("Slack Settings")
-    if not (slack_settings.send_birthday_updates or slack_settings.send_anniversary_updates):
+    if slack_settings.send_celebration_updates != 1:
         return
 
     current_date = frappe.utils.nowdate()
-    previous_run = slack_settings.last_celebrations_date
     if (
-        (previous_run is not None and getdate(previous_run) == getdate(current_date))
-        or frappe.utils.now_datetime().time() < get_time(slack_settings.celebrations_time or "09:00:00")
-        or not is_working_day(getdate(current_date), get_default_holiday_list())
-    ):
+        slack_settings.last_celebrations_date is not None
+        and getdate(slack_settings.last_celebrations_date) == getdate(current_date)
+    ) or frappe.utils.now_datetime().time() < get_time(slack_settings.celebrations_time or "09:00:00"):
         return
 
-    # Stamp without touching `modified` so this cannot collide with another
-    # full save of Slack Settings (e.g. the attendance summary) on the same tick.
-    frappe.db.set_single_value("Slack Settings", "last_celebrations_date", current_date, update_modified=False)
-    frappe.enqueue(
-        send_celebrations,
-        queue="short",
-        enqueue_after_commit=True,
-        job_id=f"celebrations::{current_date}",
-        deduplicate=True,
-        date=current_date,
-        previous_run=str(previous_run) if previous_run else None,
-    )
+    send_celebrations()
+
+    # Stamp the column directly: a full save would run validate and the
+    # modified check, and a bad template or a concurrent save of Slack
+    # Settings would lose the stamp and repost on every tick.
+    frappe.db.set_single_value("Slack Settings", "last_celebrations_date", current_date)
 
 
-def send_celebrations(date: str | datetime.date, previous_run: str | datetime.date | None = None) -> None:
+def send_celebrations() -> None:
     """
-    Background job: post one birthday message and one work-anniversary
-    message for every event that falls on `date`, on the run of non-working
-    days immediately before it, or on any day since `previous_run` that was
-    missed. Nothing is posted for an event type with no employees.
+    Post one birthday message and one work anniversary message for the
+    active employees whose event is today, each grouping everyone who
+    shares the day. Nothing is posted for an event type with nobody.
     """
-    run_date = getdate(date)
     slack_settings = frappe.get_single("Slack Settings")
-
-    start_date, end_date = get_celebration_window(
-        run_date,
-        get_default_holiday_list(),
-        previous_run=getdate(previous_run) if previous_run else None,
-    )
-    employees = get_active_employees()
-
-    birthdays = (
-        get_employees_with_birthday(end_date, start_date=start_date, employees=employees)
-        if slack_settings.send_birthday_updates
-        else []
-    )
-    anniversaries = (
-        get_employees_with_anniversary(end_date, start_date=start_date, employees=employees)
-        if slack_settings.send_anniversary_updates
-        else []
-    )
+    birthdays = get_employees_with_event("birthday")
+    anniversaries = get_employees_with_event("work_anniversary")
     if not birthdays and not anniversaries:
         return
 
@@ -128,38 +77,31 @@ def send_celebrations(date: str | datetime.date, previous_run: str | datetime.da
         )
         return
 
-    # Claim only once everything needed to post is in place, so a config
-    # failure above does not burn the claim for the day.
-    if not claim_celebrations_day(run_date):
-        frappe.logger().info(f"Celebrations for {run_date} already posted, skipping duplicate job")
-        return
-
-    user_ids = {e.user_id for e in [*birthdays, *anniversaries] if e.user_id}
-    slack_user_ids = get_slack_user_ids(list(user_ids))
+    slack_user_ids = get_slack_user_ids([e.user_id for e in [*birthdays, *anniversaries] if e.user_id])
     mention_users = bool(slack_settings.mention_user)
+    current_year = getdate(frappe.utils.nowdate()).year
 
-    def to_context(employee) -> dict:
+    def to_context(employee, *, with_years: bool) -> dict:
         slack_userid = slack_user_ids.get(employee.user_id) if employee.user_id else None
-        name = escape_slack_text(employee.employee_name)
+        name = escape_slack_text(employee.name)
         context = {
             "name": name,
             "mention": f"<@{slack_userid}>" if slack_userid and mention_users else name,
             "company": escape_slack_text(employee.company),
-            "date": employee.event_date,
         }
-        if "years" in employee:
-            context["years"] = employee.years
+        if with_years:
+            context["years"] = current_year - getdate(employee.date_of_joining).year
         return context
 
     if birthdays:
         post_announcement(
             slack,
             channel,
-            build_birthday_blocks,
-            [to_context(e) for e in birthdays],
-            run_date,
-            template=slack_settings.birthday_message_template,
-            fallback_prefix=_("Birthdays"),
+            header=":birthday: Birthdays",
+            template=slack_settings.birthday_message_template or DEFAULT_BIRTHDAY_TEMPLATE,
+            employees=birthdays,
+            to_context=lambda e: to_context(e, with_years=False),
+            fallback_text=lambda rows: get_birthday_reminder_text_and_message(rows)[0],
             error_title=_("Error posting birthday announcement to Slack"),
         )
 
@@ -167,11 +109,11 @@ def send_celebrations(date: str | datetime.date, previous_run: str | datetime.da
         post_announcement(
             slack,
             channel,
-            build_anniversary_blocks,
-            [to_context(e) for e in anniversaries],
-            run_date,
-            template=slack_settings.anniversary_message_template,
-            fallback_prefix=_("Work anniversaries"),
+            header=":tada: Work Anniversaries",
+            template=slack_settings.anniversary_message_template or DEFAULT_ANNIVERSARY_TEMPLATE,
+            employees=anniversaries,
+            to_context=lambda e: to_context(e, with_years=True),
+            fallback_text=get_work_anniversary_reminder_text,
             error_title=_("Error posting work anniversary announcement to Slack"),
         )
 
@@ -179,27 +121,37 @@ def send_celebrations(date: str | datetime.date, previous_run: str | datetime.da
 def post_announcement(
     slack: SlackIntegration,
     channel: str,
-    build_blocks: Callable,
-    employees: list,
-    run_date: datetime.date,
     *,
-    template: str | None,
-    fallback_prefix: str,
+    header: str,
+    template: str,
+    employees: list,
+    to_context: Callable[[dict], dict],
+    fallback_text: Callable[[list], str],
     error_title: str,
 ) -> None:
     """
-    Render and post one announcement, logging (not raising) on failure so a
-    broken birthday template or post does not stop the anniversary post.
-    Nothing is posted when the template renders to an empty message.
+    Render the Jinja template with the employees' template context and
+    post it under a header block, with the HRMS reminder text (built from
+    escaped names) as the notification fallback.
+    Failures are logged, not raised, so a broken birthday template or post
+    does not stop the anniversary post.
     """
     try:
-        blocks = build_blocks(employees, run_date, template=template)
-        if not blocks:
-            return
+        escaped = [frappe._dict(e, name=escape_slack_text(e.name)) for e in employees]
+        text = render_slack_template(template, {"employees": [to_context(e) for e in employees]})
         slack.slack_app.client.chat_postMessage(
             channel=channel,
-            blocks=blocks,
-            text=f"{fallback_prefix}: {', '.join(e['name'] for e in employees)}",
+            text=fallback_text(escaped),
+            blocks=[
+                {
+                    "type": "header",
+                    "text": {"type": "plain_text", "text": header, "emoji": True},
+                },
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": text.strip()},
+                },
+            ],
         )
     except Exception as e:
         generate_error_log(
@@ -209,72 +161,30 @@ def post_announcement(
         )
 
 
-def claim_celebrations_day(run_date: datetime.date) -> bool:
+def render_slack_template(template: str, context: dict) -> str:
     """
-    Atomically mark `run_date` as posted in Redis (SET NX with a two-day
-    TTL). Returns False when another job already claimed it, which makes
-    the post idempotent even if last_celebrations_date is overwritten by a
-    stale save of Slack Settings and the scheduler queues the day again.
+    Render a message template from Slack Settings as a string.
+    frappe.render_template treats a one-line template ending in .txt or
+    .html as a file path, so use the sandboxed environment directly,
+    mirroring its string branch. Jinja errors propagate to the caller.
     """
-    # Raw redis SET NX (set_value has no atomic "only if absent"); the key is
-    # site-prefixed via make_key, so multitenancy is preserved.
-    key = frappe.cache.make_key(f"{CLAIM_KEY_PREFIX}::{run_date}")
-    # nosemgrep
-    return bool(frappe.cache.set(key, 1, nx=True, ex=CLAIM_TTL_SECONDS))
+    from frappe.utils.jinja import get_jenv, safe_render_flags
+
+    if ".__" in template:
+        frappe.throw(_("Illegal template"))
+    with safe_render_flags():
+        return get_jenv().from_string(template).render(context)
 
 
-def get_default_holiday_list() -> str | None:
+def get_employees_with_event(event_type: str) -> list:
     """
-    Holiday list of the default company, used to decide working days
+    Active employees whose `event_type` ("birthday" or "work_anniversary")
+    is today, in one flat list (HRMS groups them by company). Employees
+    whose event date is in the current year, i.e. who joined today, are
+    excluded by the HRMS query.
     """
-    company = frappe.db.get_single_value("Global Defaults", "default_company")
-    if not company:
-        return None
-    return frappe.db.get_value("Company", company, "default_holiday_list")
-
-
-def is_working_day(day: datetime.date, holiday_list: str | None) -> bool:
-    """
-    A day is a working day when it is Monday to Friday and not a holiday
-    in the given holiday list
-    """
-    if day.weekday() > 4:  # sat = 5, sun = 6
-        return False
-    return not (holiday_list and is_holiday(holiday_list, day))
-
-
-def get_celebration_window(
-    run_date: datetime.date, holiday_list: str | None, previous_run: datetime.date | None = None
-) -> tuple[datetime.date, datetime.date]:
-    """
-    Return the (start, end) date range whose events are announced on
-    `run_date`: `run_date` itself plus the run of non-working days
-    immediately before it, so weekend and holiday events are not lost.
-    When `previous_run` (the last date the job ran) is given, the window
-    also covers every day since then, so days on which the job did not run
-    are caught up, looking back at most MAX_CATCH_UP_DAYS.
-    """
-    start = run_date
-    previous = add_days(run_date, -1)
-    for _i in range(MAX_NON_WORKING_RUN_DAYS):
-        if is_working_day(previous, holiday_list):
-            break
-        start = previous
-        previous = add_days(previous, -1)
-    if previous_run is not None:
-        catch_up_start = max(add_days(previous_run, 1), add_days(run_date, -MAX_CATCH_UP_DAYS))
-        start = min(start, catch_up_start)
-    return start, run_date
-
-
-def get_active_employees() -> list:
-    """
-    Active employees with the fields needed for celebrations
-    """
-    fields = ["name", "employee_name", "user_id", "company", "date_of_birth", "date_of_joining"]
-    if frappe.get_meta("Employee").has_field(OPT_OUT_FIELD):
-        fields.append(OPT_OUT_FIELD)
-    return frappe.get_all("Employee", filters={"status": "Active"}, fields=fields)
+    grouped = get_employees_having_an_event_today(event_type) or {}
+    return [employee for employees in grouped.values() for employee in employees]
 
 
 def get_slack_user_ids(user_ids: list[str]) -> dict[str, str]:
@@ -289,177 +199,3 @@ def get_slack_user_ids(user_ids: list[str]) -> dict[str, str]:
         fields=["user", "custom_slack_userid"],
     )
     return {um.user: um.custom_slack_userid for um in user_metas if um.custom_slack_userid}
-
-
-def observed_date(event: datetime.date, year: int) -> datetime.date:
-    """
-    The calendar day on which an annual event is observed in `year`.
-    A 29 Feb event is observed on 28 Feb when `year` has no 29 Feb.
-    """
-    if event.month == 2 and event.day == 29 and not calendar.isleap(year):
-        return datetime.date(year, 2, 28)
-    return datetime.date(year, event.month, event.day)
-
-
-def _events_in_window(employees: list, field: str, start_date: datetime.date, end_date: datetime.date) -> list:
-    """
-    Employees whose annual event stored in `field` is observed between
-    start_date and end_date (inclusive). Each returned row is a copy of the
-    employee row with `event_date` set to the observed date in that window.
-    Opted-out employees and rows without the field are skipped.
-    """
-    matches = []
-    for employee in employees:
-        if employee.get(OPT_OUT_FIELD) or not employee.get(field):
-            continue
-        event = getdate(employee.get(field))
-        for year in range(start_date.year, end_date.year + 1):
-            observed = observed_date(event, year)
-            if start_date <= observed <= end_date:
-                row = frappe._dict(employee)
-                row.event_date = observed
-                matches.append(row)
-                break
-    return matches
-
-
-def get_employees_with_birthday(
-    date: datetime.date, *, start_date: datetime.date | None = None, employees: list | None = None
-) -> list:
-    """
-    Active, not opted-out employees whose birthday falls between start_date
-    (default: `date`) and `date`. The birth year is never exposed.
-    """
-    run_date = getdate(date)
-    start = getdate(start_date) if start_date else run_date
-    if employees is None:
-        employees = get_active_employees()
-    return _events_in_window(employees, "date_of_birth", start, run_date)
-
-
-def get_employees_with_anniversary(
-    date: datetime.date, *, start_date: datetime.date | None = None, employees: list | None = None
-) -> list:
-    """
-    Active, not opted-out employees whose work anniversary falls between
-    start_date (default: `date`) and `date`, with `years` set to the number
-    of completed years. Employees who joined in the same year are excluded.
-    """
-    run_date = getdate(date)
-    start = getdate(start_date) if start_date else run_date
-    if employees is None:
-        employees = get_active_employees()
-    matches = []
-    for row in _events_in_window(employees, "date_of_joining", start, run_date):
-        joined = getdate(row.date_of_joining)
-        if joined.year >= row.event_date.year:
-            continue
-        row.years = row.event_date.year - joined.year
-        matches.append(row)
-    return matches
-
-
-def describe_event_day(event_date: datetime.date, run_date: datetime.date) -> str:
-    """
-    Weekday name for recent events ("Saturday"); a short date ("Oct 1")
-    for events older than WEEKDAY_NAME_MAX_AGE_DAYS, where a weekday name
-    would be ambiguous.
-    """
-    if (run_date - event_date).days > WEEKDAY_NAME_MAX_AGE_DAYS:
-        return f"{event_date.strftime('%b')} {event_date.day}"
-    return event_date.strftime("%A")
-
-
-def _with_day_info(employees: list, run_date: datetime.date) -> list:
-    """
-    Add `is_today` and `day_name` to each employee context, derived from
-    the employee's event `date`, so templates can say "for Saturday"
-    """
-    prepared = []
-    for employee in employees:
-        context = dict(employee)
-        event_date = getdate(context["date"]) if context.get("date") else run_date
-        context.setdefault("is_today", event_date == run_date)
-        context.setdefault("day_name", describe_event_day(event_date, run_date))
-        prepared.append(context)
-    return prepared
-
-
-def _render(template: str | None, default: str, employees: list, run_date: datetime.date) -> str:
-    context = {"employees": _with_day_info(employees, run_date), "date": run_date}
-    # Templates come from Slack Settings (System Manager only) or the module defaults
-    # nosemgrep
-    return frappe.render_template(template or default, context).strip()
-
-
-def _join_within(parts: list[str], separator: str, limit: int) -> list[str]:
-    """
-    Greedily join `parts` with `separator` into strings of at most `limit`
-    characters. A single part longer than `limit` is passed through as is.
-    """
-    chunks = []
-    current = ""
-    for part in parts:
-        candidate = part if not current else f"{current}{separator}{part}"
-        if len(candidate) > limit and current:
-            chunks.append(current)
-            current = part
-        else:
-            current = candidate
-    if current:
-        chunks.append(current)
-    return chunks
-
-
-def split_text(text: str, limit: int = SLACK_SECTION_TEXT_LIMIT) -> list[str]:
-    """
-    Split text into chunks of at most `limit` characters, preferring line
-    boundaries, then ", " separators (so a mention or entity is not cut in
-    the middle); only a single comma-free run longer than `limit` is cut hard.
-    """
-    pieces = []
-    for line in text.split("\n"):
-        if len(line) <= limit:
-            pieces.append(line)
-            continue
-        for segment in _join_within(line.split(", "), ", ", limit):
-            pieces.extend(segment[i : i + limit] for i in range(0, len(segment), limit))
-    return _join_within(pieces, "\n", limit)
-
-
-def _blocks(header: str, text: str) -> list:
-    """
-    A header block followed by one section block per chunk of `text`.
-    Returns an empty list when there is no text to post.
-    """
-    if not text.strip():
-        return []
-    return [
-        {
-            "type": "header",
-            "text": {"type": "plain_text", "text": header, "emoji": True},
-        },
-        *(
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": chunk},
-            }
-            for chunk in split_text(text)
-        ),
-    ]
-
-
-def build_birthday_blocks(employees: list, date: datetime.date, template: str | None = None) -> list:
-    """
-    Slack blocks for the birthday announcement: a header plus the section(s)
-    rendered from the Jinja template (or the default when empty)
-    """
-    return _blocks(":birthday: Birthdays", _render(template, DEFAULT_BIRTHDAY_TEMPLATE, employees, date))
-
-
-def build_anniversary_blocks(employees: list, date: datetime.date, template: str | None = None) -> list:
-    """
-    Slack blocks for the work-anniversary announcement: a header plus the
-    section(s) rendered from the Jinja template (or the default when empty)
-    """
-    return _blocks(":tada: Work Anniversaries", _render(template, DEFAULT_ANNIVERSARY_TEMPLATE, employees, date))

@@ -2,12 +2,23 @@
 # For license information, please see license.txt
 
 import frappe
+from frappe import _
 from frappe.model.document import Document
-from frappe.utils import add_days, getdate, nowdate
 from frappe.utils.jinja import validate_template
 
-CELEBRATION_TEMPLATE_FIELDS = ("birthday_message_template", "anniversary_message_template")
-CELEBRATION_TOGGLE_FIELDS = ("send_birthday_updates", "send_anniversary_updates")
+from frappe_slack_connector.tasks.celebrations import render_slack_template
+
+# Sample template context per field, used to dry-render templates on save.
+# The birthday context has no `years`, matching what the job passes.
+CELEBRATION_TEMPLATE_SAMPLES = {
+    "birthday_message_template": {"name": "Sample Employee", "mention": "Sample Employee", "company": "Sample Co"},
+    "anniversary_message_template": {
+        "name": "Sample Employee",
+        "mention": "Sample Employee",
+        "company": "Sample Co",
+        "years": 1,
+    },
+}
 
 # TODO: Add validation for slack and channel integration
 # Currently we are taking the channel name (not the id), so it is
@@ -25,41 +36,31 @@ class SlackSettings(Document):
         the slack_app_token and slack_bot_token from the document
         """
         self.validate_celebration_templates()
-        if not self.reset_celebrations_date_on_enable():
-            self.keep_latest_celebrations_date()
-
-    def reset_celebrations_date_on_enable(self) -> bool:
-        """
-        When birthday or anniversary updates are switched on, pretend the
-        job last ran yesterday so the first run announces today's events
-        (plus the preceding non-working days) instead of catching up a
-        backlog from whenever the feature was last on.
-        Returns True when the date was reset.
-        """
-        before = self.get_doc_before_save()
-        for fieldname in CELEBRATION_TOGGLE_FIELDS:
-            was_on = before.get(fieldname) if before else 0
-            if self.get(fieldname) and not was_on:
-                self.last_celebrations_date = add_days(nowdate(), -1)
-                return True
-        return False
-
-    def keep_latest_celebrations_date(self):
-        """
-        The scheduler stamps last_celebrations_date directly in the DB, so a
-        Desk form left open across a post would write the older date it
-        loaded back and the next run would catch up (re-post) that day.
-        Keep whichever of the stored and incoming dates is later.
-        """
-        stored = frappe.db.get_single_value("Slack Settings", "last_celebrations_date")
-        incoming = self.get("last_celebrations_date")
-        if stored and (not incoming or getdate(stored) > getdate(incoming)):
-            self.last_celebrations_date = stored
 
     def validate_celebration_templates(self):
         """
-        Reject a celebrations message template with a Jinja syntax error so
-        the daily job does not fail at post time
+        Reject a celebrations message template that has a Jinja syntax
+        error, fails to render, renders to nothing or references a value
+        that is not in the context (left as literal {{ ... }} by Frappe's
+        DebugUndefined), so the daily job does not fail or post a broken
+        message
         """
-        for fieldname in CELEBRATION_TEMPLATE_FIELDS:
-            validate_template(self.get(fieldname))
+        for fieldname, sample in CELEBRATION_TEMPLATE_SAMPLES.items():
+            template = self.get(fieldname)
+            if not template:
+                continue
+            validate_template(template)
+            label = _(frappe.unscrub(fieldname))
+            try:
+                rendered = render_slack_template(template, {"employees": [sample]})
+            except Exception as e:
+                summary = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
+                frappe.throw(_("{0} could not be rendered: {1}").format(label, summary))
+            if not rendered.strip():
+                frappe.throw(_("{0} renders an empty message").format(label))
+            if "{{" in rendered or "}}" in rendered:
+                frappe.throw(
+                    _("{0} references a value that does not exist (unrendered {{ ... }} left in the output)").format(
+                        label
+                    )
+                )

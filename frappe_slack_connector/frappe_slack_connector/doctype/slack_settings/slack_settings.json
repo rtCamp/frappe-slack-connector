@@ -34,8 +34,7 @@
   "workload_mention_users",
   "workload_channel_id",
   "celebrations_section",
-  "send_birthday_updates",
-  "send_anniversary_updates",
+  "send_celebration_updates",
   "celebrations_channel_id",
   "celebrations_time",
   "column_break_cele",
@@ -188,7 +187,7 @@
   },
   {
    "default": "0",
-   "depends_on": "eval:doc.send_attendance_updates || doc.send_birthday_updates || doc.send_anniversary_updates",
+   "depends_on": "eval:doc.send_attendance_updates || doc.send_celebration_updates",
    "description": "Enable this to mention employees (instead of showing their name) in the attendance summary and in birthday and work anniversary announcements.",
    "fieldname": "mention_user",
    "fieldtype": "Check",
@@ -224,25 +223,19 @@
    "label": "Workload Channel ID"
   },
   {
-   "description": "Daily birthday and work anniversary announcements. Events on weekends and holidays are announced on the next working day.",
+   "description": "Daily birthday and work anniversary announcements. \"Mention User\" in the Leave Settings section applies to these announcements too.",
    "fieldname": "celebrations_section",
    "fieldtype": "Section Break",
    "label": "Celebrations"
   },
   {
    "default": "0",
-   "fieldname": "send_birthday_updates",
+   "fieldname": "send_celebration_updates",
    "fieldtype": "Check",
-   "label": "Send Birthday Updates"
+   "label": "Send Birthday and Work Anniversary Updates"
   },
   {
-   "default": "0",
-   "fieldname": "send_anniversary_updates",
-   "fieldtype": "Check",
-   "label": "Send Work Anniversary Updates"
-  },
-  {
-   "depends_on": "eval:doc.send_birthday_updates == 1 || doc.send_anniversary_updates == 1;",
+   "depends_on": "eval:doc.send_celebration_updates == 1;",
    "description": "Falls back to the attendance channel when empty",
    "fieldname": "celebrations_channel_id",
    "fieldtype": "Data",
@@ -250,28 +243,28 @@
   },
   {
    "default": "09:00:00",
-   "depends_on": "eval:doc.send_birthday_updates == 1 || doc.send_anniversary_updates == 1;",
+   "depends_on": "eval:doc.send_celebration_updates == 1;",
    "description": "Time of day to post the announcements",
    "fieldname": "celebrations_time",
    "fieldtype": "Time",
    "label": "Time",
-   "mandatory_depends_on": "eval:doc.send_birthday_updates == 1 || doc.send_anniversary_updates == 1;"
+   "mandatory_depends_on": "eval:doc.send_celebration_updates == 1;"
   },
   {
    "fieldname": "column_break_cele",
    "fieldtype": "Column Break"
   },
   {
-   "depends_on": "eval:doc.send_birthday_updates == 1;",
-   "description": "Jinja template for the birthday message. Leave empty for the default. Context: <code>employees</code> (list of <code>name</code>, <code>mention</code>, <code>company</code>, <code>date</code>, <code>day_name</code>, <code>is_today</code>) and <code>date</code>.",
+   "depends_on": "eval:doc.send_celebration_updates == 1;",
+   "description": "Jinja template for the birthday message. Leave empty for the default. Context: <code>employees</code> (list of <code>name</code>, <code>mention</code>, <code>company</code>).",
    "fieldname": "birthday_message_template",
    "fieldtype": "Code",
    "label": "Birthday Message Template",
    "options": "Jinja"
   },
   {
-   "depends_on": "eval:doc.send_anniversary_updates == 1;",
-   "description": "Jinja template for the work anniversary message. Leave empty for the default. Context: <code>employees</code> (list of <code>name</code>, <code>mention</code>, <code>company</code>, <code>years</code>, <code>date</code>, <code>day_name</code>, <code>is_today</code>) and <code>date</code>.",
+   "depends_on": "eval:doc.send_celebration_updates == 1;",
+   "description": "Jinja template for the work anniversary message. Leave empty for the default. Context: <code>employees</code> (list of <code>name</code>, <code>mention</code>, <code>company</code>, <code>years</code> at the company).",
    "fieldname": "anniversary_message_template",
    "fieldtype": "Code",
    "label": "Work Anniversary Message Template",
@@ -288,7 +281,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-10-08 12:00:00.000000",
+ "modified": "2026-10-09 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Slack Connector",
  "name": "Slack Settings",

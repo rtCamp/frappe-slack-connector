@@ -14,8 +14,16 @@ from frappe_slack_connector.slack.app import SlackIntegration
 OPT_OUT_FIELD = "custom_skip_celebration_announcements"
 
 # Longest run of days we look back over, both for consecutive non-working
-# days and for catching up after days on which the job did not run.
-MAX_ROLLBACK_DAYS = 31
+# days and for catching up after days on which the job did not run. Kept
+# short so (re-)enabling the feature after a gap cannot flood the channel.
+MAX_ROLLBACK_DAYS = 7
+
+# Events further back than this are described by date instead of weekday
+# name in the template context, since "for Tuesday" would be ambiguous.
+WEEKDAY_NAME_MAX_AGE_DAYS = 6
+
+CLAIM_KEY_PREFIX = "fsc_celebrations_posted"
+CLAIM_TTL_SECONDS = 2 * 86400
 
 # Slack rejects section blocks whose text is longer than this.
 SLACK_SECTION_TEXT_LIMIT = 3000
@@ -86,6 +94,10 @@ def send_celebrations(date: str | datetime.date, previous_run: str | datetime.da
     missed. Nothing is posted for an event type with no employees.
     """
     run_date = getdate(date)
+    if not claim_celebrations_day(run_date):
+        frappe.logger().info(f"Celebrations for {run_date} already posted, skipping duplicate job")
+        return
+
     slack_settings = frappe.get_single("Slack Settings")
 
     start_date, end_date = get_celebration_window(
@@ -190,6 +202,20 @@ def post_announcement(
             message=_("Please check the celebrations channel ID and message template and try again."),
             exception=e,
         )
+
+
+def claim_celebrations_day(run_date: datetime.date) -> bool:
+    """
+    Atomically mark `run_date` as posted in Redis (SET NX with a two-day
+    TTL). Returns False when another job already claimed it, which makes
+    the post idempotent even if last_celebrations_date is overwritten by a
+    stale save of Slack Settings and the scheduler queues the day again.
+    """
+    # Raw redis SET NX (set_value has no atomic "only if absent"); the key is
+    # site-prefixed via make_key, so multitenancy is preserved.
+    key = frappe.cache.make_key(f"{CLAIM_KEY_PREFIX}::{run_date}")
+    # nosemgrep
+    return bool(frappe.cache.set(key, 1, nx=True, ex=CLAIM_TTL_SECONDS))
 
 
 def get_default_holiday_list() -> str | None:
@@ -328,6 +354,17 @@ def get_employees_with_anniversary(
     return matches
 
 
+def describe_event_day(event_date: datetime.date, run_date: datetime.date) -> str:
+    """
+    Weekday name for recent events ("Saturday"); a short date ("Oct 1")
+    for events older than WEEKDAY_NAME_MAX_AGE_DAYS, where a weekday name
+    would be ambiguous.
+    """
+    if (run_date - event_date).days > WEEKDAY_NAME_MAX_AGE_DAYS:
+        return f"{event_date.strftime('%b')} {event_date.day}"
+    return event_date.strftime("%A")
+
+
 def _with_day_info(employees: list, run_date: datetime.date) -> list:
     """
     Add `is_today` and `day_name` to each employee context, derived from
@@ -338,7 +375,7 @@ def _with_day_info(employees: list, run_date: datetime.date) -> list:
         context = dict(employee)
         event_date = getdate(context["date"]) if context.get("date") else run_date
         context.setdefault("is_today", event_date == run_date)
-        context.setdefault("day_name", event_date.strftime("%A"))
+        context.setdefault("day_name", describe_event_day(event_date, run_date))
         prepared.append(context)
     return prepared
 
@@ -350,29 +387,39 @@ def _render(template: str | None, default: str, employees: list, run_date: datet
     return frappe.render_template(template or default, context).strip()
 
 
-def split_text(text: str, limit: int = SLACK_SECTION_TEXT_LIMIT) -> list[str]:
+def _join_within(parts: list[str], separator: str, limit: int) -> list[str]:
     """
-    Split text into chunks of at most `limit` characters, preferring line
-    boundaries; a single line longer than `limit` is cut hard.
+    Greedily join `parts` with `separator` into strings of at most `limit`
+    characters. A single part longer than `limit` is passed through as is.
     """
     chunks = []
     current = ""
-    for line in text.split("\n"):
-        while len(line) > limit:
-            if current:
-                chunks.append(current)
-                current = ""
-            chunks.append(line[:limit])
-            line = line[limit:]
-        candidate = line if not current else f"{current}\n{line}"
-        if len(candidate) > limit:
+    for part in parts:
+        candidate = part if not current else f"{current}{separator}{part}"
+        if len(candidate) > limit and current:
             chunks.append(current)
-            current = line
+            current = part
         else:
             current = candidate
     if current:
         chunks.append(current)
     return chunks
+
+
+def split_text(text: str, limit: int = SLACK_SECTION_TEXT_LIMIT) -> list[str]:
+    """
+    Split text into chunks of at most `limit` characters, preferring line
+    boundaries, then ", " separators (so a mention or entity is not cut in
+    the middle); only a single comma-free run longer than `limit` is cut hard.
+    """
+    pieces = []
+    for line in text.split("\n"):
+        if len(line) <= limit:
+            pieces.append(line)
+            continue
+        for segment in _join_within(line.split(", "), ", ", limit):
+            pieces.extend(segment[i : i + limit] for i in range(0, len(segment), limit))
+    return _join_within(pieces, "\n", limit)
 
 
 def _blocks(header: str, text: str) -> list:

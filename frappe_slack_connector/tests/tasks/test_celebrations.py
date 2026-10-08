@@ -7,10 +7,14 @@ from frappe.tests import IntegrationTestCase
 
 from frappe_slack_connector.frappe_slack_connector.doctype.slack_settings.slack_settings import SlackSettings
 from frappe_slack_connector.tasks.celebrations import (
+    MAX_ROLLBACK_DAYS,
+    OPT_OUT_FIELD,
     SLACK_SECTION_TEXT_LIMIT,
     build_anniversary_blocks,
     build_birthday_blocks,
     celebrations_channel,
+    claim_celebrations_day,
+    describe_event_day,
     get_active_employees,
     get_celebration_window,
     get_default_holiday_list,
@@ -22,6 +26,7 @@ from frappe_slack_connector.tasks.celebrations import (
 from frappe_slack_connector.tests import TEST_SLACK_CHANNEL_ID, TEST_SLACK_USER_ID, TEST_SLACK_USER_ID_2
 
 CELEBRATIONS_MODULE = "frappe_slack_connector.tasks.celebrations"
+SLACK_SETTINGS_MODULE = "frappe_slack_connector.frappe_slack_connector.doctype.slack_settings.slack_settings"
 
 # 2026-06-15 is a Monday; 2026-06-13 is the Saturday before it.
 MONDAY = date_cls(2026, 6, 15)
@@ -81,6 +86,14 @@ def _build_slack_mock(post_side_effect=None):
     if post_side_effect is not None:
         slack.slack_app.client.chat_postMessage.side_effect = post_side_effect
     return slack
+
+
+def _build_cache_mock(claimed=True):
+    """A frappe.cache stand-in whose SET NX reports `claimed` and whose make_key returns a prefixed key."""
+    cache = MagicMock()
+    cache.make_key.side_effect = lambda key: f"test|{key}"
+    cache.set.return_value = claimed
+    return cache
 
 
 def _section_text(blocks: list) -> str:
@@ -202,6 +215,7 @@ class TestCelebrationsChannel(IntegrationTestCase):
             patch(f"{CELEBRATIONS_MODULE}.get_time", return_value=time(9, 0)),
             patch(f"{CELEBRATIONS_MODULE}.frappe.enqueue", side_effect=run_inline),
             patch(f"{CELEBRATIONS_MODULE}.frappe.db.set_single_value") as mock_stamp,
+            patch(f"{CELEBRATIONS_MODULE}.frappe.cache", _build_cache_mock()),
             patch(f"{CELEBRATIONS_MODULE}.SlackIntegration", return_value=slack),
             patch(f"{CELEBRATIONS_MODULE}.get_active_employees", return_value=[]),
         ):
@@ -213,17 +227,31 @@ class TestCelebrationsChannel(IntegrationTestCase):
 
 
 class TestGetActiveEmployees(IntegrationTestCase):
-    def test_queries_only_active_employees(self):
-        """get_active_employees asks the DB for Employee rows with status Active only, so inactive employees are excluded."""
-        with patch(f"{CELEBRATIONS_MODULE}.frappe.get_all", return_value=[]) as mock_get_all:
+    def _query(self, has_opt_out_field):
+        meta = MagicMock()
+        meta.has_field.return_value = has_opt_out_field
+        with (
+            patch(f"{CELEBRATIONS_MODULE}.frappe.get_meta", return_value=meta),
+            patch(f"{CELEBRATIONS_MODULE}.frappe.get_all", return_value=[]) as mock_get_all,
+        ):
             result = get_active_employees()
         self.assertEqual(result, [])
         mock_get_all.assert_called_once()
-        args, kwargs = mock_get_all.call_args
+        return mock_get_all.call_args
+
+    def test_queries_only_active_employees(self):
+        """get_active_employees asks the DB for Employee rows with status Active only, so inactive employees are excluded."""
+        args, kwargs = self._query(has_opt_out_field=True)
         self.assertEqual(args[0], "Employee")
         self.assertEqual(kwargs["filters"], {"status": "Active"})
         for field in ("name", "employee_name", "user_id", "company", "date_of_birth", "date_of_joining"):
             self.assertIn(field, kwargs["fields"])
+        self.assertIn(OPT_OUT_FIELD, kwargs["fields"])
+
+    def test_leaves_opt_out_field_out_of_query_when_not_installed(self):
+        """When the Employee custom field is not installed yet, it is not requested so the query cannot fail."""
+        _args, kwargs = self._query(has_opt_out_field=False)
+        self.assertNotIn(OPT_OUT_FIELD, kwargs["fields"])
 
 
 class TestGetCelebrationWindow(IntegrationTestCase):
@@ -264,10 +292,11 @@ class TestGetCelebrationWindow(IntegrationTestCase):
         self.assertEqual((start, end), (SATURDAY, MONDAY))
 
     def test_window_catch_up_is_capped_at_max_rollback_days(self):
-        """A previous_run far in the past only extends the window back 31 days."""
+        """A previous_run far in the past (feature re-enabled after months) only extends the window back 7 days."""
+        self.assertEqual(MAX_ROLLBACK_DAYS, 7)
         with patch(f"{CELEBRATIONS_MODULE}.is_holiday", return_value=False):
             start, end = get_celebration_window(MONDAY, None, previous_run=date_cls(2026, 1, 1))
-        self.assertEqual((start, end), (date_cls(2026, 5, 15), MONDAY))
+        self.assertEqual((start, end), (date_cls(2026, 6, 8), MONDAY))
 
     def test_window_crosses_the_year_boundary(self):
         """A Monday 1 Jan run has a window starting on Saturday 30 Dec of the previous year."""
@@ -499,8 +528,45 @@ class TestSplitTextAndChunking(IntegrationTestCase):
         self.assertEqual(split_text("aaaa\nbbbb\ncccc", limit=9), ["aaaa\nbbbb", "cccc"])
 
     def test_split_text_hard_splits_an_overlong_line(self):
-        """A single line longer than the limit is cut into limit-sized pieces."""
+        """A single comma-free line longer than the limit is cut into limit-sized pieces."""
         self.assertEqual(split_text("x" * 25, limit=10), ["x" * 10, "x" * 10, "x" * 5])
+
+    def test_split_text_breaks_an_overlong_line_on_comma_separators(self):
+        """An over-long line of comma-separated mentions is split between items, never inside a <@U...> token."""
+        mentions = [f"<@U{i:06d}>" for i in range(50)]  # 10 chars each, 12 with ", "
+        chunks = split_text(", ".join(mentions), limit=50)
+        self.assertGreater(len(chunks), 1)
+        for chunk in chunks:
+            self.assertLessEqual(len(chunk), 50)
+            self.assertEqual(chunk.count("<@"), chunk.count(">"))
+            self.assertTrue(chunk.startswith("<@") and chunk.endswith(">"))
+        self.assertEqual(", ".join(chunks), ", ".join(mentions))
+
+    def test_split_text_does_not_cut_an_entity(self):
+        """Escaped names like 'Tom &amp; Co' in a comma list are kept whole across chunks."""
+        items = ["Tom &amp; Co"] * 6
+        chunks = split_text(", ".join(items), limit=30)
+        self.assertEqual(", ".join(chunks), ", ".join(items))
+        for chunk in chunks:
+            self.assertEqual(chunk.count("&amp;"), chunk.count("Tom"))
+
+    def test_describe_event_day_uses_weekday_for_recent_events(self):
+        """Events up to 6 days before the run are described by weekday name."""
+        self.assertEqual(describe_event_day(SATURDAY, MONDAY), "Saturday")
+        self.assertEqual(describe_event_day(date_cls(2026, 6, 9), MONDAY), "Tuesday")
+
+    def test_describe_event_day_uses_date_for_older_events(self):
+        """Events more than 6 days before the run are described by a short date, since a weekday would be ambiguous."""
+        self.assertEqual(describe_event_day(date_cls(2026, 6, 8), MONDAY), "Jun 8")
+        self.assertEqual(describe_event_day(date_cls(2026, 10, 1), date_cls(2026, 10, 9)), "Oct 1")
+
+    def test_default_template_shows_date_for_events_older_than_a_week(self):
+        """A caught-up event from 7 days ago renders '(for Jun 8)' rather than a weekday name."""
+        employees = [
+            {"name": "Alice Example", "mention": "Alice Example", "company": "Acme Inc", "date": date_cls(2026, 6, 8)}
+        ]
+        text = _section_text(build_birthday_blocks(employees, MONDAY))
+        self.assertIn("(for Jun 8)", text)
 
     def test_long_render_is_chunked_into_multiple_sections(self):
         """A rendered message over Slack's 3000-char section limit becomes several section blocks, each within the limit."""
@@ -535,11 +601,13 @@ class TestSendCelebrations(IntegrationTestCase):
         date="2026-06-15",
         previous_run=None,
         slack_class=None,
+        cache=None,
     ):
         slack = slack or _build_slack_mock()
         slack_class = slack_class or MagicMock(return_value=slack)
         with (
             patch(f"{CELEBRATIONS_MODULE}.frappe.get_single", return_value=settings),
+            patch(f"{CELEBRATIONS_MODULE}.frappe.cache", cache or _build_cache_mock()),
             patch(f"{CELEBRATIONS_MODULE}.SlackIntegration", slack_class),
             patch(f"{CELEBRATIONS_MODULE}.get_active_employees", return_value=employees),
             patch(f"{CELEBRATIONS_MODULE}.get_slack_user_ids", return_value=slack_ids or {}),
@@ -557,6 +625,39 @@ class TestSendCelebrations(IntegrationTestCase):
         )
         slack.slack_app.client.chat_postMessage.assert_not_called()
         slack_class.assert_not_called()
+
+    def test_claims_the_day_in_redis_before_posting(self):
+        """send_celebrations claims the run date with SET NX and a 2-day TTL before doing anything else."""
+        cache = _build_cache_mock(claimed=True)
+        employee = _build_employee(date_of_birth="1990-06-15")
+        settings = _build_settings_mock(send_anniversary_updates=0)
+        slack = self._run(settings, [employee], cache=cache)
+        cache.make_key.assert_called_once_with("fsc_celebrations_posted::2026-06-15")
+        cache.set.assert_called_once_with("test|fsc_celebrations_posted::2026-06-15", 1, nx=True, ex=2 * 86400)
+        slack.slack_app.client.chat_postMessage.assert_called_once()
+
+    def test_second_job_for_the_same_date_does_not_post(self):
+        """If the day was already claimed (duplicate job for the same date), nothing is posted and an info line is logged."""
+        cache = _build_cache_mock(claimed=False)
+        employee = _build_employee(date_of_birth="1990-06-15")
+        settings = _build_settings_mock(send_anniversary_updates=0)
+        slack_class = MagicMock(return_value=_build_slack_mock())
+        with (
+            patch(f"{CELEBRATIONS_MODULE}.frappe.logger") as mock_logger,
+            patch(f"{CELEBRATIONS_MODULE}.generate_error_log") as mock_log,
+        ):
+            slack = self._run(settings, [employee], cache=cache, slack_class=slack_class)
+        slack.slack_app.client.chat_postMessage.assert_not_called()
+        slack_class.assert_not_called()
+        mock_logger.return_value.info.assert_called_once()
+        mock_log.assert_not_called()
+
+    def test_claim_celebrations_day_returns_false_when_key_exists(self):
+        """claim_celebrations_day maps the redis SET NX result to a bool."""
+        with patch(f"{CELEBRATIONS_MODULE}.frappe.cache", _build_cache_mock(claimed=None)):
+            self.assertFalse(claim_celebrations_day(MONDAY))
+        with patch(f"{CELEBRATIONS_MODULE}.frappe.cache", _build_cache_mock(claimed=True)):
+            self.assertTrue(claim_celebrations_day(MONDAY))
 
     def test_inactive_employees_are_not_announced(self):
         """An inactive employee with a birthday today is not announced: the Employee query filters on status=Active."""
@@ -576,6 +677,7 @@ class TestSendCelebrations(IntegrationTestCase):
         slack = _build_slack_mock()
         with (
             patch(f"{CELEBRATIONS_MODULE}.frappe.get_single", return_value=settings),
+            patch(f"{CELEBRATIONS_MODULE}.frappe.cache", _build_cache_mock()),
             patch(f"{CELEBRATIONS_MODULE}.SlackIntegration", return_value=slack),
             patch(f"{CELEBRATIONS_MODULE}.frappe.get_all", side_effect=fake_get_all),
             patch(f"{CELEBRATIONS_MODULE}.get_default_holiday_list", return_value=None),
@@ -788,13 +890,76 @@ class TestSendCelebrations(IntegrationTestCase):
 
 
 class TestSlackSettingsTemplateValidation(IntegrationTestCase):
+    def test_template_fields_are_code_fields(self):
+        """Both template fields are Code (Jinja) fields, which are exempt from the HTML sanitizer that would break Jinja."""
+        meta = frappe.get_meta("Slack Settings")
+        for fieldname in ("birthday_message_template", "anniversary_message_template"):
+            field = meta.get_field(fieldname)
+            self.assertEqual(field.fieldtype, "Code", fieldname)
+            self.assertEqual(field.options, "Jinja", fieldname)
+
     def test_rejects_template_with_jinja_syntax_error(self):
-        """Saving Slack Settings with a syntactically invalid celebrations template raises a ValidationError."""
+        """validate_celebration_templates raises a ValidationError for a syntactically invalid template."""
         doc = frappe._dict(birthday_message_template="{% if %}", anniversary_message_template=None)
         with self.assertRaises(frappe.ValidationError):
             SlackSettings.validate_celebration_templates(doc)
+
+    def test_real_document_validate_rejects_bad_template(self):
+        """doc.validate() on the actual Slack Settings document raises for a bad anniversary template."""
+        doc = frappe.get_single("Slack Settings")
+        doc.anniversary_message_template = "{{ employees"
+        with self.assertRaises(frappe.ValidationError):
+            doc.validate()
 
     def test_accepts_valid_and_empty_templates(self):
         """Valid Jinja and empty templates pass validation."""
         doc = frappe._dict(birthday_message_template="Hi {{ employees | length }}", anniversary_message_template="")
         SlackSettings.validate_celebration_templates(doc)
+
+
+class TestSlackSettingsResetOnEnable(IntegrationTestCase):
+    def _doc(self, *, birthday, anniversary, before, last=None):
+        doc = frappe._dict(
+            send_birthday_updates=birthday,
+            send_anniversary_updates=anniversary,
+            last_celebrations_date=last,
+            get_doc_before_save=lambda: before,
+        )
+        return doc
+
+    def test_sets_last_date_to_yesterday_when_birthday_updates_turned_on(self):
+        """Turning birthday updates on resets last_celebrations_date to yesterday so only today is announced."""
+        before = frappe._dict(send_birthday_updates=0, send_anniversary_updates=0)
+        doc = self._doc(birthday=1, anniversary=0, before=before, last=date_cls(2026, 1, 1))
+        with patch(f"{SLACK_SETTINGS_MODULE}.nowdate", return_value="2026-06-15"):
+            SlackSettings.reset_celebrations_date_on_enable(doc)
+        self.assertEqual(frappe.utils.getdate(doc.last_celebrations_date), date_cls(2026, 6, 14))
+
+    def test_sets_last_date_when_anniversary_updates_turned_on(self):
+        """Turning anniversary updates on (birthday already on) also resets the date."""
+        before = frappe._dict(send_birthday_updates=1, send_anniversary_updates=0)
+        doc = self._doc(birthday=1, anniversary=1, before=before, last=date_cls(2026, 1, 1))
+        with patch(f"{SLACK_SETTINGS_MODULE}.nowdate", return_value="2026-06-15"):
+            SlackSettings.reset_celebrations_date_on_enable(doc)
+        self.assertEqual(frappe.utils.getdate(doc.last_celebrations_date), date_cls(2026, 6, 14))
+
+    def test_leaves_last_date_alone_when_toggles_unchanged(self):
+        """Saving with the toggles unchanged (e.g. editing a template) keeps last_celebrations_date."""
+        before = frappe._dict(send_birthday_updates=1, send_anniversary_updates=1)
+        doc = self._doc(birthday=1, anniversary=1, before=before, last=date_cls(2026, 6, 10))
+        SlackSettings.reset_celebrations_date_on_enable(doc)
+        self.assertEqual(doc.last_celebrations_date, date_cls(2026, 6, 10))
+
+    def test_leaves_last_date_alone_when_turned_off(self):
+        """Turning a toggle off does not touch last_celebrations_date."""
+        before = frappe._dict(send_birthday_updates=1, send_anniversary_updates=0)
+        doc = self._doc(birthday=0, anniversary=0, before=before, last=date_cls(2026, 6, 10))
+        SlackSettings.reset_celebrations_date_on_enable(doc)
+        self.assertEqual(doc.last_celebrations_date, date_cls(2026, 6, 10))
+
+    def test_treats_missing_doc_before_save_as_off(self):
+        """Without a doc_before_save (first save), an enabled toggle counts as newly enabled."""
+        doc = self._doc(birthday=1, anniversary=0, before=None)
+        with patch(f"{SLACK_SETTINGS_MODULE}.nowdate", return_value="2026-06-15"):
+            SlackSettings.reset_celebrations_date_on_enable(doc)
+        self.assertEqual(frappe.utils.getdate(doc.last_celebrations_date), date_cls(2026, 6, 14))

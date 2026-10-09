@@ -35,10 +35,12 @@ class TestGetDefaultHolidayList(IntegrationTestCase):
     def test_returns_the_default_company_holiday_list(self):
         """get_default_holiday_list reads Company.default_holiday_list of the global default company."""
         with (
-            patch(f"{EMPLOYEE_DB_MODULE}.frappe.defaults.get_global_default", return_value="Acme"),
+            patch(f"{EMPLOYEE_DB_MODULE}.frappe.defaults.get_global_default", return_value="Acme") as mock_default,
             patch(f"{EMPLOYEE_DB_MODULE}.frappe.get_cached_value", return_value="Acme Holidays") as mock_cached,
         ):
             self.assertEqual(get_default_holiday_list(), "Acme Holidays")
+        # Global Defaults saves its default_company field under the "company" defaults key.
+        mock_default.assert_called_once_with("company")
         mock_cached.assert_called_once_with("Company", "Acme", "default_holiday_list")
 
     def test_returns_none_without_a_default_company(self):

@@ -64,8 +64,8 @@ class TestAttendanceChannel(IntegrationTestCase):
             attendance_channel()
         mock_send.assert_not_called()
 
-    def test_returns_silently_when_today_is_holiday(self):
-        """attendance_channel returns silently when is_company_holiday returns True."""
+    def test_returns_silently_on_company_holiday_when_nobody_is_on_leave(self):
+        """On a company holiday with nobody left on leave (everyone's own calendar has the day off) nothing is posted and the date is not stamped."""
         settings = _build_settings_mock()
         with (
             patch(f"{ATTENDANCE_MODULE}.frappe.get_single", return_value=settings),
@@ -74,11 +74,54 @@ class TestAttendanceChannel(IntegrationTestCase):
                 f"{ATTENDANCE_MODULE}.frappe.utils.now_datetime",
                 return_value=MagicMock(time=MagicMock(return_value=time(10, 0))),
             ),
-            patch(f"{ATTENDANCE_MODULE}.is_company_holiday", return_value=True),
+            patch(f"{ATTENDANCE_MODULE}.get_time", return_value=time(9, 0)),
+            patch(f"{ATTENDANCE_MODULE}.get_employees_on_leave", return_value=[]),
+            patch(f"{ATTENDANCE_MODULE}.is_company_holiday", return_value=True) as mock_holiday,
             patch(f"{ATTENDANCE_MODULE}.send_notification") as mock_send,
         ):
             attendance_channel()
+        mock_holiday.assert_called_once_with("2026-06-15")
         mock_send.assert_not_called()
+        settings.save.assert_not_called()
+
+    def test_posts_on_company_holiday_when_someone_on_another_calendar_is_on_leave(self):
+        """On a company holiday the summary is still posted when employees on another holiday list are on leave; the fetched rows are passed to send_notification."""
+        settings = _build_settings_mock()
+        rows = [frappe._dict(employee="EMP-SUPPORT")]
+        with (
+            patch(f"{ATTENDANCE_MODULE}.frappe.get_single", return_value=settings),
+            patch(f"{ATTENDANCE_MODULE}.frappe.utils.nowdate", return_value="2026-06-15"),
+            patch(
+                f"{ATTENDANCE_MODULE}.frappe.utils.now_datetime",
+                return_value=MagicMock(time=MagicMock(return_value=time(10, 0))),
+            ),
+            patch(f"{ATTENDANCE_MODULE}.get_time", return_value=time(9, 0)),
+            patch(f"{ATTENDANCE_MODULE}.get_employees_on_leave", return_value=rows),
+            patch(f"{ATTENDANCE_MODULE}.is_company_holiday", return_value=True),
+            patch(f"{ATTENDANCE_MODULE}.send_notification", return_value="1700000000.000999") as mock_send,
+        ):
+            attendance_channel()
+        mock_send.assert_called_once_with("Employees on Leave", rows)
+        self.assertEqual(settings.last_attendance_date, "2026-06-15")
+        settings.save.assert_called_once_with(ignore_permissions=True)
+
+    def test_posts_on_a_working_day_even_when_nobody_is_on_leave(self):
+        """On a normal working day the summary is posted even with nobody on leave (unchanged behaviour)."""
+        settings = _build_settings_mock()
+        with (
+            patch(f"{ATTENDANCE_MODULE}.frappe.get_single", return_value=settings),
+            patch(f"{ATTENDANCE_MODULE}.frappe.utils.nowdate", return_value="2026-06-15"),
+            patch(
+                f"{ATTENDANCE_MODULE}.frappe.utils.now_datetime",
+                return_value=MagicMock(time=MagicMock(return_value=time(10, 0))),
+            ),
+            patch(f"{ATTENDANCE_MODULE}.get_time", return_value=time(9, 0)),
+            patch(f"{ATTENDANCE_MODULE}.get_employees_on_leave", return_value=[]),
+            patch(f"{ATTENDANCE_MODULE}.is_company_holiday", return_value=False),
+            patch(f"{ATTENDANCE_MODULE}.send_notification", return_value="1700000000.000999") as mock_send,
+        ):
+            attendance_channel()
+        mock_send.assert_called_once_with("Employees on Leave", [])
 
     def test_returns_silently_when_current_time_before_attendance_time(self):
         """attendance_channel returns silently when the current time is before Slack Settings.attendance_time."""
@@ -124,6 +167,7 @@ class TestAttendanceChannel(IntegrationTestCase):
                 f"{ATTENDANCE_MODULE}.frappe.utils.now_datetime",
                 return_value=MagicMock(time=MagicMock(return_value=time(10, 0))),
             ),
+            patch(f"{ATTENDANCE_MODULE}.get_employees_on_leave", return_value=[]),
             patch(f"{ATTENDANCE_MODULE}.is_company_holiday", return_value=False),
             patch(f"{ATTENDANCE_MODULE}.get_time", return_value=time(9, 0)),
             patch(

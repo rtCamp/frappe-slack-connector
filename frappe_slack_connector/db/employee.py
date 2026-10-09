@@ -117,7 +117,8 @@ def get_default_holiday_list() -> str | None:
     Holiday list of the default company, which the attendance summary
     treats as the company-wide calendar
     """
-    company = frappe.defaults.get_global_default("default_company")
+    # Global Defaults stores its default_company field under the "company" key
+    company = frappe.defaults.get_global_default("company")
     if not company:
         return None
     return frappe.get_cached_value("Company", company, "default_holiday_list")

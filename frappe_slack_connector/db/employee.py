@@ -132,3 +132,34 @@ def is_company_holiday(date: str) -> bool:
     if not holiday_list:
         return False
     return is_holiday(holiday_list, date)
+
+
+def get_employees_on_holiday(employees: list[str], date: str) -> set[str]:
+    """
+    Subset of ``employees`` for whom ``date`` is a holiday on their own
+    holiday list (falling back to their company's). The Holiday rows for
+    every distinct list are fetched in one query
+    """
+    if not employees:
+        return set()
+
+    holiday_list_of = {}
+    for employee in employees:
+        holiday_list = get_holiday_list_for_employee(employee, raise_exception=False, as_on=date)
+        if holiday_list:
+            holiday_list_of[employee] = holiday_list
+
+    if not holiday_list_of:
+        return set()
+
+    lists_with_holiday = set(
+        frappe.get_all(
+            "Holiday",
+            filters={
+                "parent": ("in", list(set(holiday_list_of.values()))),
+                "holiday_date": date,
+            },
+            pluck="parent",
+        )
+    )
+    return {employee for employee, holiday_list in holiday_list_of.items() if holiday_list in lists_with_holiday}

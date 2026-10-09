@@ -1,10 +1,10 @@
 from datetime import datetime
 
 import frappe
-from erpnext.setup.doctype.holiday_list.holiday_list import is_holiday
 from frappe import _
 from frappe.utils import get_time, getdate, today
 
+from frappe_slack_connector.db.employee import is_company_holiday
 from frappe_slack_connector.db.leave_application import (
     custom_fields_exist,
     get_employees_on_leave,
@@ -12,28 +12,6 @@ from frappe_slack_connector.db.leave_application import (
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
 from frappe_slack_connector.slack.app import SlackIntegration
-
-
-def get_default_holiday_list() -> str | None:
-    """
-    Holiday list of the default company, which the attendance summary
-    treats as the company-wide calendar
-    """
-    company = frappe.defaults.get_global_default("default_company")
-    if not company:
-        return None
-    return frappe.get_cached_value("Company", company, "default_holiday_list")
-
-
-def is_company_holiday(date: str) -> bool:
-    """
-    Whether the date is a holiday in the default company's holiday list.
-    Without a holiday list only weekends count as non-working days
-    """
-    holiday_list = get_default_holiday_list()
-    if not holiday_list:
-        return False
-    return is_holiday(holiday_list, date)
 
 
 def attendance_channel() -> None:

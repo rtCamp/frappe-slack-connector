@@ -1,5 +1,6 @@
 import frappe
 from erpnext.setup.doctype.employee.employee import get_holiday_list_for_employee
+from erpnext.setup.doctype.holiday_list.holiday_list import is_holiday
 from frappe.utils import datetime
 
 from frappe_slack_connector.helpers.error import generate_error_log
@@ -86,7 +87,7 @@ def check_if_date_is_holiday(date: datetime.date, employee: str) -> bool:
     Check if the given date is a non-working day for the given employee
     """
     holiday_list = get_holiday_list_for_employee(employee, raise_exception=False, as_on=date)
-    is_holiday = frappe.db.exists(
+    has_holiday = frappe.db.exists(
         "Holiday",
         {
             "holiday_date": date,
@@ -108,4 +109,26 @@ def check_if_date_is_holiday(date: datetime.date, employee: str) -> bool:
             ),
         },
     )
-    return any((is_holiday, is_leave))
+    return any((has_holiday, is_leave))
+
+
+def get_default_holiday_list() -> str | None:
+    """
+    Holiday list of the default company, which the attendance summary
+    treats as the company-wide calendar
+    """
+    company = frappe.defaults.get_global_default("default_company")
+    if not company:
+        return None
+    return frappe.get_cached_value("Company", company, "default_holiday_list")
+
+
+def is_company_holiday(date: str) -> bool:
+    """
+    Whether the date is a holiday in the default company's holiday list.
+    Without a holiday list only weekends count as non-working days
+    """
+    holiday_list = get_default_holiday_list()
+    if not holiday_list:
+        return False
+    return is_holiday(holiday_list, date)

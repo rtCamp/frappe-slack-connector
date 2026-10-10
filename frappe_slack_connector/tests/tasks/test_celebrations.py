@@ -244,7 +244,7 @@ class TestSendCelebrations(IntegrationTestCase):
         self.assertEqual(call.kwargs["blocks"][0]["text"]["text"], ":tada: Work Anniversaries")
         self.assertEqual(
             self._section_text(call),
-            ":tada: Happy work anniversary! :clap:\n*Example Co*\n• Alice Example - 3 years",
+            "*Example Co*\n• Alice Example - 3 years",
         )
 
     def test_anniversary_message_names_the_company_once_per_group(self):
@@ -255,9 +255,7 @@ class TestSendCelebrations(IntegrationTestCase):
         mock_slack, _ = self._run(_build_settings_mock(), anniversaries=[alice, bob, carol])
         self.assertEqual(
             self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args),
-            ":tada: Happy work anniversary! :clap:\n"
-            "*Example Co*\n• Alice Example - 3 years\n• Bob Example - 5 years\n"
-            "*Other Co*\n• Carol Example - 1 year",
+            "*Example Co*\n• Alice Example - 3 years\n• Bob Example - 5 years\n*Other Co*\n• Carol Example - 1 year",
         )
 
     def test_anniversary_message_uses_singular_year(self):
@@ -300,7 +298,7 @@ class TestSendCelebrations(IntegrationTestCase):
         self.assertIn("FSC Gone", mock_log.call_args.kwargs["message"])
         self.assertEqual(
             self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args),
-            ":birthday: Happy birthday! :tada:\n• Alice",
+            "• Alice",
         )
 
     def test_uses_default_and_logs_when_linked_template_has_use_html_off(self):
@@ -313,7 +311,7 @@ class TestSendCelebrations(IntegrationTestCase):
         )
         mock_log.assert_called_once()
         self.assertIn(
-            "Happy work anniversary! :clap:\n*Example Co*\n• Alice",
+            "*Example Co*\n• Alice",
             self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args),
         )
 
@@ -326,7 +324,7 @@ class TestSendCelebrations(IntegrationTestCase):
         mock_log.assert_called_once()
         self.assertEqual(
             self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args),
-            ":birthday: Happy birthday! :tada:\n• Alice",
+            "• Alice",
         )
 
     def test_does_not_look_up_email_template_when_nothing_is_linked(self):
@@ -335,7 +333,7 @@ class TestSendCelebrations(IntegrationTestCase):
         mock_log.assert_not_called()
         self.assertEqual(
             self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args),
-            ":birthday: Happy birthday! :tada:\n• Alice",
+            "• Alice",
         )
 
     def test_falls_back_to_attendance_channel(self):

@@ -13,15 +13,12 @@ from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.str_utils import escape_slack_text
 from frappe_slack_connector.slack.app import SlackIntegration
 
-# Default messages: a greeting line, then one bullet per person. The
-# anniversary list is grouped by company, each group under its company name
-DEFAULT_BIRTHDAY_TEMPLATE = (
-    ":birthday: Happy birthday! :tada:\n"
-    "{% for e in employees %}• {{ e.mention }}{% if not loop.last %}\n{% endif %}{% endfor %}"
-)
+# Default messages: one bullet per person (the header block above the
+# message carries the greeting). The anniversary list is grouped by company,
+# each group under its company name
+DEFAULT_BIRTHDAY_TEMPLATE = "{% for e in employees %}• {{ e.mention }}{% if not loop.last %}\n{% endif %}{% endfor %}"
 
 DEFAULT_ANNIVERSARY_TEMPLATE = (
-    ":tada: Happy work anniversary! :clap:\n"
     "{% for company, people in employees | groupby('company') %}"
     "*{{ company }}*\n"
     "{% for e in people %}• {{ e.mention }} - {{ e.years }} year{{ '' if e.years == 1 else 's' }}"

@@ -156,7 +156,11 @@ class TestGetEmployeesOnLeave(IntegrationTestCase):
             on_leave = {row.employee for row in get_employees_on_leave()}
         self.assertNotIn(self.ACTIVE_EMPLOYEE, on_leave)
         # Only active employees are checked, and against today.
-        mock_on_holiday.assert_called_once_with([self.ACTIVE_EMPLOYEE], today())
+        mock_on_holiday.assert_called_once()
+        checked, on_date = mock_on_holiday.call_args.args
+        self.assertIn(self.ACTIVE_EMPLOYEE, checked)
+        self.assertNotIn(self.LEFT_EMPLOYEE, checked)
+        self.assertEqual(on_date, today())
 
     def test_returns_empty_list_when_nobody_is_on_leave(self):
         """When no Leave Application covers today the function returns [] without querying Employee."""

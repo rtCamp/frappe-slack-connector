@@ -156,19 +156,19 @@ doc_events = {
             "frappe_slack_connector.override.leave_application.restore_attendance_reply_ts",
         ],
         "on_update": [
-            "frappe_slack_connector.override.leave_application.on_update_remove_attendance_reply",
+            "frappe_slack_connector.override.leave_application.on_update_withdraw_attendance_reply",
         ],
         "on_update_after_submit": [
-            "frappe_slack_connector.override.leave_application.on_update_remove_attendance_reply",
+            "frappe_slack_connector.override.leave_application.on_update_withdraw_attendance_reply",
         ],
         "on_cancel": [
-            "frappe_slack_connector.override.leave_application.on_update_remove_attendance_reply",
+            "frappe_slack_connector.override.leave_application.on_update_withdraw_attendance_reply",
         ],
         "on_discard": [
-            "frappe_slack_connector.override.leave_application.on_update_remove_attendance_reply",
+            "frappe_slack_connector.override.leave_application.on_update_withdraw_attendance_reply",
         ],
         "on_trash": [
-            "frappe_slack_connector.override.leave_application.on_trash_remove_attendance_reply",
+            "frappe_slack_connector.override.leave_application.on_trash_withdraw_attendance_reply",
         ],
     },
 }

@@ -124,6 +124,20 @@ def format_leave_submission_blocks(
     return blocks
 
 
+def _same_day_reply_name(slack: SlackIntegration, employee: str, employee_name: str, mention_user) -> str:
+    """Mention when the employee has a Slack id and mentions are on, else the escaped name"""
+    user_slack = slack.get_slack_user_id(employee_id=employee)
+    return f"<@{user_slack}>" if user_slack and mention_user else escape_slack_text(employee_name)
+
+
+def _same_day_reply_text(name: str, day_period: str) -> str:
+    return f"{name} is on leave today. _({day_period})_"
+
+
+def _same_day_reply_block(text: str) -> dict:
+    return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
+
+
 def post_same_day_leave_to_attendance_thread(doc: Document, slack: SlackIntegration | None = None) -> str | None:
     """
     Reply in today's attendance summary thread when the leave covers today
@@ -162,21 +176,12 @@ def post_same_day_leave_to_attendance_thread(doc: Document, slack: SlackIntegrat
         return None
 
     slack = slack or SlackIntegration()
-    user_slack = slack.get_slack_user_id(employee_id=doc.employee)
-    name = f"<@{user_slack}>" if user_slack and slack_settings.mention_user else escape_slack_text(doc.employee_name)
+    name = _same_day_reply_name(slack, doc.employee, doc.employee_name, slack_settings.mention_user)
     day_period = get_leave_type(doc, on_date=today)
 
     response = slack.slack_app.client.chat_postMessage(
         channel=slack.SLACK_CHANNEL_ID,
-        blocks=[
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"{name} is on leave today. _({day_period})_",
-                },
-            },
-        ],
+        blocks=[_same_day_reply_block(_same_day_reply_text(name, day_period))],
         thread_ts=slack_settings.last_attendance_msg_ts,
         reply_broadcast=True,
     )
@@ -276,41 +281,47 @@ def restore_attendance_reply_ts(doc: Document, method=None):
     )
 
 
-def _enqueue_attendance_reply_removal(doc: Document):
+def _enqueue_attendance_reply_withdrawal(doc: Document, label: str):
     """
-    Enqueue the removal of the attendance thread reply stored on the leave
-    if it was posted today. A reply from an earlier day is history and is
-    left alone. Never raises: a bad ts or a queue outage must not block the
-    user's action
+    Enqueue marking the attendance thread reply stored on the leave as
+    withdrawn, if it was posted today. A reply from an earlier day is history
+    and is left alone. Never raises: a bad ts or a queue outage must not
+    block the user's action
     """
     try:
         # Read the stored value, never the one on the doc (see
-        # restore_attendance_reply_ts), and hand it to the job so the job
-        # does not re-read a row that may be gone by then (on_trash)
+        # restore_attendance_reply_ts), and hand everything the job needs to
+        # it so it does not re-read a row that may be gone by then (on_trash)
         reply_ts = frappe.db.get_value("Leave Application", doc.name, ATTENDANCE_REPLY_TS_FIELD)
         if not reply_ts or not _reply_posted_today(reply_ts):
             return
 
-        # Only delete once the status change is committed: on_update runs
+        # Only edit once the status change is committed: on_update runs
         # before on_submit, which can still throw and roll back
         frappe.enqueue(
-            remove_attendance_reply_bg,
+            withdraw_attendance_reply_bg,
             queue="short",
             enqueue_after_commit=True,
             leave_name=doc.name,
             reply_ts=reply_ts,
+            employee=doc.employee,
+            employee_name=doc.employee_name,
+            day_period=get_leave_type(doc, on_date=getdate(frappe.utils.today())),
+            label=label,
         )
     except Exception as e:
         generate_error_log(
-            title="Error scheduling attendance thread reply removal",
+            title="Error scheduling attendance thread reply withdrawal",
             exception=e,
         )
 
 
-def on_update_remove_attendance_reply(doc: Document, method=None):
+def on_update_withdraw_attendance_reply(doc: Document, method=None):
     """
-    Remove the same-day attendance thread reply when the leave is rejected
-    or cancelled on the day the reply was posted
+    Strike through the same-day attendance thread reply when the leave is
+    rejected or cancelled on the day the reply was posted. The reply stays
+    in the thread as history: "(Rejected)" when the approver turned it
+    down, "(Withdrawn)" when the applicant cancelled it
 
     Wired to ``on_update``, ``on_update_after_submit``, ``on_cancel`` and
     ``on_discard``: Frappe only runs ``on_cancel`` for a cancel, HRMS sets
@@ -320,42 +331,60 @@ def on_update_remove_attendance_reply(doc: Document, method=None):
     if not doc.has_value_changed("status") or doc.status not in ("Rejected", "Cancelled"):
         return
 
-    _enqueue_attendance_reply_removal(doc)
+    _enqueue_attendance_reply_withdrawal(doc, "Rejected" if doc.status == "Rejected" else "Withdrawn")
 
 
-def on_trash_remove_attendance_reply(doc: Document, method=None):
+def on_trash_withdraw_attendance_reply(doc: Document, method=None):
     """
-    Remove the same-day attendance thread reply when the leave is deleted
-    (deleting a draft runs neither ``on_update`` nor ``on_cancel``)
+    Strike through the same-day attendance thread reply when the leave is
+    deleted (deleting a draft runs neither ``on_update`` nor ``on_cancel``)
     """
-    _enqueue_attendance_reply_removal(doc)
+    _enqueue_attendance_reply_withdrawal(doc, "Withdrawn")
 
 
-def remove_attendance_reply_bg(leave_name: str, reply_ts: str):
+def withdraw_attendance_reply_bg(
+    leave_name: str,
+    reply_ts: str,
+    *,
+    employee: str,
+    employee_name: str,
+    day_period: str,
+    label: str,
+):
     """
-    Delete the attendance thread reply ``reply_ts`` posted for the leave
-    ``leave_name`` and clear the stored ts. Deleting a broadcast reply
-    removes it from the thread and the channel
+    Edit the attendance thread reply ``reply_ts`` posted for the leave
+    ``leave_name`` so it reads struck through with ``label`` appended, and
+    clear the stored ts. Nothing is deleted: the thread keeps a record of
+    the leave that was announced and then taken back. Editing a broadcast
+    reply changes it in the thread and in the channel
     """
     if not reply_ts:
         return
 
-    # The bot must only ever delete its own thread replies, never the
-    # summary message the thread hangs off
+    # The bot must only ever edit its own thread replies, never the summary
+    # message the thread hangs off
     if reply_ts == frappe.db.get_single_value("Slack Settings", "last_attendance_msg_ts"):
         generate_error_log(
-            title="Refused to delete the attendance summary",
+            title="Refused to edit the attendance summary",
             message=f"Leave Application {leave_name} stores the summary ts {reply_ts} as its reply ts",
         )
         return
 
     try:
         slack = SlackIntegration()
-        slack.slack_app.client.chat_delete(channel=slack.SLACK_CHANNEL_ID, ts=reply_ts)
+        mention_user = frappe.db.get_single_value("Slack Settings", "mention_user")
+        name = _same_day_reply_name(slack, employee, employee_name, mention_user)
+        text = f"~{_same_day_reply_text(name, day_period)}~ ({label})"
+        slack.slack_app.client.chat_update(
+            channel=slack.SLACK_CHANNEL_ID,
+            ts=reply_ts,
+            blocks=[_same_day_reply_block(text)],
+            text=f"{employee_name} is on leave today ({label})",
+        )
     except Exception as e:
         # The reply may already be gone (deleted by hand); log and move on
         generate_error_log(
-            title="Error deleting attendance thread reply",
+            title="Error marking attendance thread reply as withdrawn",
             exception=e,
         )
 

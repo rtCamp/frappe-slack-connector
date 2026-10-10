@@ -23,9 +23,12 @@ def truncate_text(text, limit=SlackIntegration.SLACK_CHAR_LIMIT):
     return text[:limit]
 
 
-def escape_slack_mrkdwn(text: str) -> str:
+def escape_slack_text(text) -> str:
     """
-    Escape the characters Slack treats as control sequences in mrkdwn text
-    (``&``, ``<`` and ``>``) so user-supplied text is shown verbatim
+    Escape the three characters Slack treats as control characters in
+    message text (&, <, >) so user-supplied values such as names cannot be
+    read as mentions or links. Returns an empty string for None.
     """
-    return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    if not text:
+        return ""
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")

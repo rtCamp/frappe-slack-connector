@@ -1,3 +1,5 @@
+import hashlib
+import json
 from datetime import datetime
 
 import frappe
@@ -47,10 +49,13 @@ def attendance_channel() -> None:
     # Send the attendance summary to the Slack channel
     message_ts = send_notification(get_attendance_title(slack_settings))
 
-    # Update the last attendance date
-    slack_settings.last_attendance_date = frappe.utils.nowdate()
-    slack_settings.last_attendance_msg_ts = message_ts
-    slack_settings.save(ignore_permissions=True)
+    # Stamp the day with a direct write: a full save() would write back every
+    # column of the stale in-memory doc, including the content hash the post
+    # just stored and any field another process changed meanwhile
+    frappe.db.set_single_value(
+        "Slack Settings",
+        {"last_attendance_date": frappe.utils.nowdate(), "last_attendance_msg_ts": message_ts},
+    )
 
 
 def get_attendance_title(slack_settings) -> str:
@@ -59,6 +64,37 @@ def get_attendance_title(slack_settings) -> str:
     when Slack Settings has no leave notification subject
     """
     return slack_settings.leave_notification_subject or "Employees on Leave"
+
+
+def updated_at_context_block(updated_at: str) -> dict:
+    """
+    Trailing context block that marks an in-place edit; editing a message
+    does not notify anyone, so this is how readers can tell it changed
+    """
+    return {
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": f"_Updated at {updated_at}_"}],
+    }
+
+
+def attendance_blocks_hash(blocks: list) -> str:
+    """
+    Fingerprint of the summary content, used to skip a Slack edit that
+    would change nothing (for example the later jobs of a bulk reject, each
+    of which rebuilds the same list). The "Updated at" block is left out so
+    the time of the edit does not count as a change
+    """
+    content = [block for block in blocks if not _is_updated_at_block(block)]
+    return hashlib.sha256(json.dumps(content, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _is_updated_at_block(block: dict) -> bool:
+    elements = block.get("elements") or []
+    return (
+        block.get("type") == "context"
+        and len(elements) == 1
+        and str(elements[0].get("text", "")).startswith("_Updated at ")
+    )
 
 
 def build_attendance_blocks(attendance_title: str, *, updated_at: str | None = None) -> list:
@@ -127,17 +163,7 @@ def build_attendance_blocks(attendance_title: str, *, updated_at: str | None = N
     )
 
     if updated_at:
-        blocks.append(
-            {
-                "type": "context",
-                "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": f"_Updated at {updated_at}_",
-                    }
-                ],
-            }
-        )
+        blocks.append(updated_at_context_block(updated_at))
 
     return blocks
 
@@ -155,7 +181,6 @@ def send_notification(attendance_title: str) -> str | None:
             channel=slack.SLACK_CHANNEL_ID,
             blocks=blocks,
         )
-        return message["ts"]
     except Exception as e:
         generate_error_log(
             title=_("Error posting message to Slack"),
@@ -164,6 +189,12 @@ def send_notification(attendance_title: str) -> str | None:
             msgprint=True,
             realtime=True,
         )
+        return None
+
+    # Remember what was posted so a later refresh with the same content can
+    # skip the edit
+    frappe.db.set_single_value("Slack Settings", "last_attendance_blocks_hash", attendance_blocks_hash(blocks))
+    return message["ts"]
 
 
 def update_attendance_summary() -> None:
@@ -176,9 +207,13 @@ def update_attendance_summary() -> None:
     Does nothing when today's summary has not been posted yet: the morning
     post will pick up the current state on its own.
 
-    The whole job (read, build, edit) runs under a site-level file lock so
-    that concurrent refreshes (for example a bulk reject queues one job per
-    leave) cannot interleave and let an older read overwrite a newer edit.
+    The whole job (read, build, compare, edit) runs under a site-level file
+    lock so that concurrent refreshes (for example a bulk reject queues one
+    job per leave) cannot interleave and let an older read overwrite a newer
+    edit. Within the lock the rebuilt content is compared with what was last
+    posted or edited; when it is the same (the earlier job of that burst
+    already caught up with every change) the Slack call is skipped, and the
+    stored fingerprint is only advanced after Slack accepted the edit.
     """
     with filelock(ATTENDANCE_UPDATE_LOCK, timeout=60):
         slack_settings = frappe.get_single("Slack Settings")
@@ -190,12 +225,14 @@ def update_attendance_summary() -> None:
         ):
             return
 
-        slack = SlackIntegration()
-        blocks = build_attendance_blocks(
-            get_attendance_title(slack_settings),
-            updated_at=frappe.utils.now_datetime().strftime("%H:%M"),
-        )
+        blocks = build_attendance_blocks(get_attendance_title(slack_settings))
+        content_hash = attendance_blocks_hash(blocks)
+        if content_hash == slack_settings.last_attendance_blocks_hash:
+            return
 
+        blocks.append(updated_at_context_block(frappe.utils.now_datetime().strftime("%H:%M")))
+
+        slack = SlackIntegration()
         try:
             slack.slack_app.client.chat_update(
                 channel=slack.SLACK_CHANNEL_ID,
@@ -208,6 +245,9 @@ def update_attendance_summary() -> None:
                 message=_("Please check the channel ID and try again."),
                 exception=e,
             )
+            return
+
+        frappe.db.set_single_value("Slack Settings", "last_attendance_blocks_hash", content_hash)
 
 
 def get_leave_type(user_application: dict) -> str:

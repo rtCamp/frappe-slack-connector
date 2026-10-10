@@ -8,6 +8,7 @@ from frappe.utils import getdate
 
 from frappe_slack_connector.tasks.attendance_summary import (
     ATTENDANCE_UPDATE_LOCK,
+    attendance_blocks_hash,
     attendance_channel,
     build_attendance_blocks,
     get_leave_type,
@@ -24,6 +25,7 @@ def _build_settings_mock(
     send_attendance_updates=1,
     last_attendance_date=None,
     last_attendance_msg_ts=None,
+    last_attendance_blocks_hash=None,
     attendance_time="09:00:00",
     leave_notification_subject="Employees on Leave",
 ):
@@ -31,6 +33,7 @@ def _build_settings_mock(
     settings.send_attendance_updates = send_attendance_updates
     settings.last_attendance_date = last_attendance_date
     settings.last_attendance_msg_ts = last_attendance_msg_ts
+    settings.last_attendance_blocks_hash = last_attendance_blocks_hash
     settings.attendance_time = attendance_time
     settings.leave_notification_subject = leave_notification_subject
     return settings
@@ -62,16 +65,20 @@ def _build_leave_row(
 
 @contextlib.contextmanager
 def _patch_block_inputs(users_on_leave):
-    """Patch everything build_attendance_blocks reads so it runs without Slack or DB rows, on 2026-06-15."""
+    """Patch everything build_attendance_blocks reads so it runs without Slack or DB rows, on 2026-06-15.
+
+    Also stubs frappe.db.set_single_value (the content-hash and day stamps) and yields that mock.
+    """
     with (
         patch(f"{ATTENDANCE_MODULE}.frappe.db.get_single_value", return_value=0),
+        patch(f"{ATTENDANCE_MODULE}.frappe.db.set_single_value") as mock_set_single_value,
         patch(f"{ATTENDANCE_MODULE}.custom_fields_exist", return_value=False),
         patch(f"{ATTENDANCE_MODULE}.get_employees_on_leave", return_value=users_on_leave),
         patch(f"{ATTENDANCE_MODULE}.frappe.get_all", return_value=[]),
         patch(f"{ATTENDANCE_MODULE}.frappe.utils.nowdate", return_value="2026-06-15"),
         patch(f"{ATTENDANCE_MODULE}.today", return_value="2026-06-15"),
     ):
-        yield
+        yield mock_set_single_value
 
 
 UPDATED_AT_BLOCK = {
@@ -93,10 +100,11 @@ class TestAttendanceChannel(IntegrationTestCase):
             ),
             patch(f"{ATTENDANCE_MODULE}.is_holiday", return_value=False),
             patch(f"{ATTENDANCE_MODULE}.send_notification") as mock_send,
+            patch(f"{ATTENDANCE_MODULE}.frappe.db.set_single_value") as mock_set_single_value,
         ):
             attendance_channel()
         mock_send.assert_not_called()
-        settings.save.assert_not_called()
+        mock_set_single_value.assert_not_called()
 
     def test_returns_silently_when_today_is_weekend(self):
         """attendance_channel returns silently when today is Saturday or Sunday."""
@@ -181,12 +189,17 @@ class TestAttendanceChannel(IntegrationTestCase):
                 f"{ATTENDANCE_MODULE}.send_notification",
                 return_value="1700000000.000999",
             ) as mock_send,
+            patch(f"{ATTENDANCE_MODULE}.frappe.db.set_single_value") as mock_set_single_value,
         ):
             attendance_channel()
         mock_send.assert_called_once()
-        self.assertEqual(settings.last_attendance_date, "2026-06-15")
-        self.assertEqual(settings.last_attendance_msg_ts, "1700000000.000999")
-        settings.save.assert_called_once_with(ignore_permissions=True)
+        # A direct write, not save(): the stale in-memory doc must not overwrite
+        # the content hash the post just stored
+        mock_set_single_value.assert_called_once_with(
+            "Slack Settings",
+            {"last_attendance_date": "2026-06-15", "last_attendance_msg_ts": "1700000000.000999"},
+        )
+        settings.save.assert_not_called()
 
 
 class TestSendNotification(IntegrationTestCase):
@@ -204,12 +217,17 @@ class TestSendNotification(IntegrationTestCase):
             patch(f"{ATTENDANCE_MODULE}.custom_fields_exist", return_value=False),
             patch(f"{ATTENDANCE_MODULE}.get_employees_on_leave", return_value=[]),
             patch(f"{ATTENDANCE_MODULE}.frappe.utils.nowdate", return_value="2026-06-15"),
+            patch(f"{ATTENDANCE_MODULE}.frappe.db.set_single_value") as mock_set_single_value,
         ):
             result = send_notification("Employees on Leave")
         self.assertEqual(result, "1700000000.000123")
         mock_slack.slack_app.client.chat_postMessage.assert_called_once()
         kwargs = mock_slack.slack_app.client.chat_postMessage.call_args.kwargs
         self.assertEqual(kwargs["channel"], TEST_SLACK_CHANNEL_ID)
+        # The fingerprint of what was posted is stored for the in-place update to compare against
+        mock_set_single_value.assert_called_once_with(
+            "Slack Settings", "last_attendance_blocks_hash", attendance_blocks_hash(kwargs["blocks"])
+        )
 
     def test_logs_error_and_returns_none_when_slack_post_raises(self):
         """send_notification logs an error via generate_error_log when chat_postMessage raises, and returns None."""
@@ -223,10 +241,12 @@ class TestSendNotification(IntegrationTestCase):
             patch(f"{ATTENDANCE_MODULE}.get_employees_on_leave", return_value=[]),
             patch(f"{ATTENDANCE_MODULE}.frappe.utils.nowdate", return_value="2026-06-15"),
             patch(f"{ATTENDANCE_MODULE}.generate_error_log") as mock_log,
+            patch(f"{ATTENDANCE_MODULE}.frappe.db.set_single_value") as mock_set_single_value,
         ):
             result = send_notification("Employees on Leave")
         self.assertIsNone(result)
         mock_log.assert_called_once()
+        mock_set_single_value.assert_not_called()
 
 
 def _post_and_update(rows, *, leave_notification_subject="Employees on Leave"):
@@ -431,6 +451,149 @@ class TestUpdateAttendanceSummary(IntegrationTestCase):
             update_attendance_summary()
         mock_log.assert_called_once()
         self.assertIsInstance(mock_log.call_args.kwargs["exception"], RuntimeError)
+
+
+class TestAttendanceBlocksHash(IntegrationTestCase):
+    def test_ignores_the_updated_at_context_block(self):
+        """The fingerprint covers the summary content only: appending or changing the "Updated at" block does not change it."""
+        with _patch_block_inputs([_build_leave_row()]):
+            morning = build_attendance_blocks("Employees on Leave")
+            edited = build_attendance_blocks("Employees on Leave", updated_at="14:32")
+            edited_later = build_attendance_blocks("Employees on Leave", updated_at="16:05")
+        self.assertEqual(attendance_blocks_hash(morning), attendance_blocks_hash(edited))
+        self.assertEqual(attendance_blocks_hash(edited), attendance_blocks_hash(edited_later))
+
+    def test_changes_when_the_people_on_leave_change(self):
+        """A different set of people on leave produces a different fingerprint."""
+        with _patch_block_inputs([_build_leave_row(employee="EMP-001", employee_name="Alice")]):
+            one = build_attendance_blocks("Employees on Leave")
+        with _patch_block_inputs([_build_leave_row(employee="EMP-002", employee_name="Bob")]):
+            other = build_attendance_blocks("Employees on Leave")
+        with _patch_block_inputs([]):
+            nobody = build_attendance_blocks("Employees on Leave")
+        self.assertNotEqual(attendance_blocks_hash(one), attendance_blocks_hash(other))
+        self.assertNotEqual(attendance_blocks_hash(one), attendance_blocks_hash(nobody))
+
+    def test_is_stable_across_calls(self):
+        """The same content hashes to the same value, so a stored fingerprint can be compared later."""
+        with _patch_block_inputs([_build_leave_row()]):
+            first = attendance_blocks_hash(build_attendance_blocks("Employees on Leave"))
+            second = attendance_blocks_hash(build_attendance_blocks("Employees on Leave"))
+        self.assertEqual(first, second)
+        self.assertEqual(len(first), 64)
+
+
+class TestUpdateAttendanceSummarySkipsUnchangedContent(IntegrationTestCase):
+    def _settings(self, stored_hash):
+        return _build_settings_mock(
+            last_attendance_date="2026-06-15",
+            last_attendance_msg_ts="1700000000.000777",
+            last_attendance_blocks_hash=stored_hash,
+        )
+
+    def test_skips_slack_edit_when_content_matches_stored_hash(self):
+        """When the rebuilt content hashes to the stored fingerprint (an earlier job of the same burst already posted it) no chat_update is made and nothing is stored."""
+        rows = [_build_leave_row()]
+        with _patch_block_inputs(rows):
+            stored = attendance_blocks_hash(build_attendance_blocks("Employees on Leave"))
+        mock_slack = MagicMock()
+        mock_slack.SLACK_CHANNEL_ID = TEST_SLACK_CHANNEL_ID
+        with (
+            patch(f"{ATTENDANCE_MODULE}.frappe.get_single", return_value=self._settings(stored)),
+            patch(f"{ATTENDANCE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(
+                f"{ATTENDANCE_MODULE}.frappe.utils.now_datetime",
+                return_value=datetime(2026, 6, 15, 14, 32),
+            ),
+            _patch_block_inputs(rows) as mock_set_single_value,
+        ):
+            update_attendance_summary()
+        mock_slack.slack_app.client.chat_update.assert_not_called()
+        mock_set_single_value.assert_not_called()
+
+    def test_edits_and_stores_hash_when_content_differs(self):
+        """When the content differs from the stored fingerprint, chat_update is made and the new fingerprint (of the content, without the Updated at block) is stored afterwards."""
+        rows = [_build_leave_row()]
+        with _patch_block_inputs([]):
+            stale = attendance_blocks_hash(build_attendance_blocks("Employees on Leave"))
+        mock_slack = MagicMock()
+        mock_slack.SLACK_CHANNEL_ID = TEST_SLACK_CHANNEL_ID
+        with (
+            patch(f"{ATTENDANCE_MODULE}.frappe.get_single", return_value=self._settings(stale)),
+            patch(f"{ATTENDANCE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(
+                f"{ATTENDANCE_MODULE}.frappe.utils.now_datetime",
+                return_value=datetime(2026, 6, 15, 14, 32),
+            ),
+            _patch_block_inputs(rows) as mock_set_single_value,
+        ):
+            update_attendance_summary()
+        mock_slack.slack_app.client.chat_update.assert_called_once()
+        sent_blocks = mock_slack.slack_app.client.chat_update.call_args.kwargs["blocks"]
+        self.assertEqual(sent_blocks[-1], UPDATED_AT_BLOCK)
+        mock_set_single_value.assert_called_once_with(
+            "Slack Settings", "last_attendance_blocks_hash", attendance_blocks_hash(sent_blocks)
+        )
+
+    def test_edits_when_no_hash_is_stored_yet(self):
+        """A summary posted before the fingerprint existed (empty stored hash) is always edited."""
+        mock_slack = MagicMock()
+        mock_slack.SLACK_CHANNEL_ID = TEST_SLACK_CHANNEL_ID
+        with (
+            patch(f"{ATTENDANCE_MODULE}.frappe.get_single", return_value=self._settings(None)),
+            patch(f"{ATTENDANCE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(
+                f"{ATTENDANCE_MODULE}.frappe.utils.now_datetime",
+                return_value=datetime(2026, 6, 15, 14, 32),
+            ),
+            _patch_block_inputs([]) as mock_set_single_value,
+        ):
+            update_attendance_summary()
+        mock_slack.slack_app.client.chat_update.assert_called_once()
+        mock_set_single_value.assert_called_once()
+
+    def test_does_not_store_hash_when_chat_update_fails(self):
+        """If Slack rejects the edit the stored fingerprint is left alone, so the next refresh retries the edit instead of believing it went through."""
+        mock_slack = MagicMock()
+        mock_slack.SLACK_CHANNEL_ID = TEST_SLACK_CHANNEL_ID
+        mock_slack.slack_app.client.chat_update.side_effect = RuntimeError("ratelimited")
+        with (
+            patch(f"{ATTENDANCE_MODULE}.frappe.get_single", return_value=self._settings("stale")),
+            patch(f"{ATTENDANCE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(
+                f"{ATTENDANCE_MODULE}.frappe.utils.now_datetime",
+                return_value=datetime(2026, 6, 15, 14, 32),
+            ),
+            patch(f"{ATTENDANCE_MODULE}.generate_error_log") as mock_log,
+            _patch_block_inputs([]) as mock_set_single_value,
+        ):
+            update_attendance_summary()
+        mock_log.assert_called_once()
+        mock_set_single_value.assert_not_called()
+
+    def test_burst_of_refreshes_edits_slack_once(self):
+        """Three refresh jobs for the same committed state (a bulk reject) make exactly one chat_update: the stored fingerprint advances after the first and the rest skip."""
+        settings = self._settings(None)
+
+        def remember_hash(doctype, fieldname, value=None, **kwargs):
+            if fieldname == "last_attendance_blocks_hash":
+                settings.last_attendance_blocks_hash = value
+
+        mock_slack = MagicMock()
+        mock_slack.SLACK_CHANNEL_ID = TEST_SLACK_CHANNEL_ID
+        with (
+            patch(f"{ATTENDANCE_MODULE}.frappe.get_single", return_value=settings),
+            patch(f"{ATTENDANCE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(
+                f"{ATTENDANCE_MODULE}.frappe.utils.now_datetime",
+                return_value=datetime(2026, 6, 15, 14, 32),
+            ),
+            _patch_block_inputs([_build_leave_row()]) as mock_set_single_value,
+        ):
+            mock_set_single_value.side_effect = remember_hash
+            for _ in range(3):
+                update_attendance_summary()
+        mock_slack.slack_app.client.chat_update.assert_called_once()
 
 
 class TestGetLeaveType(IntegrationTestCase):

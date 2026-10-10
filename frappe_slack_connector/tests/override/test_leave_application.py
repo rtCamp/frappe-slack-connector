@@ -71,13 +71,22 @@ def _run_leave_notification_bg(doc, *, custom_fields=False, is_lwp=0, attendance
     """
     mock_slack = MagicMock()
     mock_slack.SLACK_CHANNEL_ID = TEST_SLACK_CHANNEL_ID
-    mock_slack.get_slack_user_id.side_effect = ["U-approver", "U-applicant"]
+    # Resolve by lookup kind rather than call order so extra lookups do not shift the answers
+    mock_slack.get_slack_user_id.side_effect = lambda *args, **kwargs: (
+        "U-applicant" if "employee_id" in kwargs else "U-approver"
+    )
     settings = _build_slack_settings_mock(send_attendance_updates=attendance_updates, last_attendance_date="2026-06-10")
     balance_kwargs = {"side_effect": balance_on} if isinstance(balance_on, Exception) else {"return_value": balance_on}
+
+    # Answer only the lookups the job makes: Employee status (always Active) and Leave Type.is_lwp
+    def fake_get_value(doctype, *args, **kwargs):
+        return "Active" if doctype == "Employee" else is_lwp
+
     with (
         patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
         patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_single_value", return_value=1),
-        patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=is_lwp) as mock_get_value,
+        patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", side_effect=fake_get_value) as mock_get_value,
+        patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.set_value"),
         patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.get_single", return_value=settings),
         patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.utils.today", return_value="2026-06-10"),
         patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.utils.nowdate", return_value="2026-06-10"),
@@ -86,8 +95,8 @@ def _run_leave_notification_bg(doc, *, custom_fields=False, is_lwp=0, attendance
         patch(f"{LEAVE_OVERRIDE_MODULE}.generate_error_log") as mock_error_log,
     ):
         send_leave_notification_bg(doc)
-    if mock_get_value.called:
-        assert mock_get_value.call_args.args == ("Leave Type", doc.leave_type, "is_lwp")
+    leave_type_lookups = [c.args for c in mock_get_value.call_args_list if c.args[0] == "Leave Type"]
+    assert leave_type_lookups in ([], [("Leave Type", doc.leave_type, "is_lwp")])
     return {
         "slack": mock_slack,
         "get_value": mock_get_value,

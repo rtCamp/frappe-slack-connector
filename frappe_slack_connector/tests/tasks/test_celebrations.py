@@ -187,7 +187,7 @@ class TestSendCelebrations(IntegrationTestCase):
         mock_log.assert_not_called()
 
     def test_posts_one_birthday_message_with_mention(self):
-        """One birthday post goes to the celebrations channel, mentioning the employee when mention_user is on."""
+        """One birthday post goes to the celebrations channel, mentioning the employee."""
         alice = _employee("Alice Example", user_id=TEST_USER)
         mock_slack, _ = self._run(
             _build_settings_mock(), birthdays=[alice], slack_user_ids={TEST_USER: TEST_SLACK_USER_ID}
@@ -212,18 +212,18 @@ class TestSendCelebrations(IntegrationTestCase):
         text = self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args)
         self.assertIn(f"<@{TEST_SLACK_USER_ID}>, <@{TEST_SLACK_USER_ID_2}>", text)
 
-    def test_shows_name_when_mention_user_is_off(self):
-        """With mention_user off the employee name is shown even when a Slack ID is known."""
+    def test_mentions_even_when_mention_user_is_off(self):
+        """The attendance summary's mention_user setting does not apply: an employee with a Slack ID is mentioned regardless, since the event comes once a year."""
         alice = _employee("Alice Example", user_id=TEST_USER)
         mock_slack, _ = self._run(
             _build_settings_mock(mention_user=0), birthdays=[alice], slack_user_ids={TEST_USER: TEST_SLACK_USER_ID}
         )
         text = self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args)
-        self.assertIn("Alice Example", text)
-        self.assertNotIn(TEST_SLACK_USER_ID, text)
+        self.assertIn(f"<@{TEST_SLACK_USER_ID}>", text)
+        self.assertNotIn("Alice Example", text)
 
     def test_shows_name_when_employee_has_no_slack_id(self):
-        """An employee without a Slack ID is shown by name even when mention_user is on."""
+        """An employee without a Slack ID is shown by name."""
         alice = _employee("Alice Example", user_id=TEST_USER)
         mock_slack, _ = self._run(_build_settings_mock(), birthdays=[alice])
         self.assertIn("Alice Example", self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args))

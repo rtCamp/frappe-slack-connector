@@ -78,15 +78,17 @@ def send_celebrations() -> None:
         return
 
     slack_user_ids = get_slack_user_ids([e.user_id for e in [*birthdays, *anniversaries] if e.user_id])
-    mention_users = bool(slack_settings.mention_user)
     current_year = getdate(frappe.utils.nowdate()).year
 
     def to_context(employee, *, with_years: bool) -> dict:
+        # Always mention whoever has a Slack ID (the "Mention User" setting is
+        # for the daily attendance summary): a birthday or work anniversary
+        # comes once a year and the person should see it
         slack_userid = slack_user_ids.get(employee.user_id) if employee.user_id else None
         name = escape_slack_text(employee.name)
         context = {
             "name": name,
-            "mention": f"<@{slack_userid}>" if slack_userid and mention_users else name,
+            "mention": f"<@{slack_userid}>" if slack_userid else name,
             "company": escape_slack_text(employee.company),
         }
         if with_years:

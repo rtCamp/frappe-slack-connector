@@ -180,11 +180,12 @@ def _thread_reply_text(mock_slack) -> str:
     return kwargs["blocks"][0]["text"]["text"]
 
 
-WITHDRAW_JOB_KWARGS = {"employee": "EMP-001", "employee_name": "Alice", "day_period": "Full Day", "label": "Rejected"}
+WITHDRAW_JOB_KWARGS = {"employee": "EMP-001", "employee_name": "Alice", "day_period": "Full Day"}
 
 
-def _assert_struck_through(mock_slack, reply_ts, label, *, name="<@U-applicant>", day_period="Full Day"):
-    """Assert the reply was edited in place (not deleted) into the struck-through text with the label."""
+def _assert_struck_through(mock_slack, reply_ts, *, name="<@U-applicant>", day_period="Full Day"):
+    """Assert the reply was edited in place (not deleted) into the struck-through text ending in (Cancelled)."""
+    label = "Cancelled"
     mock_slack.slack_app.client.chat_delete.assert_not_called()
     mock_slack.slack_app.client.chat_update.assert_called_once()
     kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
@@ -493,7 +494,7 @@ class TestPostSameDayLeaveToAttendanceThread(IntegrationTestCase):
 
 class TestOnUpdateWithdrawAttendanceReply(IntegrationTestCase):
     def test_rejection_same_day_deletes_reply_and_clears_ts(self):
-        """Rejecting a leave on the day its stored reply was posted enqueues the withdrawal after commit with the leave name, the database ts and what the job needs to rebuild the text; the job edits the reply into struck-through text with (Rejected) and clears the field."""
+        """Rejecting a leave on the day its stored reply was posted enqueues the withdrawal after commit with the leave name, the database ts and what the job needs to rebuild the text; the job edits the reply into struck-through text ending in (Cancelled) and clears the field."""
         reply_ts = _slack_ts_at_noon_utc(TODAY)
         doc = _build_leave_doc(status="Rejected", status_changed=True)
         mock_slack = _build_slack_mock()
@@ -508,12 +509,11 @@ class TestOnUpdateWithdrawAttendanceReply(IntegrationTestCase):
         self.assertTrue(mock_enqueue.call_args.kwargs["enqueue_after_commit"])
         self.assertEqual(mock_enqueue.call_args.kwargs["leave_name"], doc.name)
         self.assertEqual(mock_enqueue.call_args.kwargs["reply_ts"], reply_ts)
-        self.assertEqual(mock_enqueue.call_args.kwargs["label"], "Rejected")
         self.assertEqual(mock_enqueue.call_args.kwargs["employee"], doc.employee)
         self.assertEqual(mock_enqueue.call_args.kwargs["employee_name"], doc.employee_name)
         self.assertEqual(mock_enqueue.call_args.kwargs["day_period"], "Full Day")
         self.assertNotIn("doc", mock_enqueue.call_args.kwargs)
-        _assert_struck_through(mock_slack, reply_ts, "Rejected")
+        _assert_struck_through(mock_slack, reply_ts)
         mocks.set_value.assert_called_once_with(
             "Leave Application",
             doc.name,
@@ -535,7 +535,7 @@ class TestOnUpdateWithdrawAttendanceReply(IntegrationTestCase):
         ):
             on_update_withdraw_attendance_reply(doc, method="on_update")
         mocks.get_value.assert_any_call("Leave Application", doc.name, ATTENDANCE_REPLY_TS_FIELD)
-        _assert_struck_through(mock_slack, reply_ts, "Rejected")
+        _assert_struck_through(mock_slack, reply_ts)
         mocks.error_log.assert_not_called()
 
     def test_ignores_ts_on_doc_when_database_has_none(self):
@@ -550,7 +550,7 @@ class TestOnUpdateWithdrawAttendanceReply(IntegrationTestCase):
         mocks.error_log.assert_not_called()
 
     def test_cancellation_same_day_deletes_reply(self):
-        """Cancelling an approved leave on the day of its thread reply strikes it through with (Withdrawn), wired through on_cancel."""
+        """Cancelling an approved leave on the day of its thread reply strikes it through with (Cancelled), wired through on_cancel."""
         doc = _build_leave_doc(status="Cancelled", status_changed=True)
         mock_slack = _build_slack_mock()
         with (
@@ -559,7 +559,7 @@ class TestOnUpdateWithdrawAttendanceReply(IntegrationTestCase):
             _leave_override_env(stored_ts=_slack_ts_at_noon_utc(TODAY)) as mocks,
         ):
             on_update_withdraw_attendance_reply(doc, method="on_cancel")
-        _assert_struck_through(mock_slack, _slack_ts_at_noon_utc(TODAY), "Withdrawn")
+        _assert_struck_through(mock_slack, _slack_ts_at_noon_utc(TODAY))
         mocks.error_log.assert_not_called()
 
     def test_rejection_on_a_later_day_does_not_delete_old_reply(self):
@@ -607,7 +607,7 @@ class TestOnUpdateWithdrawAttendanceReply(IntegrationTestCase):
         mock_enqueue.assert_not_called()
 
     def test_discard_same_day_deletes_reply(self):
-        """Discarding a draft (HRMS db_sets status to Cancelled, so only on_discard fires) strikes through a reply posted today with (Withdrawn)."""
+        """Discarding a draft (HRMS db_sets status to Cancelled, so only on_discard fires) strikes through a reply posted today with (Cancelled)."""
         doc = _build_leave_doc(status="Cancelled", status_changed=True)
         mock_slack = _build_slack_mock()
         with (
@@ -616,7 +616,7 @@ class TestOnUpdateWithdrawAttendanceReply(IntegrationTestCase):
             _leave_override_env(stored_ts=_slack_ts_at_noon_utc(TODAY)) as mocks,
         ):
             on_update_withdraw_attendance_reply(doc, method="on_discard")
-        _assert_struck_through(mock_slack, _slack_ts_at_noon_utc(TODAY), "Withdrawn")
+        _assert_struck_through(mock_slack, _slack_ts_at_noon_utc(TODAY))
         mocks.error_log.assert_not_called()
 
     def test_counts_reply_as_today_in_site_timezone(self):
@@ -657,7 +657,7 @@ class TestOnUpdateWithdrawAttendanceReply(IntegrationTestCase):
 
 class TestOnTrashWithdrawAttendanceReply(IntegrationTestCase):
     def test_deleting_leave_same_day_deletes_reply(self):
-        """Deleting a leave (a draft never runs on_update/on_cancel) strikes through a reply posted today with (Withdrawn), regardless of status, using the stored ts and leave details read before the row goes."""
+        """Deleting a leave (a draft never runs on_update/on_cancel) strikes through a reply posted today with (Cancelled), regardless of status, using the stored ts and leave details read before the row goes."""
         reply_ts = _slack_ts_at_noon_utc(TODAY)
         doc = _build_leave_doc(status="Open")
         mock_slack = _build_slack_mock()
@@ -669,8 +669,7 @@ class TestOnTrashWithdrawAttendanceReply(IntegrationTestCase):
             on_trash_withdraw_attendance_reply(doc, method="on_trash")
         self.assertTrue(mock_enqueue.call_args.kwargs["enqueue_after_commit"])
         self.assertEqual(mock_enqueue.call_args.kwargs["reply_ts"], reply_ts)
-        self.assertEqual(mock_enqueue.call_args.kwargs["label"], "Withdrawn")
-        _assert_struck_through(mock_slack, reply_ts, "Withdrawn")
+        _assert_struck_through(mock_slack, reply_ts)
         mocks.error_log.assert_not_called()
 
     def test_deleting_leave_on_a_later_day_keeps_old_reply(self):
@@ -831,11 +830,8 @@ class TestWithdrawAttendanceReplyBg(IntegrationTestCase):
                 employee="EMP-001",
                 employee_name="Alice <A&B>",
                 day_period="Second-Half",
-                label="Withdrawn",
             )
-        _assert_struck_through(
-            mock_slack, REPLY_TS, "Withdrawn", name="Alice &lt;A&amp;B&gt;", day_period="Second-Half"
-        )
+        _assert_struck_through(mock_slack, REPLY_TS, name="Alice &lt;A&amp;B&gt;", day_period="Second-Half")
 
 
 class TestSendLeaveNotificationToApplicant(IntegrationTestCase):

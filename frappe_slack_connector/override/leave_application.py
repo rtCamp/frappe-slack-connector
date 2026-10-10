@@ -15,6 +15,11 @@ from frappe_slack_connector.tasks.attendance_summary import get_leave_type
 # of the reply posted in the attendance summary thread for a same-day leave
 ATTENDANCE_REPLY_TS_FIELD = "custom_slack_attendance_reply_ts"
 
+# Appended to a struck-through thread reply. One word for every path
+# (rejected, cancelled, discarded, deleted): the channel only needs to know
+# the leave is off, not who called it off
+WITHDRAWN_LABEL = "Cancelled"
+
 
 def after_insert(doc, method):
     """
@@ -281,7 +286,7 @@ def restore_attendance_reply_ts(doc: Document, method=None):
     )
 
 
-def _enqueue_attendance_reply_withdrawal(doc: Document, label: str):
+def _enqueue_attendance_reply_withdrawal(doc: Document):
     """
     Enqueue marking the attendance thread reply stored on the leave as
     withdrawn, if it was posted today. A reply from an earlier day is history
@@ -307,7 +312,6 @@ def _enqueue_attendance_reply_withdrawal(doc: Document, label: str):
             employee=doc.employee,
             employee_name=doc.employee_name,
             day_period=get_leave_type(doc, on_date=getdate(frappe.utils.today())),
-            label=label,
         )
     except Exception as e:
         generate_error_log(
@@ -320,8 +324,7 @@ def on_update_withdraw_attendance_reply(doc: Document, method=None):
     """
     Strike through the same-day attendance thread reply when the leave is
     rejected or cancelled on the day the reply was posted. The reply stays
-    in the thread as history: "(Rejected)" when the approver turned it
-    down, "(Withdrawn)" when the applicant cancelled it
+    in the thread as history, marked "(Cancelled)" either way
 
     Wired to ``on_update``, ``on_update_after_submit``, ``on_cancel`` and
     ``on_discard``: Frappe only runs ``on_cancel`` for a cancel, HRMS sets
@@ -331,7 +334,7 @@ def on_update_withdraw_attendance_reply(doc: Document, method=None):
     if not doc.has_value_changed("status") or doc.status not in ("Rejected", "Cancelled"):
         return
 
-    _enqueue_attendance_reply_withdrawal(doc, "Rejected" if doc.status == "Rejected" else "Withdrawn")
+    _enqueue_attendance_reply_withdrawal(doc)
 
 
 def on_trash_withdraw_attendance_reply(doc: Document, method=None):
@@ -339,7 +342,7 @@ def on_trash_withdraw_attendance_reply(doc: Document, method=None):
     Strike through the same-day attendance thread reply when the leave is
     deleted (deleting a draft runs neither ``on_update`` nor ``on_cancel``)
     """
-    _enqueue_attendance_reply_withdrawal(doc, "Withdrawn")
+    _enqueue_attendance_reply_withdrawal(doc)
 
 
 def withdraw_attendance_reply_bg(
@@ -349,11 +352,10 @@ def withdraw_attendance_reply_bg(
     employee: str,
     employee_name: str,
     day_period: str,
-    label: str,
 ):
     """
     Edit the attendance thread reply ``reply_ts`` posted for the leave
-    ``leave_name`` so it reads struck through with ``label`` appended, and
+    ``leave_name`` so it reads struck through with "(Cancelled)" appended, and
     clear the stored ts. Nothing is deleted: the thread keeps a record of
     the leave that was announced and then taken back. Editing a broadcast
     reply changes it in the thread and in the channel
@@ -374,12 +376,12 @@ def withdraw_attendance_reply_bg(
         slack = SlackIntegration()
         mention_user = frappe.db.get_single_value("Slack Settings", "mention_user")
         name = _same_day_reply_name(slack, employee, employee_name, mention_user)
-        text = f"~{_same_day_reply_text(name, day_period)}~ ({label})"
+        text = f"~{_same_day_reply_text(name, day_period)}~ ({WITHDRAWN_LABEL})"
         slack.slack_app.client.chat_update(
             channel=slack.SLACK_CHANNEL_ID,
             ts=reply_ts,
             blocks=[_same_day_reply_block(text)],
-            text=f"{employee_name} is on leave today ({label})",
+            text=f"{employee_name} is on leave today ({WITHDRAWN_LABEL})",
         )
     except Exception as e:
         # The reply may already be gone (deleted by hand); log and move on

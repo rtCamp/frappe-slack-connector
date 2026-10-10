@@ -148,16 +148,15 @@ def _leave_override_env(
         patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.set_value") as mock_set_value,
         patch(f"{LEAVE_OVERRIDE_MODULE}.generate_error_log") as mock_error_log,
         patch(
-            f"{LEAVE_OVERRIDE_MODULE}.get_holiday_list_for_employee", return_value="[Time off - IN]"
-        ) as mock_holiday_list,
-        patch(f"{LEAVE_OVERRIDE_MODULE}.is_holiday", return_value=employee_on_holiday) as mock_is_holiday,
+            f"{LEAVE_OVERRIDE_MODULE}.get_employees_on_holiday",
+            side_effect=lambda employees, on_date: set(employees) if employee_on_holiday else set(),
+        ) as mock_on_holiday,
     ):
         yield SimpleNamespace(
             get_value=mock_get_value,
             set_value=mock_set_value,
             error_log=mock_error_log,
-            holiday_list=mock_holiday_list,
-            is_holiday=mock_is_holiday,
+            on_holiday=mock_on_holiday,
         )
 
 
@@ -428,8 +427,8 @@ class TestPostSameDayLeaveToAttendanceThread(IntegrationTestCase):
             post_same_day_leave_to_attendance_thread(doc, slack=mock_slack)
         mock_slack.slack_app.client.chat_postMessage.assert_called_once()
 
-    def test_posts_nothing_when_today_is_a_holiday_on_the_employees_list(self):
-        """An employee whose own holiday list (or the company's, via get_holiday_list_for_employee) marks today a holiday is not announced: the summary drops them too."""
+    def test_posts_nothing_when_today_is_a_holiday_for_the_employee(self):
+        """An employee for whom get_employees_on_holiday marks today a holiday is not announced: the summary drops them by the same rule."""
         doc = _build_leave_doc(from_date="2026-06-08", to_date="2026-06-12")
         mock_slack = _build_slack_mock()
         with _leave_override_env(employee_on_holiday=True) as mocks:
@@ -437,18 +436,16 @@ class TestPostSameDayLeaveToAttendanceThread(IntegrationTestCase):
         self.assertIsNone(result)
         mock_slack.slack_app.client.chat_postMessage.assert_not_called()
         mocks.set_value.assert_not_called()
-        mocks.holiday_list.assert_called_once_with(doc.employee, raise_exception=False, as_on=date(2026, 6, 10))
-        mocks.is_holiday.assert_called_once_with("[Time off - IN]", date(2026, 6, 10))
+        mocks.on_holiday.assert_called_once_with([doc.employee], date(2026, 6, 10))
 
-    def test_posts_reply_when_employee_has_no_holiday_list(self):
-        """Without any holiday list (own or company) the holiday check is skipped and the reply is posted."""
+    def test_posts_reply_when_today_is_a_working_day_for_the_employee(self):
+        """When the employee is not on holiday today the reply is posted; the check happens after the cheaper gates."""
         doc = _build_leave_doc(from_date="2026-06-10", to_date="2026-06-10")
         mock_slack = _build_slack_mock()
         with _leave_override_env() as mocks:
-            mocks.holiday_list.return_value = None
             post_same_day_leave_to_attendance_thread(doc, slack=mock_slack)
         mock_slack.slack_app.client.chat_postMessage.assert_called_once()
-        mocks.is_holiday.assert_not_called()
+        mocks.on_holiday.assert_called_once_with([doc.employee], date(2026, 6, 10))
 
     def test_posts_nothing_when_employee_is_not_active(self):
         """An employee whose status is not Active is not announced, matching the summary query."""

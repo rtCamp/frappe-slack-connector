@@ -1,11 +1,10 @@
 from datetime import UTC, datetime
 
 import frappe
-from erpnext.setup.doctype.employee.employee import get_holiday_list_for_employee
-from erpnext.setup.doctype.holiday_list.holiday_list import is_holiday
 from frappe.model.document import Document
 from frappe.utils import convert_utc_to_system_timezone, get_url_to_form, getdate
 
+from frappe_slack_connector.db.employee import get_employees_on_holiday
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
 from frappe_slack_connector.helpers.str_utils import escape_slack_text
@@ -157,11 +156,9 @@ def post_same_day_leave_to_attendance_thread(doc: Document, slack: SlackIntegrat
     if frappe.db.get_value("Employee", doc.employee, "status") != "Active":
         return None
 
-    # Employees follow different holiday lists (support staff work on public
-    # holidays), so a leave spanning today is only "leave" when today is a
-    # working day on the employee's own list (falling back to the company's)
-    holiday_list = get_holiday_list_for_employee(doc.employee, raise_exception=False, as_on=today)
-    if holiday_list and is_holiday(holiday_list, today):
+    # Same rule as the summary: a leave spanning today is only "leave" when
+    # today is a working day on the employee's own holiday list
+    if doc.employee in get_employees_on_holiday([doc.employee], today):
         return None
 
     slack = slack or SlackIntegration()

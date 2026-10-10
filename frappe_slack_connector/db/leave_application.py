@@ -2,6 +2,8 @@ import frappe
 from frappe.model.workflow import apply_workflow
 from frappe.utils import today
 
+from frappe_slack_connector.db.employee import get_employees_on_holiday
+
 
 def custom_fields_exist() -> bool:
     """
@@ -19,6 +21,10 @@ def get_employees_on_leave() -> list:
     approved while the employee is still active and the employee may then
     leave the organisation before the leave date, so the Employee status is
     checked at query time rather than trusting the Leave Application alone.
+
+    Employees for whom today is a holiday on their own holiday list are
+    not returned either: a multi-day leave spanning a holiday is not a
+    day off on that date.
     """
     current_date = today()
 
@@ -65,6 +71,12 @@ def get_employees_on_leave() -> list:
             pluck="name",
         )
     )
+
+    # Employees follow different holiday lists (e.g. support staff work on
+    # public holidays), so a leave that spans a date is only "leave" for an
+    # employee whose own calendar treats that date as a working day.
+    on_holiday = get_employees_on_holiday(sorted(active_employees), current_date)
+    active_employees -= on_holiday
 
     return [la for la in leave_applications if la.employee in active_employees]
 

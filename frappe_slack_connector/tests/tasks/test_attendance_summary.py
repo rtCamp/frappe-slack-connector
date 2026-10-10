@@ -35,6 +35,7 @@ def _build_settings_mock(
     settings.last_attendance_date = last_attendance_date
     settings.last_attendance_msg_ts = last_attendance_msg_ts
     settings.last_attendance_channel_id = last_attendance_channel_id
+    settings.get.side_effect = lambda fieldname, default=None: getattr(settings, fieldname, default)
     settings.attendance_time = attendance_time
     settings.leave_notification_subject = leave_notification_subject
     return settings
@@ -252,13 +253,13 @@ class TestAttendanceChannel(IntegrationTestCase):
 
 class TestSendNotification(IntegrationTestCase):
     def test_posts_attendance_blocks_to_slack_channel_and_returns_ts(self):
-        """send_notification posts chat.postMessage to SLACK_CHANNEL_ID and returns the message ts and the channel ID from Slack's response."""
+        """send_notification posts chat.postMessage to SLACK_CHANNEL_ID (which may be a channel name) and returns the message ts and the channel ID from Slack's response, not the setting."""
         mock_slack = MagicMock()
-        mock_slack.SLACK_CHANNEL_ID = TEST_SLACK_CHANNEL_ID
+        mock_slack.SLACK_CHANNEL_ID = "attendance"
         mock_slack.slack_app.client.chat_postMessage.return_value = {
             "ok": True,
             "ts": "1700000000.000123",
-            "channel": TEST_SLACK_CHANNEL_ID,
+            "channel": "C0POSTED",
         }
         with (
             patch(f"{ATTENDANCE_MODULE}.SlackIntegration", return_value=mock_slack),
@@ -269,10 +270,10 @@ class TestSendNotification(IntegrationTestCase):
             patch(f"{ATTENDANCE_MODULE}.frappe.cache", cache := _FakeCache()),
         ):
             result = send_notification("Employees on Leave")
-        self.assertEqual(result, ("1700000000.000123", TEST_SLACK_CHANNEL_ID))
+        self.assertEqual(result, ("1700000000.000123", "C0POSTED"))
         mock_slack.slack_app.client.chat_postMessage.assert_called_once()
         kwargs = mock_slack.slack_app.client.chat_postMessage.call_args.kwargs
-        self.assertEqual(kwargs["channel"], TEST_SLACK_CHANNEL_ID)
+        self.assertEqual(kwargs["channel"], "attendance")
         # The fingerprint of what was posted is cached under the new message ts, with a TTL
         self.assertEqual(cache.hash_for("1700000000.000123"), attendance_blocks_hash(kwargs["blocks"]))
         self.assertEqual(cache.set_value.call_args.kwargs["expires_in_sec"], 2 * 24 * 60 * 60)

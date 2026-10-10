@@ -229,7 +229,7 @@ def send_notification(attendance_title: str) -> tuple[str, str] | None:
     # Remember what was posted so a later refresh with the same content can
     # skip the edit
     remember_attendance_hash(message["ts"], attendance_blocks_hash(blocks))
-    return message["ts"], message["channel"]
+    return message["ts"], message.get("channel")
 
 
 def update_attendance_summary() -> None:
@@ -269,7 +269,7 @@ def update_attendance_summary() -> None:
         # chat.update needs a channel ID (a name gives channel_not_found), so
         # edit in the channel Slack reported when the summary was posted; the
         # setting is only a fallback for a summary posted before that was stored
-        channel_id = slack_settings.last_attendance_channel_id or slack.SLACK_CHANNEL_ID
+        channel_id = slack_settings.get("last_attendance_channel_id") or slack.SLACK_CHANNEL_ID
         message_ts = slack_settings.last_attendance_msg_ts
         blocks = build_attendance_blocks(get_attendance_title(slack_settings))
         content_hash = attendance_blocks_hash(blocks)

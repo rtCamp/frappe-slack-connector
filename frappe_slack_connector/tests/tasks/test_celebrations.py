@@ -210,7 +210,7 @@ class TestSendCelebrations(IntegrationTestCase):
         )
         mock_slack.slack_app.client.chat_postMessage.assert_called_once()
         text = self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args)
-        self.assertIn(f"<@{TEST_SLACK_USER_ID}>, <@{TEST_SLACK_USER_ID_2}>", text)
+        self.assertIn(f"• <@{TEST_SLACK_USER_ID}>\n• <@{TEST_SLACK_USER_ID_2}>", text)
 
     def test_mentions_even_when_mention_user_is_off(self):
         """The attendance summary's mention_user setting does not apply: an employee with a Slack ID is mentioned regardless, since the event comes once a year."""
@@ -234,33 +234,39 @@ class TestSendCelebrations(IntegrationTestCase):
         mock_slack, _ = self._run(_build_settings_mock(), anniversaries=[tom])
         text = self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args)
         self.assertIn("Tom &amp; &lt;Jerry&gt;", text)
-        self.assertIn("at A &lt;B&gt;", text)
+        self.assertIn("*A &lt;B&gt;*", text)
 
     def test_anniversary_message_shows_years_and_company(self):
-        """The anniversary post shows the number of completed years at the employee's company."""
+        """The anniversary post lists the employee with the number of completed years under the company name."""
         alice = _employee("Alice Example", date_of_joining=date(2023, 6, 15))
         mock_slack, _ = self._run(_build_settings_mock(), anniversaries=[alice])
         call = mock_slack.slack_app.client.chat_postMessage.call_args
         self.assertEqual(call.kwargs["blocks"][0]["text"]["text"], ":tada: Work Anniversaries")
-        self.assertIn("Alice Example - 3 years at Example Co", self._section_text(call))
+        self.assertEqual(
+            self._section_text(call),
+            ":tada: Happy work anniversary! :clap:\n*Example Co*\n• Alice Example - 3 years",
+        )
 
     def test_anniversary_message_names_the_company_once_per_group(self):
-        """Several people at one company are listed with their years and the company once at the end; a second company gets its own group."""
+        """People are bulleted under their company name, one group per company."""
         alice = _employee("Alice Example", date_of_joining=date(2023, 6, 15))
         bob = _employee("Bob Example", date_of_joining=date(2021, 6, 15))
         carol = _employee("Carol Example", company="Other Co", date_of_joining=date(2025, 6, 15))
         mock_slack, _ = self._run(_build_settings_mock(), anniversaries=[alice, bob, carol])
         self.assertEqual(
             self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args),
-            ":tada: Happy work anniversary Alice Example - 3 years, Bob Example - 5 years at Example Co; "
-            "Carol Example - 1 year at Other Co! :clap:",
+            ":tada: Happy work anniversary! :clap:\n"
+            "*Example Co*\n• Alice Example - 3 years\n• Bob Example - 5 years\n"
+            "*Other Co*\n• Carol Example - 1 year",
         )
 
     def test_anniversary_message_uses_singular_year(self):
         """One completed year is written as '1 year'."""
         alice = _employee("Alice Example", date_of_joining=date(2025, 6, 15))
         mock_slack, _ = self._run(_build_settings_mock(), anniversaries=[alice])
-        self.assertIn("1 year at", self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args))
+        self.assertIn(
+            "• Alice Example - 1 year", self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args)
+        )
 
     def test_posts_birthdays_and_anniversaries_as_separate_messages(self):
         """Birthdays and anniversaries on the same day are two posts, birthdays first."""
@@ -294,7 +300,7 @@ class TestSendCelebrations(IntegrationTestCase):
         self.assertIn("FSC Gone", mock_log.call_args.kwargs["message"])
         self.assertEqual(
             self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args),
-            ":birthday: Happy birthday Alice! :tada:",
+            ":birthday: Happy birthday! :tada:\n• Alice",
         )
 
     def test_uses_default_and_logs_when_linked_template_has_use_html_off(self):
@@ -307,7 +313,8 @@ class TestSendCelebrations(IntegrationTestCase):
         )
         mock_log.assert_called_once()
         self.assertIn(
-            "Happy work anniversary Alice", self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args)
+            "Happy work anniversary! :clap:\n*Example Co*\n• Alice",
+            self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args),
         )
 
     def test_uses_default_and_logs_when_linked_template_is_blank(self):
@@ -319,7 +326,7 @@ class TestSendCelebrations(IntegrationTestCase):
         mock_log.assert_called_once()
         self.assertEqual(
             self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args),
-            ":birthday: Happy birthday Alice! :tada:",
+            ":birthday: Happy birthday! :tada:\n• Alice",
         )
 
     def test_does_not_look_up_email_template_when_nothing_is_linked(self):
@@ -328,7 +335,7 @@ class TestSendCelebrations(IntegrationTestCase):
         mock_log.assert_not_called()
         self.assertEqual(
             self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args),
-            ":birthday: Happy birthday Alice! :tada:",
+            ":birthday: Happy birthday! :tada:\n• Alice",
         )
 
     def test_falls_back_to_attendance_channel(self):

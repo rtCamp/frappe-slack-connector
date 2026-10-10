@@ -286,3 +286,25 @@ class TestGetLeaveType(IntegrationTestCase):
         ):
             result = get_leave_type(application)
         self.assertEqual(result, "Second-Half")
+
+    def test_evaluates_half_day_against_on_date_when_given(self):
+        """get_leave_type uses on_date instead of today when the caller passes one, so a half day on that date is reported."""
+        from frappe.utils import getdate
+
+        application = frappe._dict({"half_day": 1, "half_day_date": getdate("2026-06-20")})
+        with (
+            patch(f"{ATTENDANCE_MODULE}.today", return_value="2026-06-15"),
+            patch(f"{ATTENDANCE_MODULE}.custom_fields_exist", return_value=False),
+        ):
+            result = get_leave_type(application, on_date=getdate("2026-06-20"))
+        self.assertEqual(result, "Half Day")
+
+    def test_accepts_string_half_day_date(self):
+        """get_leave_type compares a half_day_date given as a YYYY-MM-DD string (as on a Leave Application doc) by date, not by string."""
+        application = frappe._dict({"half_day": 1, "half_day_date": "2026-06-15"})
+        with (
+            patch(f"{ATTENDANCE_MODULE}.today", return_value="2026-06-15"),
+            patch(f"{ATTENDANCE_MODULE}.custom_fields_exist", return_value=False),
+        ):
+            result = get_leave_type(application)
+        self.assertEqual(result, "Half Day")

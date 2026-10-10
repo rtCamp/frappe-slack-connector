@@ -11,9 +11,14 @@ from frappe_slack_connector.helpers.str_utils import escape_slack_text
 from frappe_slack_connector.slack.app import SlackIntegration
 from frappe_slack_connector.tasks.attendance_summary import get_leave_type
 
-# Custom field on Leave Application (fixtures/custom_field.json) holding the ts
-# of the reply posted in the attendance summary thread for a same-day leave
+# Custom fields on Leave Application (fixtures/custom_field.json) holding the
+# ts of the reply posted in the attendance summary thread for a same-day leave
+# and the ID of the channel it was posted in. The ID comes from Slack's
+# response: chat.postMessage accepts a channel name, but chat.update (used to
+# strike the reply through) only accepts an ID
 ATTENDANCE_REPLY_TS_FIELD = "custom_slack_attendance_reply_ts"
+ATTENDANCE_REPLY_CHANNEL_FIELD = "custom_slack_attendance_reply_channel"
+ATTENDANCE_REPLY_FIELDS = (ATTENDANCE_REPLY_TS_FIELD, ATTENDANCE_REPLY_CHANNEL_FIELD)
 
 # Appended to a struck-through thread reply. One word for every path
 # (rejected, cancelled, discarded, deleted): the channel only needs to know
@@ -154,8 +159,9 @@ def post_same_day_leave_to_attendance_thread(doc: Document, slack: SlackIntegrat
     and the summary has already been posted (a leave applied for before the
     summary is simply included in the summary itself)
 
-    The reply ``ts`` is stored on the Leave Application so the reply can be
-    removed if the leave is rejected or cancelled later the same day.
+    The reply ``ts`` and channel ID are stored on the Leave Application so
+    the reply can be struck through if the leave is rejected or cancelled
+    later the same day.
     Returns the ``ts`` of the reply, or None when nothing was posted
     """
     # A leave created already decided (e.g. Rejected) is not an announcement
@@ -196,7 +202,12 @@ def post_same_day_leave_to_attendance_thread(doc: Document, slack: SlackIntegrat
         reply_broadcast=True,
     )
     reply_ts = response["ts"]
-    frappe.db.set_value("Leave Application", doc.name, ATTENDANCE_REPLY_TS_FIELD, reply_ts, update_modified=False)
+    frappe.db.set_value(
+        "Leave Application",
+        doc.name,
+        {ATTENDANCE_REPLY_TS_FIELD: reply_ts, ATTENDANCE_REPLY_CHANNEL_FIELD: response["channel"]},
+        update_modified=False,
+    )
     return reply_ts
 
 
@@ -267,28 +278,39 @@ def _reply_posted_today(reply_ts: str) -> bool:
     return getdate(posted_at) == getdate(frappe.utils.today())
 
 
+def get_attendance_reply_ref(leave_name: str) -> tuple[str | None, str | None]:
+    """
+    The stored (ts, channel ID) of the attendance thread reply for the leave,
+    read from the database; (None, None) when nothing is stored or the row
+    is gone
+    """
+    stored = frappe.db.get_value("Leave Application", leave_name, list(ATTENDANCE_REPLY_FIELDS), as_dict=True)
+    if not stored:
+        return None, None
+    return stored.get(ATTENDANCE_REPLY_TS_FIELD) or None, stored.get(ATTENDANCE_REPLY_CHANNEL_FIELD) or None
+
+
 def restore_attendance_reply_ts(doc: Document, method=None):
     """
-    Keep the stored reply ts server-owned
+    Keep the stored reply ts and channel server-owned
 
-    The field is hidden and read-only, but Frappe does not enforce
-    ``read_only`` on API writes, and the bot deletes whatever ts is stored
-    here. Only the background jobs may write or clear it with
-    ``db.set_value``, so the value a client sends is never trusted: a new
-    doc gets it blanked, and an existing doc gets the database value put
-    back (this also stops a form loaded before the job ran from erasing it
+    The fields are hidden and read-only, but Frappe does not enforce
+    ``read_only`` on API writes, and the bot edits whatever message is
+    stored here. Only the background jobs may write or clear them with
+    ``db.set_value``, so the values a client sends are never trusted: a new
+    doc gets them blanked, and an existing doc gets the database values put
+    back (this also stops a form loaded before the job ran from erasing them
     with ``db_update``, which writes every column)
     """
     # is_new() only knows about docs going through insert(); a doc built in
     # memory and never inserted has no name either
     if doc.is_new() or not doc.name:
-        doc.set(ATTENDANCE_REPLY_TS_FIELD, None)
-        return
+        reply_ts, channel = None, None
+    else:
+        reply_ts, channel = get_attendance_reply_ref(doc.name)
 
-    doc.set(
-        ATTENDANCE_REPLY_TS_FIELD,
-        frappe.db.get_value("Leave Application", doc.name, ATTENDANCE_REPLY_TS_FIELD),
-    )
+    doc.set(ATTENDANCE_REPLY_TS_FIELD, reply_ts)
+    doc.set(ATTENDANCE_REPLY_CHANNEL_FIELD, channel)
 
 
 def _enqueue_attendance_reply_withdrawal(doc: Document):
@@ -299,10 +321,10 @@ def _enqueue_attendance_reply_withdrawal(doc: Document):
     block the user's action
     """
     try:
-        # Read the stored value, never the one on the doc (see
+        # Read the stored values, never the ones on the doc (see
         # restore_attendance_reply_ts), and hand everything the job needs to
         # it so it does not re-read a row that may be gone by then (on_trash)
-        reply_ts = frappe.db.get_value("Leave Application", doc.name, ATTENDANCE_REPLY_TS_FIELD)
+        reply_ts, channel = get_attendance_reply_ref(doc.name)
         if not reply_ts or not _reply_posted_today(reply_ts):
             return
 
@@ -314,6 +336,7 @@ def _enqueue_attendance_reply_withdrawal(doc: Document):
             enqueue_after_commit=True,
             leave_name=doc.name,
             reply_ts=reply_ts,
+            channel=channel,
             employee=doc.employee,
             employee_name=doc.employee_name,
             day_period=get_leave_type(doc, on_date=getdate(frappe.utils.today())),
@@ -357,13 +380,18 @@ def withdraw_attendance_reply_bg(
     employee: str,
     employee_name: str,
     day_period: str,
+    channel: str | None = None,
 ):
     """
     Edit the attendance thread reply ``reply_ts`` posted for the leave
     ``leave_name`` so it reads struck through with "(Cancelled)" appended, and
-    clear the stored ts. Nothing is deleted: the thread keeps a record of
-    the leave that was announced and then taken back. Editing a broadcast
+    clear the stored reference. Nothing is deleted: the thread keeps a record
+    of the leave that was announced and then taken back. Editing a broadcast
     reply changes it in the thread and in the channel
+
+    ``channel`` is the ID Slack reported when the reply was posted; the
+    attendance channel setting is only a fallback for a reply stored before
+    the ID was, and fails when that setting holds a channel name
     """
     if not reply_ts:
         return
@@ -383,7 +411,7 @@ def withdraw_attendance_reply_bg(
         name = _same_day_reply_name(slack, employee, employee_name, mention_user)
         text = f"~{_same_day_reply_text(name, day_period)}~ ({WITHDRAWN_LABEL})"
         slack.slack_app.client.chat_update(
-            channel=slack.SLACK_CHANNEL_ID,
+            channel=channel or slack.SLACK_CHANNEL_ID,
             ts=reply_ts,
             blocks=[_same_day_reply_block(text)],
             text=f"{escape_slack_text(employee_name)} is on leave today ({WITHDRAWN_LABEL})",
@@ -395,9 +423,14 @@ def withdraw_attendance_reply_bg(
             exception=e,
         )
 
-    # The ts is only useful on the day it was posted, so clear it either way
-    # (a no-op when the leave itself has been deleted)
-    frappe.db.set_value("Leave Application", leave_name, ATTENDANCE_REPLY_TS_FIELD, None, update_modified=False)
+    # The reference is only useful on the day it was posted, so clear it
+    # either way (a no-op when the leave itself has been deleted)
+    frappe.db.set_value(
+        "Leave Application",
+        leave_name,
+        dict.fromkeys(ATTENDANCE_REPLY_FIELDS),
+        update_modified=False,
+    )
 
 
 def format_leave_application_blocks(

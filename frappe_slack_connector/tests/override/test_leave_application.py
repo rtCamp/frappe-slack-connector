@@ -7,6 +7,8 @@ import frappe
 from frappe.tests import IntegrationTestCase
 
 from frappe_slack_connector.override.leave_application import (
+    ATTENDANCE_REPLY_CHANNEL_FIELD,
+    ATTENDANCE_REPLY_FIELDS,
     ATTENDANCE_REPLY_TS_FIELD,
     after_insert,
     on_trash_withdraw_attendance_reply,
@@ -25,6 +27,8 @@ ATTENDANCE_MODULE = "frappe_slack_connector.tasks.attendance_summary"
 TODAY = "2026-06-10"
 SUMMARY_TS = "1700000000.000001"
 REPLY_TS = "1700000500.000001"
+# Channel ID Slack reports for the reply, distinct from the configured channel so a test can tell them apart
+REPLY_CHANNEL = "C0FSCREPLY"
 
 
 def _slack_ts_at_noon_utc(day: str) -> str:
@@ -105,16 +109,22 @@ def _build_slack_mock(*, applicant_slack_id="U-applicant", approver_slack_id="U-
         return applicant_slack_id
 
     mock_slack.get_slack_user_id.side_effect = lookup
-    mock_slack.slack_app.client.chat_postMessage.return_value = {"ok": True, "ts": REPLY_TS}
+    mock_slack.slack_app.client.chat_postMessage.return_value = {"ok": True, "ts": REPLY_TS, "channel": REPLY_CHANNEL}
     mock_slack.slack_app.client.chat_update.return_value = {"ok": True}
     return mock_slack
 
 
 @contextlib.contextmanager
 def _leave_override_env(
-    *, settings=None, employee_status="Active", employee_on_holiday=False, today=TODAY, stored_ts=None
+    *,
+    settings=None,
+    employee_status="Active",
+    employee_on_holiday=False,
+    today=TODAY,
+    stored_ts=None,
+    stored_channel=REPLY_CHANNEL,
 ):
-    """Patch the Frappe surface the leave override reads: Slack Settings, today's date, the Employee status lookup, the stored reply ts and the ts write-back.
+    """Patch the Frappe surface the leave override reads: Slack Settings, today's date, the Employee status lookup, the stored reply reference (ts and channel) and its write-back.
 
     ``frappe.db.get_value`` / ``get_single_value`` are patched with scoped side effects that answer only the
     lookups the override makes and delegate every other call to the real function, so Frappe internals
@@ -131,8 +141,9 @@ def _leave_override_env(
     def fake_get_value(doctype, filters=None, fieldname="name", *args, **kwargs):
         if doctype == "Employee" and fieldname == "status":
             return employee_status
-        if doctype == "Leave Application" and fieldname == ATTENDANCE_REPLY_TS_FIELD:
-            return stored_ts
+        if doctype == "Leave Application" and fieldname == list(ATTENDANCE_REPLY_FIELDS):
+            assert kwargs.get("as_dict"), "the reply reference is read as a dict"
+            return frappe._dict({ATTENDANCE_REPLY_TS_FIELD: stored_ts, ATTENDANCE_REPLY_CHANNEL_FIELD: stored_channel})
         return real_get_value(doctype, filters, fieldname, *args, **kwargs)
 
     def fake_get_single_value(doctype, fieldname, *args, **kwargs):
@@ -180,16 +191,23 @@ def _thread_reply_text(mock_slack) -> str:
     return kwargs["blocks"][0]["text"]["text"]
 
 
-WITHDRAW_JOB_KWARGS = {"employee": "EMP-001", "employee_name": "Alice", "day_period": "Full Day"}
+WITHDRAW_JOB_KWARGS = {
+    "employee": "EMP-001",
+    "employee_name": "Alice",
+    "day_period": "Full Day",
+    "channel": REPLY_CHANNEL,
+}
 
 
-def _assert_struck_through(mock_slack, reply_ts, *, name="<@U-applicant>", day_period="Full Day"):
-    """Assert the reply was edited in place (not deleted) into the struck-through text ending in (Cancelled)."""
+def _assert_struck_through(
+    mock_slack, reply_ts, *, name="<@U-applicant>", day_period="Full Day", channel=REPLY_CHANNEL
+):
+    """Assert the reply was edited in place (not deleted), in the stored channel, into the struck-through text ending in (Cancelled)."""
     label = "Cancelled"
     mock_slack.slack_app.client.chat_delete.assert_not_called()
     mock_slack.slack_app.client.chat_update.assert_called_once()
     kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
-    assert kwargs["channel"] == TEST_SLACK_CHANNEL_ID, kwargs
+    assert kwargs["channel"] == channel, kwargs
     assert kwargs["ts"] == reply_ts, kwargs
     assert kwargs["blocks"][0]["text"]["text"] == f"~{name} is on leave today. _({day_period})_~ ({label})", kwargs
     assert f"({label})" in kwargs["text"], kwargs
@@ -330,7 +348,7 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
 
 class TestPostSameDayLeaveToAttendanceThread(IntegrationTestCase):
     def test_posts_reply_and_stores_ts_when_leave_covers_today_after_summary(self):
-        """A leave covering today, applied after the summary, posts one broadcast reply in the summary thread and stores its ts on the Leave Application without touching modified."""
+        """A leave covering today, applied after the summary, posts one broadcast reply in the summary thread and stores its ts and the channel ID Slack reported on the Leave Application without touching modified."""
         doc = _build_leave_doc(from_date="2026-06-10", to_date="2026-06-10")
         mock_slack = _build_slack_mock()
         with _leave_override_env() as mocks:
@@ -344,8 +362,7 @@ class TestPostSameDayLeaveToAttendanceThread(IntegrationTestCase):
         mocks.set_value.assert_called_once_with(
             "Leave Application",
             doc.name,
-            ATTENDANCE_REPLY_TS_FIELD,
-            REPLY_TS,
+            {ATTENDANCE_REPLY_TS_FIELD: REPLY_TS, ATTENDANCE_REPLY_CHANNEL_FIELD: REPLY_CHANNEL},
             update_modified=False,
         )
         mocks.error_log.assert_not_called()
@@ -511,6 +528,7 @@ class TestOnUpdateWithdrawAttendanceReply(IntegrationTestCase):
         self.assertTrue(mock_enqueue.call_args.kwargs["enqueue_after_commit"])
         self.assertEqual(mock_enqueue.call_args.kwargs["leave_name"], doc.name)
         self.assertEqual(mock_enqueue.call_args.kwargs["reply_ts"], reply_ts)
+        self.assertEqual(mock_enqueue.call_args.kwargs["channel"], REPLY_CHANNEL)
         self.assertEqual(mock_enqueue.call_args.kwargs["employee"], doc.employee)
         self.assertEqual(mock_enqueue.call_args.kwargs["employee_name"], doc.employee_name)
         self.assertEqual(mock_enqueue.call_args.kwargs["day_period"], "Full Day")
@@ -519,8 +537,7 @@ class TestOnUpdateWithdrawAttendanceReply(IntegrationTestCase):
         mocks.set_value.assert_called_once_with(
             "Leave Application",
             doc.name,
-            ATTENDANCE_REPLY_TS_FIELD,
-            None,
+            {ATTENDANCE_REPLY_TS_FIELD: None, ATTENDANCE_REPLY_CHANNEL_FIELD: None},
             update_modified=False,
         )
         mocks.error_log.assert_not_called()
@@ -536,7 +553,7 @@ class TestOnUpdateWithdrawAttendanceReply(IntegrationTestCase):
             _leave_override_env(stored_ts=reply_ts) as mocks,
         ):
             on_update_withdraw_attendance_reply(doc, method="on_update")
-        mocks.get_value.assert_any_call("Leave Application", doc.name, ATTENDANCE_REPLY_TS_FIELD)
+        mocks.get_value.assert_any_call("Leave Application", doc.name, list(ATTENDANCE_REPLY_FIELDS), as_dict=True)
         _assert_struck_through(mock_slack, reply_ts)
         mocks.error_log.assert_not_called()
 
@@ -686,6 +703,9 @@ class TestOnTrashWithdrawAttendanceReply(IntegrationTestCase):
         mocks.error_log.assert_not_called()
 
 
+STORED_REF = frappe._dict({ATTENDANCE_REPLY_TS_FIELD: REPLY_TS, ATTENDANCE_REPLY_CHANNEL_FIELD: REPLY_CHANNEL})
+
+
 class TestRestoreAttendanceReplyTs(IntegrationTestCase):
     def _build_real_doc(self, **fields):
         """Build a real (not inserted) Leave Application Document so doc.get/doc.set behave as in a hook."""
@@ -706,36 +726,47 @@ class TestRestoreAttendanceReplyTs(IntegrationTestCase):
         doc = self._build_real_doc()
         with (
             patch.object(doc, "is_new", return_value=False),
-            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=REPLY_TS) as mock_get_value,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=STORED_REF) as mock_get_value,
         ):
             restore_attendance_reply_ts(doc, method="before_validate")
-        mock_get_value.assert_called_once_with("Leave Application", doc.name, ATTENDANCE_REPLY_TS_FIELD)
+        mock_get_value.assert_called_once_with(
+            "Leave Application", doc.name, list(ATTENDANCE_REPLY_FIELDS), as_dict=True
+        )
         self.assertEqual(doc.get(ATTENDANCE_REPLY_TS_FIELD), REPLY_TS)
+        self.assertEqual(doc.get(ATTENDANCE_REPLY_CHANNEL_FIELD), REPLY_CHANNEL)
 
     def test_replaces_client_supplied_ts_on_existing_doc_with_database_value(self):
         """A non-empty ts sent by the client for an existing doc is overwritten by the database value: only the bot's jobs own this field."""
         doc = self._build_real_doc(**{ATTENDANCE_REPLY_TS_FIELD: SUMMARY_TS})
         with (
             patch.object(doc, "is_new", return_value=False),
-            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=REPLY_TS) as mock_get_value,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=STORED_REF) as mock_get_value,
         ):
             restore_attendance_reply_ts(doc, method="before_validate")
-        mock_get_value.assert_called_once_with("Leave Application", doc.name, ATTENDANCE_REPLY_TS_FIELD)
+        mock_get_value.assert_called_once_with(
+            "Leave Application", doc.name, list(ATTENDANCE_REPLY_FIELDS), as_dict=True
+        )
         self.assertEqual(doc.get(ATTENDANCE_REPLY_TS_FIELD), REPLY_TS)
+        self.assertEqual(doc.get(ATTENDANCE_REPLY_CHANNEL_FIELD), REPLY_CHANNEL)
 
     def test_clears_client_supplied_ts_on_existing_doc_when_database_is_empty(self):
         """When nothing is stored, a client-supplied ts on an existing doc is cleared rather than kept."""
-        doc = self._build_real_doc(**{ATTENDANCE_REPLY_TS_FIELD: SUMMARY_TS})
+        doc = self._build_real_doc(
+            **{ATTENDANCE_REPLY_TS_FIELD: SUMMARY_TS, ATTENDANCE_REPLY_CHANNEL_FIELD: "C0FORGED"}
+        )
         with (
             patch.object(doc, "is_new", return_value=False),
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=None),
         ):
             restore_attendance_reply_ts(doc, method="before_validate")
         self.assertIsNone(doc.get(ATTENDANCE_REPLY_TS_FIELD))
+        self.assertIsNone(doc.get(ATTENDANCE_REPLY_CHANNEL_FIELD))
 
     def test_clears_client_supplied_ts_on_new_doc(self):
         """A ts sent with a new doc is blanked without reading the database: an insert can never pre-load a message for deletion."""
-        doc = self._build_real_doc(**{ATTENDANCE_REPLY_TS_FIELD: SUMMARY_TS})
+        doc = self._build_real_doc(
+            **{ATTENDANCE_REPLY_TS_FIELD: SUMMARY_TS, ATTENDANCE_REPLY_CHANNEL_FIELD: "C0FORGED"}
+        )
         with (
             patch.object(doc, "is_new", return_value=True),
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value") as mock_get_value,
@@ -743,6 +774,7 @@ class TestRestoreAttendanceReplyTs(IntegrationTestCase):
             restore_attendance_reply_ts(doc, method="before_validate")
         mock_get_value.assert_not_called()
         self.assertIsNone(doc.get(ATTENDANCE_REPLY_TS_FIELD))
+        self.assertIsNone(doc.get(ATTENDANCE_REPLY_CHANNEL_FIELD))
 
     def test_clears_ts_on_nameless_docs_without_reading_database(self):
         """A doc built in memory and never inserted reports is_new() False but has no name; its ts is blanked and the database is not queried without a name."""
@@ -790,8 +822,7 @@ class TestWithdrawAttendanceReplyBg(IntegrationTestCase):
         mocks.set_value.assert_called_once_with(
             "Leave Application",
             "HR-LAP-0050",
-            ATTENDANCE_REPLY_TS_FIELD,
-            None,
+            {ATTENDANCE_REPLY_TS_FIELD: None, ATTENDANCE_REPLY_CHANNEL_FIELD: None},
             update_modified=False,
         )
 
@@ -818,6 +849,31 @@ class TestWithdrawAttendanceReplyBg(IntegrationTestCase):
         mock_slack.slack_app.client.chat_update.assert_not_called()
         mocks.set_value.assert_not_called()
 
+    def test_edits_in_the_stored_channel_not_the_configured_one(self):
+        """The edit goes to the channel ID stored when the reply was posted, not to the attendance channel setting, which may hold a name that chat.update rejects."""
+        mock_slack = _build_slack_mock()
+        mock_slack.SLACK_CHANNEL_ID = "attendance"
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            _leave_override_env() as mocks,
+        ):
+            withdraw_attendance_reply_bg(leave_name="HR-LAP-0050", reply_ts=REPLY_TS, **WITHDRAW_JOB_KWARGS)
+        _assert_struck_through(mock_slack, REPLY_TS, channel=REPLY_CHANNEL)
+        mocks.error_log.assert_not_called()
+
+    def test_falls_back_to_the_configured_channel_without_a_stored_one(self):
+        """A reply stored before the channel ID was (upgrade day) is edited in the configured attendance channel."""
+        mock_slack = _build_slack_mock()
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            _leave_override_env() as mocks,
+        ):
+            withdraw_attendance_reply_bg(
+                leave_name="HR-LAP-0050", reply_ts=REPLY_TS, **{**WITHDRAW_JOB_KWARGS, "channel": None}
+            )
+        _assert_struck_through(mock_slack, REPLY_TS, channel=TEST_SLACK_CHANNEL_ID)
+        mocks.error_log.assert_not_called()
+
     def test_uses_plain_name_when_mentions_are_off(self):
         """With mention_user off the struck-through text carries the escaped employee name, like the original reply."""
         mock_slack = _build_slack_mock()
@@ -829,6 +885,7 @@ class TestWithdrawAttendanceReplyBg(IntegrationTestCase):
             withdraw_attendance_reply_bg(
                 leave_name="HR-LAP-0050",
                 reply_ts=REPLY_TS,
+                channel=REPLY_CHANNEL,
                 employee="EMP-001",
                 employee_name="Alice <A&B>",
                 day_period="Second-Half",

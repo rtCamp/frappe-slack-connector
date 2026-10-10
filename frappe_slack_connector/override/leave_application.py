@@ -21,14 +21,19 @@ def after_insert(doc, method):
     Send a slack message to the leave approver when a new leave application
     is submitted
     """
+    # Both jobs wait for the commit: the applicant job writes the DM reference
+    # back to this row, which a fast worker could otherwise miss (or DM about
+    # a leave whose insert then rolls back)
     frappe.enqueue(
         send_leave_notification_bg,
         queue="short",
+        enqueue_after_commit=True,
         doc=doc,
     )
     frappe.enqueue(
         send_leave_notification_to_applicant,
         queue="short",
+        enqueue_after_commit=True,
         doc=doc,
     )
 

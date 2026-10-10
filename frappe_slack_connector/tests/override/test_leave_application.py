@@ -95,7 +95,7 @@ def _build_slack_settings_mock(
 
 class TestAfterInsert(IntegrationTestCase):
     def test_enqueues_both_notification_jobs_on_short_queue(self):
-        """after_insert enqueues send_leave_notification_bg and send_leave_notification_to_applicant, both on the short queue."""
+        """after_insert enqueues send_leave_notification_bg and send_leave_notification_to_applicant, both on the short queue and only after the insert commits (the applicant job writes the DM reference back to the row)."""
         doc = _build_leave_doc()
         with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
             after_insert(doc, method=None)
@@ -105,6 +105,7 @@ class TestAfterInsert(IntegrationTestCase):
         self.assertIn(send_leave_notification_to_applicant, targets)
         for call in mock_enqueue.call_args_list:
             self.assertEqual(call.kwargs["queue"], "short")
+            self.assertTrue(call.kwargs["enqueue_after_commit"])
             self.assertIs(call.kwargs["doc"], doc)
 
 

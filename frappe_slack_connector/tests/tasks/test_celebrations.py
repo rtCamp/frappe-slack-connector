@@ -244,6 +244,18 @@ class TestSendCelebrations(IntegrationTestCase):
         self.assertEqual(call.kwargs["blocks"][0]["text"]["text"], ":tada: Work Anniversaries")
         self.assertIn("Alice Example - 3 years at Example Co", self._section_text(call))
 
+    def test_anniversary_message_names_the_company_once_per_group(self):
+        """Several people at one company are listed with their years and the company once at the end; a second company gets its own group."""
+        alice = _employee("Alice Example", date_of_joining=date(2023, 6, 15))
+        bob = _employee("Bob Example", date_of_joining=date(2021, 6, 15))
+        carol = _employee("Carol Example", company="Other Co", date_of_joining=date(2025, 6, 15))
+        mock_slack, _ = self._run(_build_settings_mock(), anniversaries=[alice, bob, carol])
+        self.assertEqual(
+            self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args),
+            ":tada: Happy work anniversary Alice Example - 3 years, Bob Example - 5 years at Example Co; "
+            "Carol Example - 1 year at Other Co! :clap:",
+        )
+
     def test_anniversary_message_uses_singular_year(self):
         """One completed year is written as '1 year'."""
         alice = _employee("Alice Example", date_of_joining=date(2025, 6, 15))

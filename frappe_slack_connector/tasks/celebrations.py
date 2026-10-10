@@ -19,10 +19,15 @@ DEFAULT_BIRTHDAY_TEMPLATE = (
     "! :tada:"
 )
 
+# People are grouped by company so the company is named once, at the end of
+# each group: "A - 2 years, B - 5 years at X; C - 1 year at Y"
 DEFAULT_ANNIVERSARY_TEMPLATE = (
     ":tada: Happy work anniversary "
-    "{% for e in employees %}{{ e.mention }} - {{ e.years }} year{{ '' if e.years == 1 else 's' }} at {{ e.company }}"
+    "{% for company, people in employees | groupby('company') %}"
+    "{% for e in people %}{{ e.mention }} - {{ e.years }} year{{ '' if e.years == 1 else 's' }}"
     "{% if not loop.last %}, {% endif %}{% endfor %}"
+    " at {{ company }}{% if not loop.last %}; {% endif %}"
+    "{% endfor %}"
     "! :clap:"
 )
 

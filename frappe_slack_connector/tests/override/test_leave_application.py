@@ -32,16 +32,20 @@ def _build_leave_doc(
     status="Open",
     status_changed=True,
     previous_status="Open",
+    docstatus=0,
+    docstatus_changed=False,
 ):
     """Build a MagicMock that mimics a Leave Application doc with the fields the override code reads.
 
-    status_changed drives doc.has_value_changed("status") and previous_status drives
-    doc.get_value_before_save("status"); the refresh handler gates on both.
+    status_changed / docstatus_changed drive doc.has_value_changed and previous_status
+    drives doc.get_value_before_save("status"); the refresh handler gates on these.
     """
     doc = MagicMock()
     doc.name = name
     doc.status = status
-    doc.has_value_changed.side_effect = lambda fieldname: status_changed if fieldname == "status" else False
+    doc.docstatus = docstatus
+    changed = {"status": status_changed, "docstatus": docstatus_changed}
+    doc.has_value_changed.side_effect = lambda fieldname: changed.get(fieldname, False)
     doc.get_value_before_save.side_effect = lambda fieldname: previous_status if fieldname == "status" else None
     doc.employee = employee
     doc.employee_name = employee_name
@@ -223,6 +227,80 @@ class TestOnUpdateRefreshAttendanceSummary(IntegrationTestCase):
             on_update_refresh_attendance_summary(doc, method="on_cancel")
         mock_enqueue.assert_not_called()
         mock_get_single.assert_not_called()
+
+    def test_enqueues_refresh_when_approved_leave_is_force_cancelled(self):
+        """A cancel with ignore_validate skips HRMS before_cancel, so the status stays Approved while docstatus becomes 2; the on_cancel hook must still refresh because the summary query drops the row on docstatus."""
+        doc = _build_leave_doc(
+            from_date="2026-06-10",
+            to_date="2026-06-10",
+            status="Approved",
+            status_changed=False,
+            previous_status="Approved",
+            docstatus=2,
+            docstatus_changed=True,
+        )
+        settings = _build_slack_settings_mock(last_attendance_date="2026-06-10")
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.get_single", return_value=settings),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.today", return_value="2026-06-10"),
+        ):
+            on_update_refresh_attendance_summary(doc, method="on_cancel")
+        mock_enqueue.assert_called_once()
+        self.assertIs(mock_enqueue.call_args.args[0], update_attendance_summary)
+
+    def test_does_nothing_when_rejected_leave_is_force_cancelled(self):
+        """Force-cancelling a leave that was already Rejected does not refresh: it was never in the summary."""
+        doc = _build_leave_doc(
+            from_date="2026-06-10",
+            to_date="2026-06-10",
+            status="Rejected",
+            status_changed=False,
+            previous_status="Rejected",
+            docstatus=2,
+            docstatus_changed=True,
+        )
+        with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
+            on_update_refresh_attendance_summary(doc, method="on_cancel")
+        mock_enqueue.assert_not_called()
+
+    def test_submitted_approved_leave_does_not_refresh_on_update_after_submit(self):
+        """An update-after-submit on an Approved leave (docstatus 1, unchanged) is not a cancel and enqueues nothing."""
+        doc = _build_leave_doc(
+            from_date="2026-06-10",
+            to_date="2026-06-10",
+            status="Approved",
+            status_changed=False,
+            previous_status="Approved",
+            docstatus=1,
+        )
+        with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
+            on_update_refresh_attendance_summary(doc, method="on_update")
+        mock_enqueue.assert_not_called()
+
+    def test_real_force_cancelled_leave_application_doc_enqueues_refresh(self):
+        """With a real Leave Application whose before-save copy is Approved at docstatus 1 and which is now docstatus 2 with the status untouched, has_value_changed("docstatus") resolves naturally and the handler enqueues the refresh."""
+        fields = {
+            "doctype": "Leave Application",
+            "employee": "EMP-001",
+            "employee_name": "Alice",
+            "leave_type": "Casual Leave",
+            "from_date": "2026-06-10",
+            "to_date": "2026-06-10",
+            "posting_date": "2026-06-09",
+            "status": "Approved",
+        }
+        doc = frappe.get_doc({**fields, "docstatus": 2})
+        doc._doc_before_save = frappe.get_doc({**fields, "docstatus": 1})
+        settings = _build_slack_settings_mock(last_attendance_date="2026-06-10")
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.get_single", return_value=settings),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.today", return_value="2026-06-10"),
+        ):
+            on_update_refresh_attendance_summary(doc, method="on_cancel")
+        mock_enqueue.assert_called_once()
+        self.assertIs(mock_enqueue.call_args.args[0], update_attendance_summary)
 
     def test_enqueues_refresh_for_approved_to_cancelled_and_open_to_rejected(self):
         """Transitions out of a counted status (Open or Approved) into Rejected or Cancelled enqueue the refresh."""

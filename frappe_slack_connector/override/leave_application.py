@@ -1,6 +1,6 @@
 import frappe
 from frappe.model.document import Document
-from frappe.utils import get_url_to_form, getdate, today
+from frappe.utils import cint, get_url_to_form, getdate, today
 
 from frappe_slack_connector.db.leave_application import custom_fields_exist
 from frappe_slack_connector.helpers.error import generate_error_log
@@ -39,17 +39,30 @@ def on_update_refresh_attendance_summary(doc, method=None):
 
     Wired to ``on_update`` (Desk and Slack rejection, with or without a
     workflow), ``on_cancel`` (submitted leave cancelled) and ``on_discard``
-    (draft leave discarded). Only fires when the status actually changed
-    from one the summary counts, so edits to an already-rejected leave and
-    Rejected -> Cancelled transitions do not rebuild the summary.
+    (draft leave discarded). Only fires when the leave actually leaves the
+    summary, so edits to an already-rejected leave and Rejected -> Cancelled
+    transitions do not rebuild it.
     """
-    if doc.status not in SUMMARY_EXCLUDED_STATUSES or not doc.has_value_changed("status"):
-        return
-    previous_status = doc.get_value_before_save("status")
-    # No before-save copy means we cannot tell; refresh rather than go stale
-    if previous_status is not None and previous_status not in SUMMARY_INCLUDED_STATUSES:
+    if not _leaves_attendance_summary(doc):
         return
     enqueue_attendance_summary_refresh(doc)
+
+
+def _leaves_attendance_summary(doc) -> bool:
+    """
+    Whether this save takes the leave out of the summary: its status moved
+    from a counted one to Rejected or Cancelled, or the document itself was
+    cancelled. A cancel normally sets Cancelled too (HRMS ``before_cancel``),
+    but ``ignore_validate`` skips that and leaves the status Approved; the
+    summary query drops such a row on docstatus alone, so the hook must too.
+    """
+    cancelled = cint(doc.docstatus) == 2 and doc.has_value_changed("docstatus")
+    withdrawn = doc.status in SUMMARY_EXCLUDED_STATUSES and doc.has_value_changed("status")
+    if not (cancelled or withdrawn):
+        return False
+    previous_status = doc.get_value_before_save("status")
+    # No before-save copy means we cannot tell; refresh rather than go stale
+    return previous_status is None or previous_status in SUMMARY_INCLUDED_STATUSES
 
 
 def should_refresh_attendance_summary(doc) -> bool:

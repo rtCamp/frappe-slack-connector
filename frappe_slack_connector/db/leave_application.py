@@ -46,6 +46,14 @@ def get_applicant_message_ref(leave_id: str) -> tuple[str | None, str | None]:
     return row.get(APPLICANT_CHANNEL_FIELD) or None, row.get(APPLICANT_MSG_TS_FIELD) or None
 
 
+def get_leave_status(leave_id: str) -> str | None:
+    """
+    The leave's current status straight from the database, or None when the
+    row no longer exists
+    """
+    return frappe.db.get_value("Leave Application", leave_id, "status")
+
+
 def store_applicant_message_ref(leave_id: str, *, channel: str | None, ts: str | None) -> None:
     """
     Remember the applicant's Slack DM (channel, ts) on the Leave Application.

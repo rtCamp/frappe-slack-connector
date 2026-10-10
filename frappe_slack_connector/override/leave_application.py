@@ -27,16 +27,21 @@ def after_insert(doc, method):
     is submitted
     """
     # Rows created by Data Import are not announcements. Decide here: the
-    # background job runs with fresh frappe.local, where the flag is reset
+    # background job runs with fresh frappe.local, where the flag is reset.
+    # Both jobs wait for the commit: the thread reply writes its ts back to
+    # this row, which a fast worker could otherwise miss (or announce a leave
+    # whose insert then rolls back)
     frappe.enqueue(
         send_leave_notification_bg,
         queue="short",
+        enqueue_after_commit=True,
         doc=doc,
         announce_in_thread=not frappe.flags.in_import,
     )
     frappe.enqueue(
         send_leave_notification_to_applicant,
         queue="short",
+        enqueue_after_commit=True,
         doc=doc,
     )
 
@@ -381,7 +386,7 @@ def withdraw_attendance_reply_bg(
             channel=slack.SLACK_CHANNEL_ID,
             ts=reply_ts,
             blocks=[_same_day_reply_block(text)],
-            text=f"{employee_name} is on leave today ({WITHDRAWN_LABEL})",
+            text=f"{escape_slack_text(employee_name)} is on leave today ({WITHDRAWN_LABEL})",
         )
     except Exception as e:
         # The reply may already be gone (deleted by hand); log and move on

@@ -193,6 +193,7 @@ def _assert_struck_through(mock_slack, reply_ts, *, name="<@U-applicant>", day_p
     assert kwargs["ts"] == reply_ts, kwargs
     assert kwargs["blocks"][0]["text"]["text"] == f"~{name} is on leave today. _({day_period})_~ ({label})", kwargs
     assert f"({label})" in kwargs["text"], kwargs
+    assert "<" not in kwargs["text"].replace("&lt;", ""), kwargs  # fallback text is escaped like the block
 
 
 def _run_enqueued_inline(method, **kwargs):
@@ -203,7 +204,7 @@ def _run_enqueued_inline(method, **kwargs):
 
 class TestAfterInsert(IntegrationTestCase):
     def test_enqueues_both_notification_jobs_on_short_queue(self):
-        """after_insert enqueues send_leave_notification_bg (announcing in the thread) and send_leave_notification_to_applicant, both on the short queue."""
+        """after_insert enqueues send_leave_notification_bg (announcing in the thread) and send_leave_notification_to_applicant, both on the short queue and only after the insert commits (the thread job writes its ts back to the row)."""
         doc = _build_leave_doc()
         with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
             after_insert(doc, method=None)
@@ -213,6 +214,7 @@ class TestAfterInsert(IntegrationTestCase):
         self.assertIn(send_leave_notification_to_applicant, calls)
         for kwargs in calls.values():
             self.assertEqual(kwargs["queue"], "short")
+            self.assertTrue(kwargs["enqueue_after_commit"])
             self.assertIs(kwargs["doc"], doc)
         self.assertTrue(calls[send_leave_notification_bg]["announce_in_thread"])
 
@@ -832,6 +834,10 @@ class TestWithdrawAttendanceReplyBg(IntegrationTestCase):
                 day_period="Second-Half",
             )
         _assert_struck_through(mock_slack, REPLY_TS, name="Alice &lt;A&amp;B&gt;", day_period="Second-Half")
+        self.assertEqual(
+            mock_slack.slack_app.client.chat_update.call_args.kwargs["text"],
+            "Alice &lt;A&amp;B&gt; is on leave today (Cancelled)",
+        )
 
 
 class TestSendLeaveNotificationToApplicant(IntegrationTestCase):

@@ -53,14 +53,20 @@ def attendance_channel() -> None:
         return
 
     # Send the attendance summary to the Slack channel
-    message_ts = send_notification(get_attendance_title(slack_settings))
+    message_ts, channel_id = send_notification(get_attendance_title(slack_settings)) or (None, None)
 
     # Stamp the day with a direct write: a full save() would write back every
     # column of the in-memory doc loaded before the post, overwriting whatever
-    # another process changed in Slack Settings meanwhile
+    # another process changed in Slack Settings meanwhile.
+    # The channel ID comes from Slack's response: chat.postMessage accepts a
+    # channel name, but chat.update (the in-place refresh) only accepts an ID
     frappe.db.set_single_value(
         "Slack Settings",
-        {"last_attendance_date": frappe.utils.nowdate(), "last_attendance_msg_ts": message_ts},
+        {
+            "last_attendance_date": frappe.utils.nowdate(),
+            "last_attendance_msg_ts": message_ts,
+            "last_attendance_channel_id": channel_id,
+        },
     )
 
 
@@ -195,10 +201,12 @@ def build_attendance_blocks(attendance_title: str, *, updated_at: str | None = N
     return blocks
 
 
-def send_notification(attendance_title: str) -> str | None:
+def send_notification(attendance_title: str) -> tuple[str, str] | None:
     """
     Background job to post the attendance summary to the Slack channel
-    Returns the message timestamp if successful
+    Returns the message timestamp and the ID of the channel it landed in
+    (as reported by Slack, even when the setting holds a channel name) if
+    successful
     """
     slack = SlackIntegration()
     blocks = build_attendance_blocks(attendance_title)
@@ -221,7 +229,7 @@ def send_notification(attendance_title: str) -> str | None:
     # Remember what was posted so a later refresh with the same content can
     # skip the edit
     remember_attendance_hash(message["ts"], attendance_blocks_hash(blocks))
-    return message["ts"]
+    return message["ts"], message["channel"]
 
 
 def update_attendance_summary() -> None:
@@ -258,6 +266,10 @@ def update_attendance_summary() -> None:
         if not slack.SLACK_CHANNEL_ID:
             return
 
+        # chat.update needs a channel ID (a name gives channel_not_found), so
+        # edit in the channel Slack reported when the summary was posted; the
+        # setting is only a fallback for a summary posted before that was stored
+        channel_id = slack_settings.last_attendance_channel_id or slack.SLACK_CHANNEL_ID
         message_ts = slack_settings.last_attendance_msg_ts
         blocks = build_attendance_blocks(get_attendance_title(slack_settings))
         content_hash = attendance_blocks_hash(blocks)
@@ -268,7 +280,7 @@ def update_attendance_summary() -> None:
 
         try:
             slack.slack_app.client.chat_update(
-                channel=slack.SLACK_CHANNEL_ID,
+                channel=channel_id,
                 ts=message_ts,
                 blocks=blocks,
             )

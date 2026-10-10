@@ -26,6 +26,7 @@ def _build_settings_mock(
     send_attendance_updates=1,
     last_attendance_date=None,
     last_attendance_msg_ts=None,
+    last_attendance_channel_id=None,
     attendance_time="09:00:00",
     leave_notification_subject="Employees on Leave",
 ):
@@ -33,6 +34,7 @@ def _build_settings_mock(
     settings.send_attendance_updates = send_attendance_updates
     settings.last_attendance_date = last_attendance_date
     settings.last_attendance_msg_ts = last_attendance_msg_ts
+    settings.last_attendance_channel_id = last_attendance_channel_id
     settings.attendance_time = attendance_time
     settings.leave_notification_subject = leave_notification_subject
     return settings
@@ -191,7 +193,7 @@ class TestAttendanceChannel(IntegrationTestCase):
         mock_send.assert_not_called()
 
     def test_persists_attendance_state_when_conditions_met(self):
-        """When all guards pass, attendance_channel calls send_notification and writes the returned ts + today's date back onto Slack Settings."""
+        """When all guards pass, attendance_channel calls send_notification and writes the returned ts, the channel ID Slack reported and today's date back onto Slack Settings."""
         settings = _build_settings_mock(last_attendance_date=None)
         with (
             patch(f"{ATTENDANCE_MODULE}.frappe.get_single", return_value=settings),
@@ -204,7 +206,7 @@ class TestAttendanceChannel(IntegrationTestCase):
             patch(f"{ATTENDANCE_MODULE}.get_time", return_value=time(9, 0)),
             patch(
                 f"{ATTENDANCE_MODULE}.send_notification",
-                return_value="1700000000.000999",
+                return_value=("1700000000.000999", TEST_SLACK_CHANNEL_ID),
             ) as mock_send,
             patch(f"{ATTENDANCE_MODULE}.frappe.db.set_single_value") as mock_set_single_value,
         ):
@@ -214,19 +216,49 @@ class TestAttendanceChannel(IntegrationTestCase):
         # the content hash the post just stored
         mock_set_single_value.assert_called_once_with(
             "Slack Settings",
-            {"last_attendance_date": "2026-06-15", "last_attendance_msg_ts": "1700000000.000999"},
+            {
+                "last_attendance_date": "2026-06-15",
+                "last_attendance_msg_ts": "1700000000.000999",
+                "last_attendance_channel_id": TEST_SLACK_CHANNEL_ID,
+            },
         )
         settings.save.assert_not_called()
+
+    def test_stamps_the_day_with_empty_refs_when_the_post_fails(self):
+        """When send_notification returns None (the post failed and was logged), the day is still stamped so the post is not retried every minute, with no ts and no channel."""
+        settings = _build_settings_mock(last_attendance_date=None)
+        with (
+            patch(f"{ATTENDANCE_MODULE}.frappe.get_single", return_value=settings),
+            patch(f"{ATTENDANCE_MODULE}.frappe.utils.nowdate", return_value="2026-06-15"),
+            patch(
+                f"{ATTENDANCE_MODULE}.frappe.utils.now_datetime",
+                return_value=MagicMock(time=MagicMock(return_value=time(10, 0))),
+            ),
+            patch(f"{ATTENDANCE_MODULE}.is_holiday", return_value=False),
+            patch(f"{ATTENDANCE_MODULE}.get_time", return_value=time(9, 0)),
+            patch(f"{ATTENDANCE_MODULE}.send_notification", return_value=None),
+            patch(f"{ATTENDANCE_MODULE}.frappe.db.set_single_value") as mock_set_single_value,
+        ):
+            attendance_channel()
+        mock_set_single_value.assert_called_once_with(
+            "Slack Settings",
+            {
+                "last_attendance_date": "2026-06-15",
+                "last_attendance_msg_ts": None,
+                "last_attendance_channel_id": None,
+            },
+        )
 
 
 class TestSendNotification(IntegrationTestCase):
     def test_posts_attendance_blocks_to_slack_channel_and_returns_ts(self):
-        """send_notification posts chat.postMessage to SLACK_CHANNEL_ID and returns the message ts from Slack's response."""
+        """send_notification posts chat.postMessage to SLACK_CHANNEL_ID and returns the message ts and the channel ID from Slack's response."""
         mock_slack = MagicMock()
         mock_slack.SLACK_CHANNEL_ID = TEST_SLACK_CHANNEL_ID
         mock_slack.slack_app.client.chat_postMessage.return_value = {
             "ok": True,
             "ts": "1700000000.000123",
+            "channel": TEST_SLACK_CHANNEL_ID,
         }
         with (
             patch(f"{ATTENDANCE_MODULE}.SlackIntegration", return_value=mock_slack),
@@ -237,7 +269,7 @@ class TestSendNotification(IntegrationTestCase):
             patch(f"{ATTENDANCE_MODULE}.frappe.cache", cache := _FakeCache()),
         ):
             result = send_notification("Employees on Leave")
-        self.assertEqual(result, "1700000000.000123")
+        self.assertEqual(result, ("1700000000.000123", TEST_SLACK_CHANNEL_ID))
         mock_slack.slack_app.client.chat_postMessage.assert_called_once()
         kwargs = mock_slack.slack_app.client.chat_postMessage.call_args.kwargs
         self.assertEqual(kwargs["channel"], TEST_SLACK_CHANNEL_ID)
@@ -249,7 +281,11 @@ class TestSendNotification(IntegrationTestCase):
         """A cache failure after a successful post is logged and does not lose the ts: the day must still be stamped so the post is not repeated."""
         mock_slack = MagicMock()
         mock_slack.SLACK_CHANNEL_ID = TEST_SLACK_CHANNEL_ID
-        mock_slack.slack_app.client.chat_postMessage.return_value = {"ok": True, "ts": "1700000000.000123"}
+        mock_slack.slack_app.client.chat_postMessage.return_value = {
+            "ok": True,
+            "ts": "1700000000.000123",
+            "channel": TEST_SLACK_CHANNEL_ID,
+        }
         cache = _FakeCache()
         cache.set_value.side_effect = ConnectionError("redis down")
         with (
@@ -262,7 +298,7 @@ class TestSendNotification(IntegrationTestCase):
             patch(f"{ATTENDANCE_MODULE}.generate_error_log") as mock_log,
         ):
             result = send_notification("Employees on Leave")
-        self.assertEqual(result, "1700000000.000123")
+        self.assertEqual(result, ("1700000000.000123", TEST_SLACK_CHANNEL_ID))
         mock_log.assert_called_once()
         self.assertIsInstance(mock_log.call_args.kwargs["exception"], ConnectionError)
 
@@ -296,11 +332,16 @@ def _post_and_update(rows, *, update_rows=None, forget_hash=False, leave_notific
     settings = _build_settings_mock(
         last_attendance_date="2026-06-15",
         last_attendance_msg_ts="1700000000.000777",
+        last_attendance_channel_id=TEST_SLACK_CHANNEL_ID,
         leave_notification_subject=leave_notification_subject,
     )
     mock_slack = MagicMock()
     mock_slack.SLACK_CHANNEL_ID = TEST_SLACK_CHANNEL_ID
-    mock_slack.slack_app.client.chat_postMessage.return_value = {"ok": True, "ts": "1700000000.000777"}
+    mock_slack.slack_app.client.chat_postMessage.return_value = {
+        "ok": True,
+        "ts": "1700000000.000777",
+        "channel": TEST_SLACK_CHANNEL_ID,
+    }
     cache = _FakeCache()
     with (
         patch(f"{ATTENDANCE_MODULE}.frappe.get_single", return_value=settings),
@@ -377,10 +418,37 @@ class TestBuildAttendanceBlocks(IntegrationTestCase):
 
 class TestUpdateAttendanceSummary(IntegrationTestCase):
     def test_calls_chat_update_with_stored_ts_and_updated_blocks(self):
-        """update_attendance_summary rebuilds the blocks with the current time and calls chat_update on SLACK_CHANNEL_ID with the stored last_attendance_msg_ts."""
+        """update_attendance_summary rebuilds the blocks with the current time and calls chat_update with the stored last_attendance_msg_ts in the stored channel ID, even when the setting holds a channel name (chat.update rejects names)."""
         settings = _build_settings_mock(
             last_attendance_date="2026-06-15",
             last_attendance_msg_ts="1700000000.000777",
+            last_attendance_channel_id="C0STAMPED",
+        )
+        mock_slack = MagicMock()
+        mock_slack.SLACK_CHANNEL_ID = "attendance"
+        with (
+            patch(f"{ATTENDANCE_MODULE}.frappe.get_single", return_value=settings),
+            patch(f"{ATTENDANCE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(
+                f"{ATTENDANCE_MODULE}.frappe.utils.now_datetime",
+                return_value=datetime(2026, 6, 15, 14, 32),
+            ),
+            _patch_block_inputs([]),
+        ):
+            update_attendance_summary()
+        mock_slack.slack_app.client.chat_update.assert_called_once()
+        kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
+        self.assertEqual(kwargs["channel"], "C0STAMPED")
+        self.assertEqual(kwargs["ts"], "1700000000.000777")
+        self.assertEqual(kwargs["blocks"][-1], UPDATED_AT_BLOCK)
+        mock_slack.slack_app.client.chat_postMessage.assert_not_called()
+
+    def test_falls_back_to_the_channel_setting_when_no_channel_was_stored(self):
+        """A summary posted before the channel ID was stored (upgrade day) is edited in the configured channel."""
+        settings = _build_settings_mock(
+            last_attendance_date="2026-06-15",
+            last_attendance_msg_ts="1700000000.000777",
+            last_attendance_channel_id=None,
         )
         mock_slack = MagicMock()
         mock_slack.SLACK_CHANNEL_ID = TEST_SLACK_CHANNEL_ID
@@ -394,12 +462,7 @@ class TestUpdateAttendanceSummary(IntegrationTestCase):
             _patch_block_inputs([]),
         ):
             update_attendance_summary()
-        mock_slack.slack_app.client.chat_update.assert_called_once()
-        kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
-        self.assertEqual(kwargs["channel"], TEST_SLACK_CHANNEL_ID)
-        self.assertEqual(kwargs["ts"], "1700000000.000777")
-        self.assertEqual(kwargs["blocks"][-1], UPDATED_AT_BLOCK)
-        mock_slack.slack_app.client.chat_postMessage.assert_not_called()
+        self.assertEqual(mock_slack.slack_app.client.chat_update.call_args.kwargs["channel"], TEST_SLACK_CHANNEL_ID)
 
     def test_uses_leave_notification_subject_as_title(self):
         """update_attendance_summary builds the blocks with Slack Settings.leave_notification_subject as the title, like the morning post."""

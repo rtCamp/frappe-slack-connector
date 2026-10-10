@@ -22,6 +22,7 @@
   "leave_notification_subject",
   "last_attendance_date",
   "last_attendance_msg_ts",
+  "last_attendance_channel_id",
   "timesheet_notifications_section",
   "timesheet_previousday_reminder",
   "timesheet_daily_notification_time",
@@ -51,7 +52,7 @@
   },
   {
    "depends_on": "eval:doc.send_attendance_updates == 1;",
-   "description": "The name of the Slack channel where you have to send the attendance summary message",
+   "description": "Name or ID of the Slack channel where the attendance summary is posted",
    "fieldname": "attendance_channel_id",
    "fieldtype": "Data",
    "in_list_view": 1,
@@ -123,6 +124,12 @@
    "fieldtype": "Data",
    "hidden": 1,
    "label": "Last Attendance Message ID"
+  },
+  {
+   "fieldname": "last_attendance_channel_id",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Last Attendance Channel ID"
   },
   {
    "default": "Employees on leave today",
@@ -219,7 +226,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-02-23 18:43:41.334908",
+ "modified": "2026-10-10 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Slack Connector",
  "name": "Slack Settings",

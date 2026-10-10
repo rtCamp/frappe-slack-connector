@@ -6,7 +6,7 @@ from frappe import _
 from frappe.model.document import Document
 from frappe.utils.jinja import validate_template
 
-from frappe_slack_connector.tasks.celebrations import render_slack_template
+from frappe_slack_connector.tasks.celebrations import exception_summary, render_slack_template, template_output_problem
 
 # Sample template context per field, used to dry-render templates on save.
 # The birthday context has no `years`, matching what the job passes.
@@ -39,16 +39,20 @@ class SlackSettings(Document):
 
     def validate_celebration_templates(self):
         """
-        Reject a linked celebrations Email Template that does not exist,
-        does not use HTML (its rich-text response would post raw HTML to
-        Slack), has a Jinja syntax error, fails to render, renders to
-        nothing or references a value that is not in the context (left as
-        literal {{ ... }} by Frappe's DebugUndefined), so the daily job
-        does not fail or post a broken message
+        When a celebrations Email Template link changes, reject a template
+        that does not exist, does not use HTML (its rich-text response would
+        post raw HTML to Slack), has a Jinja syntax error, fails to render,
+        renders to nothing or references a value that is not in the context
+        (left as literal {{ ... }} by Frappe's DebugUndefined).
+
+        Only a changed link is checked: background jobs save Slack Settings
+        to write their stamps, and an Email Template edited after it was
+        linked must not make those saves fail. The daily job re-checks the
+        template when it renders and falls back to the default message.
         """
         for fieldname, sample in CELEBRATION_TEMPLATE_SAMPLES.items():
             template_name = self.get(fieldname)
-            if not template_name:
+            if not template_name or not self.has_value_changed(fieldname):
                 continue
             label = _(frappe.unscrub(fieldname))
             template = frappe.db.get_value("Email Template", template_name, ["use_html", "response_html"], as_dict=True)
@@ -66,13 +70,7 @@ class SlackSettings(Document):
             try:
                 rendered = render_slack_template(source, {"employees": [sample]})
             except Exception as e:
-                summary = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
-                frappe.throw(_("{0} could not be rendered: {1}").format(label, summary))
-            if not rendered.strip():
-                frappe.throw(_("{0} renders an empty message").format(label))
-            if "{{" in rendered or "}}" in rendered:
-                frappe.throw(
-                    _("{0} references a value that does not exist (unrendered {{ ... }} left in the output)").format(
-                        label
-                    )
-                )
+                frappe.throw(_("{0} could not be rendered: {1}").format(label, exception_summary(e)))
+            problem = template_output_problem(rendered, label)
+            if problem:
+                frappe.throw(problem)

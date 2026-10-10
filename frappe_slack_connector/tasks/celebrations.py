@@ -54,8 +54,10 @@ def celebrations_channel() -> None:
 
     # Stamp the column directly: a full save would run validate and the
     # modified check, and a bad template or a concurrent save of Slack
-    # Settings would lose the stamp and repost on every tick.
-    frappe.db.set_single_value("Slack Settings", "last_celebrations_date", current_date)
+    # Settings would lose the stamp and repost on every tick. Leave
+    # ``modified`` alone too, or a long-running job that loaded Slack
+    # Settings earlier (the timesheet reminder) fails its own save.
+    frappe.db.set_single_value("Slack Settings", "last_celebrations_date", current_date, update_modified=False)
 
 
 def send_celebrations() -> None:
@@ -102,7 +104,8 @@ def send_celebrations() -> None:
             slack,
             channel,
             header=":birthday: Birthdays",
-            template=get_celebration_template(slack_settings.birthday_message_template, DEFAULT_BIRTHDAY_TEMPLATE),
+            template_name=slack_settings.birthday_message_template,
+            default_template=DEFAULT_BIRTHDAY_TEMPLATE,
             employees=birthdays,
             to_context=lambda e: to_context(e, with_years=False),
             fallback_text=lambda rows: get_birthday_reminder_text_and_message(rows)[0],
@@ -114,9 +117,8 @@ def send_celebrations() -> None:
             slack,
             channel,
             header=":tada: Work Anniversaries",
-            template=get_celebration_template(
-                slack_settings.anniversary_message_template, DEFAULT_ANNIVERSARY_TEMPLATE
-            ),
+            template_name=slack_settings.anniversary_message_template,
+            default_template=DEFAULT_ANNIVERSARY_TEMPLATE,
             employees=anniversaries,
             to_context=lambda e: to_context(e, with_years=True),
             fallback_text=get_work_anniversary_reminder_text,
@@ -124,51 +126,28 @@ def send_celebrations() -> None:
         )
 
 
-def get_celebration_template(template_name: str | None, default: str) -> str:
-    """
-    The Jinja source for an announcement: the Response (HTML) of the Email
-    Template linked from Slack Settings, the same field the timesheet
-    reminder renders, or the built-in default when nothing is linked.
-    A linked template that no longer exists or does not use HTML (its
-    rich-text response would post raw HTML) is logged and the default is
-    used, so the announcement still goes out.
-    """
-    if not template_name:
-        return default
-    template = frappe.db.get_value("Email Template", template_name, ["use_html", "response_html"], as_dict=True)
-    if template and template.use_html and (template.response_html or "").strip():
-        return template.response_html
-    generate_error_log(
-        title=_("Celebrations template not usable, using the default message"),
-        message=_(
-            "Email Template {0} is missing, has Use HTML off or has an empty Response (HTML). "
-            "Fix it or clear the link in Slack Settings."
-        ).format(template_name),
-    )
-    return default
-
-
 def post_announcement(
     slack: SlackIntegration,
     channel: str,
     *,
     header: str,
-    template: str,
+    template_name: str | None,
+    default_template: str,
     employees: list,
     to_context: Callable[[dict], dict],
     fallback_text: Callable[[list], str],
     error_title: str,
 ) -> None:
     """
-    Render the Jinja template with the employees' template context and
-    post it under a header block, with the HRMS reminder text (built from
+    Render the announcement with the employees' template context and post
+    it under a header block, with the HRMS reminder text (built from
     escaped names) as the notification fallback.
-    Failures are logged, not raised, so a broken birthday template or post
-    does not stop the anniversary post.
+    Failures are logged, not raised, so a broken post does not stop the
+    anniversary post after the birthday one.
     """
     try:
         escaped = [frappe._dict(e, name=escape_slack_text(e.name)) for e in employees]
-        text = render_slack_template(template, {"employees": [to_context(e) for e in employees]})
+        text = render_announcement(template_name, default_template, {"employees": [to_context(e) for e in employees]})
         slack.slack_app.client.chat_postMessage(
             channel=channel,
             text=fallback_text(escaped),
@@ -189,6 +168,62 @@ def post_announcement(
             message=_("Please check the celebrations channel ID and message template and try again."),
             exception=e,
         )
+
+
+def render_announcement(template_name: str | None, default_template: str, context: dict) -> str:
+    """
+    Render the Email Template linked from Slack Settings (its Response
+    (HTML), the same field the timesheet reminder renders), or the built-in
+    default when nothing is linked.
+
+    Slack Settings validates the link when it is saved, but the Email
+    Template can be edited afterwards, so the same checks run here: a
+    template that is missing, does not use HTML (its rich-text response
+    would post raw HTML), is blank, fails to render, renders nothing or
+    leaves a placeholder unrendered is logged and the default is posted
+    instead, so the announcement still goes out.
+    """
+    if not template_name:
+        return render_slack_template(default_template, context)
+    label = _("Email Template {0}").format(template_name)
+    template = frappe.db.get_value("Email Template", template_name, ["use_html", "response_html"], as_dict=True)
+    if not template or not template.use_html or not (template.response_html or "").strip():
+        problem = _("{0} is missing, has Use HTML off or has an empty Response (HTML)").format(label)
+    else:
+        try:
+            rendered = render_slack_template(template.response_html, context)
+            problem = template_output_problem(rendered, label)
+        except Exception as e:
+            problem = _("{0} could not be rendered: {1}").format(label, exception_summary(e))
+    if problem is None:
+        return rendered
+    generate_error_log(
+        title=_("Celebrations template not usable, using the default message"),
+        message=_("{0}. Fix it or clear the link in Slack Settings.").format(problem),
+    )
+    return render_slack_template(default_template, context)
+
+
+def template_output_problem(rendered: str, label: str) -> str | None:
+    """
+    Why a rendered message must not be posted, as a sentence about
+    ``label``, or None when it is fine: it is empty, or it references a
+    value that is not in the context, which Frappe's DebugUndefined leaves
+    in the output as a literal placeholder
+    """
+    if not rendered.strip():
+        return _("{0} renders an empty message").format(label)
+    if "{{" in rendered or "}}" in rendered:
+        return _("{0} references a value that does not exist (unrendered {1} left in the output)").format(
+            label, "{{ ... }}"
+        )
+    return None
+
+
+def exception_summary(e: Exception) -> str:
+    """First line of the exception message, or its type when it has none"""
+    text = str(e).strip()
+    return text.splitlines()[0] if text else type(e).__name__
 
 
 def render_slack_template(template: str, context: dict) -> str:

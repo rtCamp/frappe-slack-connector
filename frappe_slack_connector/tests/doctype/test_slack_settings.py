@@ -30,8 +30,13 @@ class TestSlackSettingsTemplateValidation(IntegrationTestCase):
         self.addCleanup(frappe.delete_doc, "Email Template", doc.name, force=True)
         return doc.name
 
-    def _settings(self, *, birthday=None, anniversary=None):
-        return frappe._dict(birthday_message_template=birthday, anniversary_message_template=anniversary)
+    def _settings(self, *, birthday=None, anniversary=None, changed=True):
+        """A stand-in Slack Settings doc; ``changed`` is what has_value_changed reports for the link fields."""
+        return frappe._dict(
+            birthday_message_template=birthday,
+            anniversary_message_template=anniversary,
+            has_value_changed=lambda fieldname: changed,
+        )
 
     def test_template_fields_link_to_email_template(self):
         """Both template fields are Links to Email Template in the doctype JSON on disk, like the timesheet reminder template."""
@@ -70,6 +75,28 @@ class TestSlackSettingsTemplateValidation(IntegrationTestCase):
         doc.anniversary_message_template = name
         with self.assertRaises(frappe.ValidationError):
             doc.validate()
+
+    def test_skips_validation_when_link_is_unchanged(self):
+        """A link that did not change in this save is not validated, so an Email Template edited after linking cannot make a background job's Slack Settings save fail."""
+        name = self._template("{% if %}")
+        SlackSettings.validate_celebration_templates(self._settings(birthday=name, anniversary=name, changed=False))
+
+    def test_real_document_save_with_unchanged_bad_link_passes(self):
+        """doc.validate() on the actual Slack Settings document passes when the (bad) link is the same as before the save."""
+        name = self._template("{{ employees")
+        doc = frappe.get_single("Slack Settings")
+        doc.anniversary_message_template = name
+        before = frappe.get_doc("Slack Settings")
+        before.anniversary_message_template = name
+        doc._doc_before_save = before
+        doc.validate()
+
+    def test_unrendered_placeholder_message_shows_double_braces(self):
+        """The validation message shows the literal {{ ... }} the user will see, not a str.format-collapsed { ... }."""
+        name = self._template("Hi {% for e in employees %}{{ e.nmae }}{% endfor %}")
+        with self.assertRaises(frappe.ValidationError) as ctx:
+            SlackSettings.validate_celebration_templates(self._settings(birthday=name))
+        self.assertIn("{{ ... }}", str(ctx.exception))
 
     def test_accepts_valid_and_empty_templates(self):
         """A valid Email Template and an empty link pass validation."""

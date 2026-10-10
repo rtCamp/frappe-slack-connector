@@ -112,11 +112,11 @@ class TestCelebrationsChannel(IntegrationTestCase):
         mock_send.assert_called_once()
 
     def test_posts_and_stamps_date_when_conditions_met(self):
-        """When all guards pass, celebrations_channel calls send_celebrations and stamps today's date directly in the DB, without a full save."""
+        """When all guards pass, celebrations_channel calls send_celebrations and stamps today's date directly in the DB, without a full save and without bumping modified."""
         settings = _build_settings_mock(last_celebrations_date=date(2026, 6, 14))
         mock_send, mock_stamp = self._run(settings)
         mock_send.assert_called_once()
-        mock_stamp.assert_called_once_with("Slack Settings", "last_celebrations_date", TODAY)
+        mock_stamp.assert_called_once_with("Slack Settings", "last_celebrations_date", TODAY, update_modified=False)
         settings.save.assert_not_called()
 
     def test_does_not_stamp_when_send_celebrations_raises(self):
@@ -394,12 +394,42 @@ class TestSendCelebrations(IntegrationTestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[1].kwargs["blocks"][0]["text"]["text"], ":tada: Work Anniversaries")
 
-    def test_logs_error_when_template_fails_to_render(self):
-        """A template that errors at render time is logged and nothing is posted for that event type."""
+    def test_falls_back_to_default_when_linked_template_fails_to_render(self):
+        """A linked template that errors at render time is logged and the default message is posted instead."""
         settings = _build_settings_mock(birthday_message_template="FSC Bad")
         mock_slack, mock_log = self._run(
             settings, birthdays=[_employee("Alice")], templates={"FSC Bad": "{{ employees.oops.deeper }}"}
         )
+        mock_log.assert_called_once()
+        self.assertIn("FSC Bad", mock_log.call_args.kwargs["message"])
+        self.assertEqual(self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args), "• Alice")
+
+    def test_falls_back_to_default_when_linked_template_leaves_a_placeholder(self):
+        """An Email Template edited after linking to reference a missing value would post DebugUndefined's literal placeholder; it is logged and the default is posted instead."""
+        settings = _build_settings_mock(birthday_message_template="FSC Typo")
+        mock_slack, mock_log = self._run(
+            settings,
+            birthdays=[_employee("Alice")],
+            templates={"FSC Typo": "{% for e in employees %}{{ e.name }} {{ e.years }}{% endfor %}"},
+        )
+        mock_log.assert_called_once()
+        self.assertIn("does not exist", mock_log.call_args.kwargs["message"])
+        self.assertEqual(self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args), "• Alice")
+
+    def test_falls_back_to_default_when_linked_template_renders_empty(self):
+        """A linked template that renders to nothing for today's data is logged and the default is posted instead."""
+        settings = _build_settings_mock(anniversary_message_template="FSC Empty")
+        mock_slack, mock_log = self._run(
+            settings, anniversaries=[_employee("Alice")], templates={"FSC Empty": "{% if false %}x{% endif %}"}
+        )
+        mock_log.assert_called_once()
+        self.assertIn("empty", mock_log.call_args.kwargs["message"])
+        self.assertIn("• Alice - 3 years", self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args))
+
+    def test_default_template_render_error_is_logged_and_nothing_posted(self):
+        """If the built-in default itself fails to render (nothing to fall back to), the error is logged and nothing is posted for that event type."""
+        with patch(f"{CELEBRATIONS_MODULE}.DEFAULT_BIRTHDAY_TEMPLATE", "{{ employees.oops.deeper }}"):
+            mock_slack, mock_log = self._run(_build_settings_mock(), birthdays=[_employee("Alice")])
         mock_slack.slack_app.client.chat_postMessage.assert_not_called()
         mock_log.assert_called_once()
 

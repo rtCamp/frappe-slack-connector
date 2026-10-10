@@ -3,7 +3,7 @@ from frappe import _, clear_messages
 from hrms.hr.doctype.leave_application.leave_application import get_leave_approver
 
 from frappe_slack_connector.db.leave_application import custom_fields_exist
-from frappe_slack_connector.db.user_meta import get_employeeid_from_slackid
+from frappe_slack_connector.db.user_meta import get_employeeid_from_slackid, get_userid_from_slackid
 from frappe_slack_connector.helpers.http_response import send_http_response
 from frappe_slack_connector.helpers.str_utils import strip_html_tags
 from frappe_slack_connector.slack.app import SlackIntegration
@@ -44,6 +44,13 @@ def handler(slack: SlackIntegration, payload: dict):
         employee = get_employeeid_from_slackid(user_info["id"])
         if not employee:
             frappe.throw(_("No employee found for this Slack user"), frappe.ValidationError)
+
+        # Save as the applicant so the leave (and the notification jobs it
+        # enqueues) do not run as Guest
+        user = get_userid_from_slackid(user_info["id"])
+        if not user:
+            frappe.throw(_("No user found for this Slack user"), frappe.ValidationError)
+        frappe.set_user(user)  # nosemgrep
 
         # Create the leave application
         leave_application = frappe.get_doc(

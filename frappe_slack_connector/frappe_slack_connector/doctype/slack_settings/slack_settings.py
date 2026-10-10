@@ -41,9 +41,11 @@ class SlackSettings(Document):
         """
         When a celebrations Email Template link changes, reject a template
         that does not exist, does not use HTML (its rich-text response would
-        post raw HTML to Slack), has a Jinja syntax error, fails to render,
-        renders to nothing or references a value that is not in the context
-        (left as literal {{ ... }} by Frappe's DebugUndefined).
+        post raw HTML to Slack), has a Jinja syntax error, references a
+        value that is not in the context (templates render with
+        StrictUndefined, so {{ e.nmae }} and {% if e.nmae %} both fail
+        here rather than post a placeholder or silently skip), fails to
+        render for any other reason, or renders to nothing.
 
         Only a changed link is checked: background jobs save Slack Settings
         to write their stamps, and an Email Template edited after it was

@@ -8,6 +8,7 @@ from hrms.controllers.employee_reminders import (
     get_employees_having_an_event_today,
     get_work_anniversary_reminder_text,
 )
+from jinja2 import StrictUndefined
 
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.str_utils import escape_slack_text
@@ -156,10 +157,10 @@ def post_announcement(
                     "type": "header",
                     "text": {"type": "plain_text", "text": header, "emoji": True},
                 },
-                {
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": text.strip()},
-                },
+                *(
+                    {"type": "section", "text": {"type": "mrkdwn", "text": chunk}}
+                    for chunk in split_mrkdwn(text.strip())
+                ),
             ],
         )
     except Exception as e:
@@ -207,17 +208,43 @@ def render_announcement(template_name: str | None, default_template: str, contex
 def template_output_problem(rendered: str, label: str) -> str | None:
     """
     Why a rendered message must not be posted, as a sentence about
-    ``label``, or None when it is fine: it is empty, or it references a
-    value that is not in the context, which Frappe's DebugUndefined leaves
-    in the output as a literal placeholder
+    ``label``, or None when it is fine. A reference to a value that is not
+    in the context is a render error (templates render with
+    StrictUndefined), so the only thing left to catch is an empty message.
     """
     if not rendered.strip():
         return _("{0} renders an empty message").format(label)
-    if "{{" in rendered or "}}" in rendered:
-        return _("{0} references a value that does not exist (unrendered {1} left in the output)").format(
-            label, "{{ ... }}"
-        )
     return None
+
+
+# Slack rejects a section block whose text is longer than this
+SLACK_SECTION_TEXT_LIMIT = 3000
+
+
+def split_mrkdwn(text: str, limit: int = SLACK_SECTION_TEXT_LIMIT) -> list[str]:
+    """
+    Split a rendered message into pieces that each fit one Slack section
+    block, breaking between lines (a bullet per line in the defaults) and
+    only cutting inside a line when that single line is itself too long
+    """
+    chunks: list[str] = []
+    current = ""
+    for line in text.split("\n"):
+        while len(line) > limit:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(line[:limit])
+            line = line[limit:]
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > limit:
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current or not chunks:
+        chunks.append(current)
+    return chunks
 
 
 def exception_summary(e: Exception) -> str:
@@ -228,17 +255,20 @@ def exception_summary(e: Exception) -> str:
 
 def render_slack_template(template: str, context: dict) -> str:
     """
-    Render a message template from Slack Settings as a string.
-    frappe.render_template treats a one-line template ending in .txt or
-    .html as a file path, so use the sandboxed environment directly,
-    mirroring its string branch. Jinja errors propagate to the caller.
+    Render a message template as a string with Frappe's sandboxed Jinja
+    environment, mirroring the string branch of frappe.render_template
+    (which would treat a one-line template ending in .txt or .html as a
+    file path). Unlike Frappe's default, undefined values raise instead of
+    rendering as DebugUndefined placeholders (or as silently false in a
+    condition), so a typo such as {{ e.nmae }} is an error the caller sees.
+    Jinja errors propagate to the caller.
     """
     from frappe.utils.jinja import get_jenv, safe_render_flags
 
     if ".__" in template:
         frappe.throw(_("Illegal template"))
     with safe_render_flags():
-        return get_jenv().from_string(template).render(context)
+        return get_jenv().overlay(undefined=StrictUndefined).from_string(template).render(context)
 
 
 def get_employees_with_event(event_type: str) -> list:

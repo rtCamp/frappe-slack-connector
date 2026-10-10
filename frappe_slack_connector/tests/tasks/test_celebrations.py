@@ -9,6 +9,7 @@ from frappe_slack_connector.tasks.celebrations import (
     get_employees_with_event,
     get_slack_user_ids,
     send_celebrations,
+    split_mrkdwn,
 )
 from frappe_slack_connector.tests import (
     TEST_SLACK_CHANNEL_ID,
@@ -404,17 +405,31 @@ class TestSendCelebrations(IntegrationTestCase):
         self.assertIn("FSC Bad", mock_log.call_args.kwargs["message"])
         self.assertEqual(self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args), "• Alice")
 
-    def test_falls_back_to_default_when_linked_template_leaves_a_placeholder(self):
-        """An Email Template edited after linking to reference a missing value would post DebugUndefined's literal placeholder; it is logged and the default is posted instead."""
-        settings = _build_settings_mock(birthday_message_template="FSC Typo")
-        mock_slack, mock_log = self._run(
-            settings,
-            birthdays=[_employee("Alice")],
-            templates={"FSC Typo": "{% for e in employees %}{{ e.name }} {{ e.years }}{% endfor %}"},
-        )
-        mock_log.assert_called_once()
-        self.assertIn("does not exist", mock_log.call_args.kwargs["message"])
-        self.assertEqual(self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args), "• Alice")
+    def test_falls_back_to_default_when_linked_template_references_unknown_value(self):
+        """An Email Template edited after linking to reference a missing value (in output or only in a condition) is a render error: logged, and the default is posted instead of a placeholder or a silently altered message."""
+        for source in (
+            "{% for e in employees %}{{ e.name }} {{ e.years }}{% endfor %}",
+            "{% for e in employees %}{{ e.name }}{% if e.yeras %}!{% endif %}{% endfor %}",
+        ):
+            settings = _build_settings_mock(birthday_message_template="FSC Typo")
+            mock_slack, mock_log = self._run(settings, birthdays=[_employee("Alice")], templates={"FSC Typo": source})
+            mock_log.assert_called_once()
+            self.assertIn("could not be rendered", mock_log.call_args.kwargs["message"])
+            self.assertEqual(self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args), "• Alice")
+
+    def test_long_list_is_split_across_section_blocks(self):
+        """A list longer than Slack's 3000-character section limit is posted as several section blocks under the one header, split between bullets, with nothing lost."""
+        people = [_employee(f"Employee Number {i:03d} Example", date_of_joining=date(2020, 6, 15)) for i in range(150)]
+        mock_slack, mock_log = self._run(_build_settings_mock(), anniversaries=people)
+        mock_log.assert_not_called()
+        blocks = mock_slack.slack_app.client.chat_postMessage.call_args.kwargs["blocks"]
+        self.assertEqual(blocks[0]["type"], "header")
+        sections = [b["text"]["text"] for b in blocks[1:]]
+        self.assertGreater(len(sections), 1)
+        for section in sections:
+            self.assertLessEqual(len(section), 3000)
+            self.assertTrue(section.startswith("• "))
+        self.assertEqual("\n".join(sections).count("• "), 150)
 
     def test_falls_back_to_default_when_linked_template_renders_empty(self):
         """A linked template that renders to nothing for today's data is logged and the default is posted instead."""
@@ -473,6 +488,23 @@ class TestSendCelebrations(IntegrationTestCase):
         self.assertEqual(
             self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args), "See Alice in notes.txt"
         )
+
+
+class TestSplitMrkdwn(IntegrationTestCase):
+    def test_short_text_is_one_chunk(self):
+        self.assertEqual(split_mrkdwn("• a\n• b"), ["• a\n• b"])
+
+    def test_empty_text_is_one_empty_chunk(self):
+        self.assertEqual(split_mrkdwn(""), [""])
+
+    def test_splits_between_lines_at_the_limit(self):
+        """Lines are packed up to the limit and a line that would overflow starts the next chunk."""
+        self.assertEqual(split_mrkdwn("aaaa\nbbbb\ncc", limit=9), ["aaaa\nbbbb", "cc"])
+        self.assertEqual(split_mrkdwn("aaaa\nbbbb\ncc", limit=8), ["aaaa", "bbbb\ncc"])
+
+    def test_cuts_a_single_overlong_line(self):
+        """Only a line longer than the limit on its own is cut mid-line."""
+        self.assertEqual(split_mrkdwn("ab\n" + "x" * 10 + "\ncd", limit=4), ["ab", "xxxx", "xxxx", "xx", "cd"])
 
 
 class TestGetEmployeesWithEvent(IntegrationTestCase):

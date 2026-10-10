@@ -91,12 +91,18 @@ class TestSlackSettingsTemplateValidation(IntegrationTestCase):
         doc._doc_before_save = before
         doc.validate()
 
-    def test_unrendered_placeholder_message_shows_double_braces(self):
-        """The validation message shows the literal {{ ... }} the user will see, not a str.format-collapsed { ... }."""
+    def test_unknown_value_message_names_the_value(self):
+        """The validation message for a typo names the missing attribute so the user can find it."""
         name = self._template("Hi {% for e in employees %}{{ e.nmae }}{% endfor %}")
         with self.assertRaises(frappe.ValidationError) as ctx:
             SlackSettings.validate_celebration_templates(self._settings(birthday=name))
-        self.assertIn("{{ ... }}", str(ctx.exception))
+        self.assertIn("nmae", str(ctx.exception))
+
+    def test_rejects_unknown_value_used_only_in_a_condition(self):
+        """A typo used only in {% if %} renders non-empty output under DebugUndefined; StrictUndefined makes it an error here too."""
+        name = self._template("Hi {% for e in employees %}{{ e.name }}{% if e.nmae %}!{% endif %}{% endfor %}")
+        with self.assertRaises(frappe.ValidationError):
+            SlackSettings.validate_celebration_templates(self._settings(birthday=name))
 
     def test_accepts_valid_and_empty_templates(self):
         """A valid Email Template and an empty link pass validation."""

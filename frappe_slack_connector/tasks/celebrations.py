@@ -15,12 +15,13 @@ from frappe_slack_connector.slack.app import SlackIntegration
 
 # Default messages: one bullet per person (the header block above the
 # message carries the greeting). The anniversary list is grouped by company,
-# each group under its company name
+# each group under its company name once there is more than one company
 DEFAULT_BIRTHDAY_TEMPLATE = "{% for e in employees %}• {{ e.mention }}{% if not loop.last %}\n{% endif %}{% endfor %}"
 
 DEFAULT_ANNIVERSARY_TEMPLATE = (
-    "{% for company, people in employees | groupby('company') %}"
-    "*{{ company }}*\n"
+    "{% set groups = employees | groupby('company') %}"
+    "{% for company, people in groups %}"
+    "{% if groups | length > 1 %}*{{ company }}*\n{% endif %}"
     "{% for e in people %}• {{ e.mention }} - {{ e.years }} year{{ '' if e.years == 1 else 's' }}"
     "{% if not loop.last %}\n{% endif %}{% endfor %}"
     "{% if not loop.last %}\n{% endif %}"

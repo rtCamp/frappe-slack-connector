@@ -231,24 +231,25 @@ class TestSendCelebrations(IntegrationTestCase):
     def test_escapes_slack_control_characters_in_names(self):
         """& < > in an employee name or company are escaped so they cannot be read as mentions or links."""
         tom = _employee("Tom & <Jerry>", company="A <B>")
-        mock_slack, _ = self._run(_build_settings_mock(), anniversaries=[tom])
+        ann = _employee("Ann", company="Other Co")
+        mock_slack, _ = self._run(_build_settings_mock(), anniversaries=[tom, ann])
         text = self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args)
         self.assertIn("Tom &amp; &lt;Jerry&gt;", text)
         self.assertIn("*A &lt;B&gt;*", text)
 
     def test_anniversary_message_shows_years_and_company(self):
-        """The anniversary post lists the employee with the number of completed years under the company name."""
+        """The anniversary post lists the employee with the number of completed years; a single company gets no heading."""
         alice = _employee("Alice Example", date_of_joining=date(2023, 6, 15))
         mock_slack, _ = self._run(_build_settings_mock(), anniversaries=[alice])
         call = mock_slack.slack_app.client.chat_postMessage.call_args
         self.assertEqual(call.kwargs["blocks"][0]["text"]["text"], ":tada: Work Anniversaries")
         self.assertEqual(
             self._section_text(call),
-            "*Example Co*\n• Alice Example - 3 years",
+            "• Alice Example - 3 years",
         )
 
     def test_anniversary_message_names_the_company_once_per_group(self):
-        """People are bulleted under their company name, one group per company."""
+        """With more than one company, people are bulleted under their company name, one group per company."""
         alice = _employee("Alice Example", date_of_joining=date(2023, 6, 15))
         bob = _employee("Bob Example", date_of_joining=date(2021, 6, 15))
         carol = _employee("Carol Example", company="Other Co", date_of_joining=date(2025, 6, 15))
@@ -256,6 +257,16 @@ class TestSendCelebrations(IntegrationTestCase):
         self.assertEqual(
             self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args),
             "*Example Co*\n• Alice Example - 3 years\n• Bob Example - 5 years\n*Other Co*\n• Carol Example - 1 year",
+        )
+
+    def test_anniversary_message_has_no_company_heading_for_one_company(self):
+        """Several people at the same company are one plain list, no company heading."""
+        alice = _employee("Alice Example", date_of_joining=date(2023, 6, 15))
+        bob = _employee("Bob Example", date_of_joining=date(2021, 6, 15))
+        mock_slack, _ = self._run(_build_settings_mock(), anniversaries=[alice, bob])
+        self.assertEqual(
+            self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args),
+            "• Alice Example - 3 years\n• Bob Example - 5 years",
         )
 
     def test_anniversary_message_uses_singular_year(self):
@@ -311,7 +322,7 @@ class TestSendCelebrations(IntegrationTestCase):
         )
         mock_log.assert_called_once()
         self.assertIn(
-            "*Example Co*\n• Alice",
+            "• Alice",
             self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args),
         )
 

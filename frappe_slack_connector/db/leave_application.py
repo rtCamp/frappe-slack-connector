@@ -52,7 +52,9 @@ def get_employees_on_leave() -> list:
             "docstatus": ("!=", 2),
         },
         fields=fields,
-        order_by="to_date asc",
+        # Deterministic order: the summary content is fingerprinted to skip
+        # no-op edits, so ties must not reorder between two builds
+        order_by="to_date asc, name asc",
     )
 
     if not leave_applications:

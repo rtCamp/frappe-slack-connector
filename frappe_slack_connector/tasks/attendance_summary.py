@@ -19,6 +19,12 @@ from frappe_slack_connector.slack.app import SlackIntegration
 # Name of the site-level lock that serialises in-place summary updates
 ATTENDANCE_UPDATE_LOCK = "fsc_attendance_summary_update"
 
+# Cache key prefix for the fingerprint of what a summary message currently
+# shows, keyed by the message ts; kept for two days so the entry outlives the
+# message it describes without piling up
+ATTENDANCE_HASH_CACHE_PREFIX = "fsc_attendance_summary_hash"
+ATTENDANCE_HASH_TTL_SECONDS = 2 * 24 * 60 * 60
+
 
 def attendance_channel() -> None:
     """
@@ -50,8 +56,8 @@ def attendance_channel() -> None:
     message_ts = send_notification(get_attendance_title(slack_settings))
 
     # Stamp the day with a direct write: a full save() would write back every
-    # column of the stale in-memory doc, including the content hash the post
-    # just stored and any field another process changed meanwhile
+    # column of the in-memory doc loaded before the post, overwriting whatever
+    # another process changed in Slack Settings meanwhile
     frappe.db.set_single_value(
         "Slack Settings",
         {"last_attendance_date": frappe.utils.nowdate(), "last_attendance_msg_ts": message_ts},
@@ -81,20 +87,41 @@ def attendance_blocks_hash(blocks: list) -> str:
     """
     Fingerprint of the summary content, used to skip a Slack edit that
     would change nothing (for example the later jobs of a bulk reject, each
-    of which rebuilds the same list). The "Updated at" block is left out so
-    the time of the edit does not count as a change
+    of which rebuilds the same list). Callers hash the content blocks before
+    appending the "Updated at" block, so the time of an edit is not a change
     """
-    content = [block for block in blocks if not _is_updated_at_block(block)]
-    return hashlib.sha256(json.dumps(content, sort_keys=True, default=str).encode()).hexdigest()
+    return hashlib.sha256(json.dumps(blocks, sort_keys=True, default=str).encode()).hexdigest()
 
 
-def _is_updated_at_block(block: dict) -> bool:
-    elements = block.get("elements") or []
-    return (
-        block.get("type") == "context"
-        and len(elements) == 1
-        and str(elements[0].get("text", "")).startswith("_Updated at ")
-    )
+def _attendance_hash_key(message_ts: str) -> str:
+    return f"{ATTENDANCE_HASH_CACHE_PREFIX}:{message_ts}"
+
+
+def get_attendance_hash(message_ts: str) -> str | None:
+    """
+    Fingerprint of what the summary message ``message_ts`` currently shows,
+    or None when unknown (never recorded, expired, or the cache was flushed)
+    """
+    return frappe.cache.get_value(_attendance_hash_key(message_ts))
+
+
+def remember_attendance_hash(message_ts: str, content_hash: str) -> None:
+    """
+    Record what Slack now shows for ``message_ts``, right after Slack
+    accepted the post or edit. Lives in the cache, not in Slack Settings:
+    a document write would bump its ``modified`` on every refresh and make
+    any long-running job that later saves Slack Settings fail its timestamp
+    check. Never raises: losing the fingerprint only costs one redundant edit
+    """
+    try:
+        frappe.cache.set_value(
+            _attendance_hash_key(message_ts), content_hash, expires_in_sec=ATTENDANCE_HASH_TTL_SECONDS
+        )
+    except Exception as e:
+        generate_error_log(
+            title=_("Error remembering the attendance summary fingerprint"),
+            exception=e,
+        )
 
 
 def build_attendance_blocks(attendance_title: str, *, updated_at: str | None = None) -> list:
@@ -193,7 +220,7 @@ def send_notification(attendance_title: str) -> str | None:
 
     # Remember what was posted so a later refresh with the same content can
     # skip the edit
-    frappe.db.set_single_value("Slack Settings", "last_attendance_blocks_hash", attendance_blocks_hash(blocks))
+    remember_attendance_hash(message["ts"], attendance_blocks_hash(blocks))
     return message["ts"]
 
 
@@ -210,10 +237,12 @@ def update_attendance_summary() -> None:
     The whole job (read, build, compare, edit) runs under a site-level file
     lock so that concurrent refreshes (for example a bulk reject queues one
     job per leave) cannot interleave and let an older read overwrite a newer
-    edit. Within the lock the rebuilt content is compared with what was last
-    posted or edited; when it is the same (the earlier job of that burst
-    already caught up with every change) the Slack call is skipped, and the
-    stored fingerprint is only advanced after Slack accepted the edit.
+    edit. Within the lock the rebuilt content is compared with the cached
+    fingerprint of what the message currently shows; when they match (the
+    earlier job of that burst already caught up with every change) the Slack
+    call is skipped. The fingerprint is recorded right after Slack accepts
+    the edit, still inside the lock, so the next job compares against what
+    Slack really shows.
     """
     with filelock(ATTENDANCE_UPDATE_LOCK, timeout=60):
         slack_settings = frappe.get_single("Slack Settings")
@@ -225,18 +254,22 @@ def update_attendance_summary() -> None:
         ):
             return
 
+        slack = SlackIntegration()
+        if not slack.SLACK_CHANNEL_ID:
+            return
+
+        message_ts = slack_settings.last_attendance_msg_ts
         blocks = build_attendance_blocks(get_attendance_title(slack_settings))
         content_hash = attendance_blocks_hash(blocks)
-        if content_hash == slack_settings.last_attendance_blocks_hash:
+        if content_hash == get_attendance_hash(message_ts):
             return
 
         blocks.append(updated_at_context_block(frappe.utils.now_datetime().strftime("%H:%M")))
 
-        slack = SlackIntegration()
         try:
             slack.slack_app.client.chat_update(
                 channel=slack.SLACK_CHANNEL_ID,
-                ts=slack_settings.last_attendance_msg_ts,
+                ts=message_ts,
                 blocks=blocks,
             )
         except Exception as e:
@@ -247,7 +280,7 @@ def update_attendance_summary() -> None:
             )
             return
 
-        frappe.db.set_single_value("Slack Settings", "last_attendance_blocks_hash", content_hash)
+        remember_attendance_hash(message_ts, content_hash)
 
 
 def get_leave_type(user_application: dict) -> str:

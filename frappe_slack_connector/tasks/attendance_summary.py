@@ -59,6 +59,13 @@ def send_notification(attendance_title: str) -> str | None:
     Returns the message timestamp if successful
     """
     slack = SlackIntegration()
+    if not slack.SLACK_CHANNEL_ID:
+        generate_error_log(
+            title=_("Attendance channel not set"),
+            message=_("Set the Attendance Channel ID in Slack Settings."),
+        )
+        return None
+
     mention_users = frappe.db.get_single_value("Slack Settings", "mention_user")
     leave_groups = {"Full Day": [], "Half Day": []}
     if custom_fields_exist():

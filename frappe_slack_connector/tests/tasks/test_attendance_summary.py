@@ -160,6 +160,19 @@ class TestSendNotification(IntegrationTestCase):
         kwargs = mock_slack.slack_app.client.chat_postMessage.call_args.kwargs
         self.assertEqual(kwargs["channel"], TEST_SLACK_CHANNEL_ID)
 
+    def test_logs_error_and_skips_post_when_attendance_channel_empty(self):
+        """send_notification logs an error and returns None without calling Slack when no attendance channel is configured."""
+        mock_slack = MagicMock()
+        mock_slack.SLACK_CHANNEL_ID = None
+        with (
+            patch(f"{ATTENDANCE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{ATTENDANCE_MODULE}.generate_error_log") as mock_log,
+        ):
+            result = send_notification("Employees on Leave")
+        self.assertIsNone(result)
+        mock_log.assert_called_once()
+        mock_slack.slack_app.client.chat_postMessage.assert_not_called()
+
     def test_logs_error_and_returns_none_when_slack_post_raises(self):
         """send_notification logs an error via generate_error_log when chat_postMessage raises, and returns None."""
         mock_slack = MagicMock()

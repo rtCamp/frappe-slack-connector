@@ -12,7 +12,7 @@ from frappe_slack_connector.db.leave_application import (
 )
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
-from frappe_slack_connector.helpers.str_utils import escape_mrkdwn
+from frappe_slack_connector.helpers.str_utils import escape_slack_text
 from frappe_slack_connector.slack.app import SlackIntegration
 
 
@@ -286,7 +286,7 @@ def _format_decider(slack: SlackIntegration, user_email: str | None) -> str | No
         slack_id = None
     if slack_id and frappe.db.get_single_value("Slack Settings", "mention_user"):
         return f"<@{slack_id}>"
-    return escape_mrkdwn(frappe.db.get_value("User", user_email, "full_name") or user_email)
+    return escape_slack_text(frappe.db.get_value("User", user_email, "full_name") or user_email)
 
 
 def _applicant_text(status: str | None) -> str:

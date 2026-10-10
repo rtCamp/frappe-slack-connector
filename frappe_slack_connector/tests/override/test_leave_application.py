@@ -94,7 +94,10 @@ def _build_slack_settings_mock(
     settings.send_attendance_updates = send_attendance_updates
     settings.last_attendance_date = last_attendance_date
     settings.last_attendance_msg_ts = last_attendance_msg_ts
+    settings.last_attendance_channel_id = None
     settings.mention_user = mention_user
+    # Document.get(): a field the doctype does not have yet reads as None, never as a MagicMock
+    settings.get.side_effect = lambda fieldname, default=None: getattr(settings, fieldname, default)
     return settings
 
 
@@ -143,6 +146,7 @@ def _leave_override_env(
             return employee_status
         if doctype == "Leave Application" and fieldname == list(ATTENDANCE_REPLY_FIELDS):
             assert kwargs.get("as_dict"), "the reply reference is read as a dict"
+            assert kwargs.get("ignore"), "a missing column (fixtures not yet synced) must not break a save"
             return frappe._dict({ATTENDANCE_REPLY_TS_FIELD: stored_ts, ATTENDANCE_REPLY_CHANNEL_FIELD: stored_channel})
         return real_get_value(doctype, filters, fieldname, *args, **kwargs)
 
@@ -367,6 +371,16 @@ class TestPostSameDayLeaveToAttendanceThread(IntegrationTestCase):
         )
         mocks.error_log.assert_not_called()
 
+    def test_posts_reply_in_the_channel_stored_by_the_morning_post(self):
+        """When Slack Settings carries the channel ID the summary was posted in, the reply goes there (the thread lives there), not to the setting, which may have been changed since the morning."""
+        doc = _build_leave_doc(from_date="2026-06-10", to_date="2026-06-10")
+        mock_slack = _build_slack_mock()
+        settings = _build_slack_settings_mock()
+        settings.last_attendance_channel_id = "C0MORNING"
+        with _leave_override_env(settings=settings):
+            post_same_day_leave_to_attendance_thread(doc, slack=mock_slack)
+        self.assertEqual(mock_slack.slack_app.client.chat_postMessage.call_args.kwargs["channel"], "C0MORNING")
+
     def test_reply_wording_mentions_employee_and_full_day(self):
         """The reply reads "<mention> is on leave today. _(Full Day)_" for a full-day leave when mention_user is on."""
         doc = _build_leave_doc(from_date="2026-06-10", to_date="2026-06-10")
@@ -553,7 +567,9 @@ class TestOnUpdateWithdrawAttendanceReply(IntegrationTestCase):
             _leave_override_env(stored_ts=reply_ts) as mocks,
         ):
             on_update_withdraw_attendance_reply(doc, method="on_update")
-        mocks.get_value.assert_any_call("Leave Application", doc.name, list(ATTENDANCE_REPLY_FIELDS), as_dict=True)
+        mocks.get_value.assert_any_call(
+            "Leave Application", doc.name, list(ATTENDANCE_REPLY_FIELDS), as_dict=True, ignore=True
+        )
         _assert_struck_through(mock_slack, reply_ts)
         mocks.error_log.assert_not_called()
 
@@ -730,7 +746,7 @@ class TestRestoreAttendanceReplyTs(IntegrationTestCase):
         ):
             restore_attendance_reply_ts(doc, method="before_validate")
         mock_get_value.assert_called_once_with(
-            "Leave Application", doc.name, list(ATTENDANCE_REPLY_FIELDS), as_dict=True
+            "Leave Application", doc.name, list(ATTENDANCE_REPLY_FIELDS), as_dict=True, ignore=True
         )
         self.assertEqual(doc.get(ATTENDANCE_REPLY_TS_FIELD), REPLY_TS)
         self.assertEqual(doc.get(ATTENDANCE_REPLY_CHANNEL_FIELD), REPLY_CHANNEL)
@@ -744,7 +760,7 @@ class TestRestoreAttendanceReplyTs(IntegrationTestCase):
         ):
             restore_attendance_reply_ts(doc, method="before_validate")
         mock_get_value.assert_called_once_with(
-            "Leave Application", doc.name, list(ATTENDANCE_REPLY_FIELDS), as_dict=True
+            "Leave Application", doc.name, list(ATTENDANCE_REPLY_FIELDS), as_dict=True, ignore=True
         )
         self.assertEqual(doc.get(ATTENDANCE_REPLY_TS_FIELD), REPLY_TS)
         self.assertEqual(doc.get(ATTENDANCE_REPLY_CHANNEL_FIELD), REPLY_CHANNEL)
@@ -778,12 +794,21 @@ class TestRestoreAttendanceReplyTs(IntegrationTestCase):
 
     def test_clears_ts_on_nameless_docs_without_reading_database(self):
         """A doc built in memory and never inserted reports is_new() False but has no name; its ts is blanked and the database is not queried without a name."""
-        doc = self._build_real_doc(name=None, **{ATTENDANCE_REPLY_TS_FIELD: SUMMARY_TS})
+        doc = self._build_real_doc(
+            name=None, **{ATTENDANCE_REPLY_TS_FIELD: SUMMARY_TS, ATTENDANCE_REPLY_CHANNEL_FIELD: "C0FORGED"}
+        )
         self.assertFalse(doc.is_new())
         with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value") as mock_get_value:
             restore_attendance_reply_ts(doc, method="before_validate")
         mock_get_value.assert_not_called()
         self.assertIsNone(doc.get(ATTENDANCE_REPLY_TS_FIELD))
+        self.assertIsNone(doc.get(ATTENDANCE_REPLY_CHANNEL_FIELD))
+
+    def test_reply_reference_fields_are_installed_from_fixtures(self):
+        """The field names the code reads and writes exist on Leave Application: every other test mocks the database, so this is the one check that the constants match the fixture."""
+        meta = frappe.get_meta("Leave Application")
+        for fieldname in ATTENDANCE_REPLY_FIELDS:
+            self.assertTrue(meta.has_field(fieldname), fieldname)
 
 
 class TestLeaveApplicationHooks(IntegrationTestCase):

@@ -195,8 +195,11 @@ def post_same_day_leave_to_attendance_thread(doc: Document, slack: SlackIntegrat
     name = _same_day_reply_name(slack, doc.employee, doc.employee_name, slack_settings.mention_user)
     day_period = get_leave_type(doc, on_date=today)
 
+    # The thread lives where the summary was posted. The summary job stores
+    # that channel's ID (when it has the field for it); the setting is the
+    # fallback, and may have been changed since the morning post
     response = slack.slack_app.client.chat_postMessage(
-        channel=slack.SLACK_CHANNEL_ID,
+        channel=slack_settings.get("last_attendance_channel_id") or slack.SLACK_CHANNEL_ID,
         blocks=[_same_day_reply_block(_same_day_reply_text(name, day_period))],
         thread_ts=slack_settings.last_attendance_msg_ts,
         reply_broadcast=True,
@@ -205,7 +208,7 @@ def post_same_day_leave_to_attendance_thread(doc: Document, slack: SlackIntegrat
     frappe.db.set_value(
         "Leave Application",
         doc.name,
-        {ATTENDANCE_REPLY_TS_FIELD: reply_ts, ATTENDANCE_REPLY_CHANNEL_FIELD: response["channel"]},
+        {ATTENDANCE_REPLY_TS_FIELD: reply_ts, ATTENDANCE_REPLY_CHANNEL_FIELD: response.get("channel")},
         update_modified=False,
     )
     return reply_ts
@@ -284,7 +287,11 @@ def get_attendance_reply_ref(leave_name: str) -> tuple[str | None, str | None]:
     read from the database; (None, None) when nothing is stored or the row
     is gone
     """
-    stored = frappe.db.get_value("Leave Application", leave_name, list(ATTENDANCE_REPLY_FIELDS), as_dict=True)
+    # ignore=True: nothing to restore while the custom fields are not yet
+    # installed (a save between the code upgrade and the fixture sync)
+    stored = frappe.db.get_value(
+        "Leave Application", leave_name, list(ATTENDANCE_REPLY_FIELDS), as_dict=True, ignore=True
+    )
     if not stored:
         return None, None
     return stored.get(ATTENDANCE_REPLY_TS_FIELD) or None, stored.get(ATTENDANCE_REPLY_CHANNEL_FIELD) or None

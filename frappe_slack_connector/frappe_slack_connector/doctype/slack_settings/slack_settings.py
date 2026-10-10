@@ -39,20 +39,32 @@ class SlackSettings(Document):
 
     def validate_celebration_templates(self):
         """
-        Reject a celebrations message template that has a Jinja syntax
-        error, fails to render, renders to nothing or references a value
-        that is not in the context (left as literal {{ ... }} by Frappe's
-        DebugUndefined), so the daily job does not fail or post a broken
-        message
+        Reject a linked celebrations Email Template that does not exist,
+        does not use HTML (its rich-text response would post raw HTML to
+        Slack), has a Jinja syntax error, fails to render, renders to
+        nothing or references a value that is not in the context (left as
+        literal {{ ... }} by Frappe's DebugUndefined), so the daily job
+        does not fail or post a broken message
         """
         for fieldname, sample in CELEBRATION_TEMPLATE_SAMPLES.items():
-            template = self.get(fieldname)
-            if not template:
+            template_name = self.get(fieldname)
+            if not template_name:
                 continue
-            validate_template(template)
             label = _(frappe.unscrub(fieldname))
+            template = frappe.db.get_value("Email Template", template_name, ["use_html", "response_html"], as_dict=True)
+            if not template:
+                frappe.throw(_("{0}: Email Template {1} does not exist").format(label, template_name))
+            if not template.use_html:
+                frappe.throw(
+                    _(
+                        "{0}: enable Use HTML on Email Template {1} and put the Slack message in Response (HTML), "
+                        "so it is stored as plain Jinja and not as rich text"
+                    ).format(label, template_name)
+                )
+            source = template.response_html or ""
+            validate_template(source)
             try:
-                rendered = render_slack_template(template, {"employees": [sample]})
+                rendered = render_slack_template(source, {"employees": [sample]})
             except Exception as e:
                 summary = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
                 frappe.throw(_("{0} could not be rendered: {1}").format(label, summary))

@@ -138,13 +138,36 @@ class TestCelebrationsChannel(IntegrationTestCase):
 
 
 class TestSendCelebrations(IntegrationTestCase):
-    def _run(self, settings, *, birthdays=(), anniversaries=(), slack_user_ids=None):
-        """Run send_celebrations with HRMS, User Meta and Slack mocked; returns (mock_slack, mock_log)."""
+    def _run(self, settings, *, birthdays=(), anniversaries=(), slack_user_ids=None, templates=None):
+        """Run send_celebrations with HRMS, User Meta, Slack and the Email Template lookup mocked; returns (mock_slack, mock_log).
+
+        ``templates`` maps an Email Template name to its Jinja source (a str, stored with Use HTML on) or to a
+        dict of Email Template columns; a name that is not in it does not exist.
+        """
         events = {"birthday": _grouped(*birthdays), "work_anniversary": _grouped(*anniversaries)}
         mock_slack = MagicMock()
         mock_slack.SLACK_CHANNEL_ID = TEST_SLACK_CHANNEL_ID
+
+        original_get_value = frappe.db.get_value
+
+        def get_value(doctype, *args, **kwargs):
+            if doctype != "Email Template":
+                return original_get_value(doctype, *args, **kwargs)
+            name = args[0] if args else kwargs.get("filters")
+            fieldname = args[1] if len(args) > 1 else kwargs.get("fieldname")
+            if templates is None:
+                self.fail(f"Email Template {name!r} looked up although nothing is linked")
+            self.assertEqual(fieldname, ["use_html", "response_html"])
+            template = (templates or {}).get(name)
+            if template is None:
+                return None
+            if isinstance(template, str):
+                template = {"use_html": 1, "response_html": template}
+            return frappe._dict(template)
+
         with (
             patch(f"{CELEBRATIONS_MODULE}.frappe.get_single", return_value=settings),
+            patch(f"{CELEBRATIONS_MODULE}.frappe.db.get_value", side_effect=get_value),
             patch(f"{CELEBRATIONS_MODULE}.frappe.utils.nowdate", return_value=TODAY),
             patch(f"{CELEBRATIONS_MODULE}.get_employees_having_an_event_today", side_effect=events.get),
             patch(f"{CELEBRATIONS_MODULE}.get_slack_user_ids", return_value=slack_user_ids or {}),
@@ -237,15 +260,63 @@ class TestSendCelebrations(IntegrationTestCase):
         self.assertEqual(calls[0].kwargs["blocks"][0]["text"]["text"], ":birthday: Birthdays")
         self.assertEqual(calls[1].kwargs["blocks"][0]["text"]["text"], ":tada: Work Anniversaries")
 
-    def test_renders_custom_template(self):
-        """A template set in Slack Settings replaces the default message text."""
+    def test_renders_linked_email_template(self):
+        """The Response (HTML) of the Email Template linked in Slack Settings replaces the default message text."""
         alice = _employee("Alice Example")
-        settings = _build_settings_mock(
-            birthday_message_template="Cake for {% for e in employees %}{{ e.name }}{% endfor %} today"
+        settings = _build_settings_mock(birthday_message_template="FSC Birthday")
+        mock_slack, mock_log = self._run(
+            settings,
+            birthdays=[alice],
+            templates={"FSC Birthday": "Cake for {% for e in employees %}{{ e.name }}{% endfor %} today"},
         )
-        mock_slack, _ = self._run(settings, birthdays=[alice])
+        mock_log.assert_not_called()
         self.assertEqual(
             self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args), "Cake for Alice Example today"
+        )
+
+    def test_uses_default_and_logs_when_linked_template_is_missing(self):
+        """A link to an Email Template that no longer exists is logged and the built-in message is posted anyway."""
+        settings = _build_settings_mock(birthday_message_template="FSC Gone")
+        mock_slack, mock_log = self._run(settings, birthdays=[_employee("Alice")], templates={})
+        mock_log.assert_called_once()
+        self.assertIn("FSC Gone", mock_log.call_args.kwargs["message"])
+        self.assertEqual(
+            self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args),
+            ":birthday: Happy birthday Alice! :tada:",
+        )
+
+    def test_uses_default_and_logs_when_linked_template_has_use_html_off(self):
+        """An Email Template whose message is in the rich-text Response (Use HTML off) is not rendered: it is logged and the default is posted."""
+        settings = _build_settings_mock(anniversary_message_template="FSC Anniv")
+        mock_slack, mock_log = self._run(
+            settings,
+            anniversaries=[_employee("Alice")],
+            templates={"FSC Anniv": {"use_html": 0, "response_html": None}},
+        )
+        mock_log.assert_called_once()
+        self.assertIn(
+            "Happy work anniversary Alice", self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args)
+        )
+
+    def test_uses_default_and_logs_when_linked_template_is_blank(self):
+        """An Email Template with Use HTML on but an empty Response (HTML) falls back to the default with a log."""
+        settings = _build_settings_mock(birthday_message_template="FSC Blank")
+        mock_slack, mock_log = self._run(
+            settings, birthdays=[_employee("Alice")], templates={"FSC Blank": {"use_html": 1, "response_html": "  "}}
+        )
+        mock_log.assert_called_once()
+        self.assertEqual(
+            self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args),
+            ":birthday: Happy birthday Alice! :tada:",
+        )
+
+    def test_does_not_look_up_email_template_when_nothing_is_linked(self):
+        """With no template linked, no Email Template query is made (the _run lookup fails the test if called) and the default is used."""
+        mock_slack, mock_log = self._run(_build_settings_mock(), birthdays=[_employee("Alice")])
+        mock_log.assert_not_called()
+        self.assertEqual(
+            self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args),
+            ":birthday: Happy birthday Alice! :tada:",
         )
 
     def test_falls_back_to_attendance_channel(self):
@@ -297,16 +368,23 @@ class TestSendCelebrations(IntegrationTestCase):
 
     def test_logs_error_when_template_fails_to_render(self):
         """A template that errors at render time is logged and nothing is posted for that event type."""
-        settings = _build_settings_mock(birthday_message_template="{{ employees.oops.deeper }}")
-        mock_slack, mock_log = self._run(settings, birthdays=[_employee("Alice")])
+        settings = _build_settings_mock(birthday_message_template="FSC Bad")
+        mock_slack, mock_log = self._run(
+            settings, birthdays=[_employee("Alice")], templates={"FSC Bad": "{{ employees.oops.deeper }}"}
+        )
         mock_slack.slack_app.client.chat_postMessage.assert_not_called()
         mock_log.assert_called_once()
 
     def test_birthday_context_has_no_years(self):
         """The birthday template context carries name, mention and company only; years is anniversary-only."""
         template = "{% for e in employees %}{{ e.keys() | sort | join(',') }}{% endfor %}"
-        settings = _build_settings_mock(birthday_message_template=template, anniversary_message_template=template)
-        mock_slack, _ = self._run(settings, birthdays=[_employee("Alice")], anniversaries=[_employee("Bob")])
+        settings = _build_settings_mock(birthday_message_template="FSC Keys", anniversary_message_template="FSC Keys")
+        mock_slack, _ = self._run(
+            settings,
+            birthdays=[_employee("Alice")],
+            anniversaries=[_employee("Bob")],
+            templates={"FSC Keys": template},
+        )
         calls = mock_slack.slack_app.client.chat_postMessage.call_args_list
         self.assertEqual(self._section_text(calls[0]), "company,mention,name")
         self.assertEqual(self._section_text(calls[1]), "company,mention,name,years")
@@ -327,8 +405,12 @@ class TestSendCelebrations(IntegrationTestCase):
 
     def test_renders_template_as_string_not_path(self):
         """A one-line template ending in a file extension is rendered as text, not looked up as a template file."""
-        settings = _build_settings_mock(birthday_message_template="See {{ employees[0].name }} in notes.txt")
-        mock_slack, mock_log = self._run(settings, birthdays=[_employee("Alice")])
+        settings = _build_settings_mock(birthday_message_template="FSC Notes")
+        mock_slack, mock_log = self._run(
+            settings,
+            birthdays=[_employee("Alice")],
+            templates={"FSC Notes": "See {{ employees[0].name }} in notes.txt"},
+        )
         mock_log.assert_not_called()
         self.assertEqual(
             self._section_text(mock_slack.slack_app.client.chat_postMessage.call_args), "See Alice in notes.txt"

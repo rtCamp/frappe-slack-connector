@@ -147,7 +147,7 @@
   },
   {
    "default": "0",
-   "description": "Enable sending a reminder if a team member hasn\u2019t filled in their timesheet for the previous working day or has logged less than 8 hours.",
+   "description": "Enable sending a reminder if a team member hasn’t filled in their timesheet for the previous working day or has logged less than 8 hours.",
    "fieldname": "timesheet_previousday_reminder",
    "fieldtype": "Check",
    "label": "Send previous day reminder to fill the timesheet"
@@ -256,19 +256,19 @@
   },
   {
    "depends_on": "eval:doc.send_celebration_updates == 1;",
-   "description": "Jinja template for the birthday message. Leave empty for the default. Context: <code>employees</code> (list of <code>name</code>, <code>mention</code>, <code>company</code>).",
+   "description": "Email Template whose Response (HTML) holds the Jinja for the birthday message (enable Use HTML on it). Leave empty for the default. Context: <code>employees</code> (list of <code>name</code>, <code>mention</code>, <code>company</code>).",
    "fieldname": "birthday_message_template",
-   "fieldtype": "Code",
+   "fieldtype": "Link",
    "label": "Birthday Message Template",
-   "options": "Jinja"
+   "options": "Email Template"
   },
   {
    "depends_on": "eval:doc.send_celebration_updates == 1;",
-   "description": "Jinja template for the work anniversary message. Leave empty for the default. Context: <code>employees</code> (list of <code>name</code>, <code>mention</code>, <code>company</code>, <code>years</code> at the company).",
+   "description": "Email Template whose Response (HTML) holds the Jinja for the work anniversary message (enable Use HTML on it). Leave empty for the default. Context: <code>employees</code> (list of <code>name</code>, <code>mention</code>, <code>company</code>, <code>years</code> at the company).",
    "fieldname": "anniversary_message_template",
-   "fieldtype": "Code",
+   "fieldtype": "Link",
    "label": "Work Anniversary Message Template",
-   "options": "Jinja"
+   "options": "Email Template"
   },
   {
    "fieldname": "last_celebrations_date",

@@ -98,7 +98,7 @@ def send_celebrations() -> None:
             slack,
             channel,
             header=":birthday: Birthdays",
-            template=slack_settings.birthday_message_template or DEFAULT_BIRTHDAY_TEMPLATE,
+            template=get_celebration_template(slack_settings.birthday_message_template, DEFAULT_BIRTHDAY_TEMPLATE),
             employees=birthdays,
             to_context=lambda e: to_context(e, with_years=False),
             fallback_text=lambda rows: get_birthday_reminder_text_and_message(rows)[0],
@@ -110,12 +110,38 @@ def send_celebrations() -> None:
             slack,
             channel,
             header=":tada: Work Anniversaries",
-            template=slack_settings.anniversary_message_template or DEFAULT_ANNIVERSARY_TEMPLATE,
+            template=get_celebration_template(
+                slack_settings.anniversary_message_template, DEFAULT_ANNIVERSARY_TEMPLATE
+            ),
             employees=anniversaries,
             to_context=lambda e: to_context(e, with_years=True),
             fallback_text=get_work_anniversary_reminder_text,
             error_title=_("Error posting work anniversary announcement to Slack"),
         )
+
+
+def get_celebration_template(template_name: str | None, default: str) -> str:
+    """
+    The Jinja source for an announcement: the Response (HTML) of the Email
+    Template linked from Slack Settings, the same field the timesheet
+    reminder renders, or the built-in default when nothing is linked.
+    A linked template that no longer exists or does not use HTML (its
+    rich-text response would post raw HTML) is logged and the default is
+    used, so the announcement still goes out.
+    """
+    if not template_name:
+        return default
+    template = frappe.db.get_value("Email Template", template_name, ["use_html", "response_html"], as_dict=True)
+    if template and template.use_html and (template.response_html or "").strip():
+        return template.response_html
+    generate_error_log(
+        title=_("Celebrations template not usable, using the default message"),
+        message=_(
+            "Email Template {0} is missing, has Use HTML off or has an empty Response (HTML). "
+            "Fix it or clear the link in Slack Settings."
+        ).format(template_name),
+    )
+    return default
 
 
 def post_announcement(

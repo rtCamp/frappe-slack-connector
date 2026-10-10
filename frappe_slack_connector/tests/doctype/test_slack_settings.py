@@ -7,71 +7,101 @@ from frappe_slack_connector.frappe_slack_connector.doctype.slack_settings.slack_
 
 
 class TestSlackSettingsTemplateValidation(IntegrationTestCase):
-    def test_template_fields_are_code_fields(self):
-        """Both template fields are Code (Jinja) fields in the doctype JSON on disk, which are exempt from the HTML sanitizer that would break Jinja."""
+    def _template(self, source, *, use_html=1, name="_Test FSC Celebration Template"):
+        """Create (or replace) a real Email Template holding ``source`` and return its name; removed after the test.
+
+        Email Template validates its own Jinja on save, so the insert skips validation: these tests check
+        that Slack Settings rejects a bad template on its own, whichever way it got into the database.
+        """
+        if frappe.db.exists("Email Template", name):
+            frappe.delete_doc("Email Template", name, force=True)
+        doc = frappe.get_doc(
+            {
+                "doctype": "Email Template",
+                "__newname": name,
+                "subject": "celebrations",
+                "use_html": use_html,
+                "response_html": source if use_html else None,
+                "response": None if use_html else source,
+            }
+        )
+        doc.flags.ignore_validate = True
+        doc.insert()
+        self.addCleanup(frappe.delete_doc, "Email Template", doc.name, force=True)
+        return doc.name
+
+    def _settings(self, *, birthday=None, anniversary=None):
+        return frappe._dict(birthday_message_template=birthday, anniversary_message_template=anniversary)
+
+    def test_template_fields_link_to_email_template(self):
+        """Both template fields are Links to Email Template in the doctype JSON on disk, like the timesheet reminder template."""
         path = frappe.get_app_path(
             "frappe_slack_connector", "frappe_slack_connector", "doctype", "slack_settings", "slack_settings.json"
         )
         with open(path) as f:
             fields = {field["fieldname"]: field for field in json.load(f)["fields"]}
-        for fieldname in ("birthday_message_template", "anniversary_message_template"):
+        for fieldname in ("birthday_message_template", "anniversary_message_template", "reminder_template"):
             self.assertIn(fieldname, fields)
-            self.assertEqual(fields[fieldname]["fieldtype"], "Code", fieldname)
-            self.assertEqual(fields[fieldname]["options"], "Jinja", fieldname)
+            self.assertEqual(fields[fieldname]["fieldtype"], "Link", fieldname)
+            self.assertEqual(fields[fieldname]["options"], "Email Template", fieldname)
+
+    def test_rejects_missing_email_template(self):
+        """A link to an Email Template that does not exist is rejected."""
+        with self.assertRaises(frappe.ValidationError):
+            SlackSettings.validate_celebration_templates(self._settings(birthday="_Test FSC Nope"))
+
+    def test_rejects_email_template_without_use_html(self):
+        """An Email Template whose message lives in the rich-text Response (Use HTML off) is rejected: it would post raw HTML."""
+        name = self._template("Hi {{ employees | length }}", use_html=0)
+        with self.assertRaises(frappe.ValidationError) as ctx:
+            SlackSettings.validate_celebration_templates(self._settings(birthday=name))
+        self.assertIn("Use HTML", str(ctx.exception))
 
     def test_rejects_template_with_jinja_syntax_error(self):
         """validate_celebration_templates raises a ValidationError for a syntactically invalid template."""
-        doc = frappe._dict(birthday_message_template="{% if %}", anniversary_message_template=None)
+        name = self._template("{% if %}")
         with self.assertRaises(frappe.ValidationError):
-            SlackSettings.validate_celebration_templates(doc)
+            SlackSettings.validate_celebration_templates(self._settings(birthday=name))
 
     def test_real_document_validate_rejects_bad_template(self):
         """doc.validate() on the actual Slack Settings document raises for a bad anniversary template."""
+        name = self._template("{{ employees")
         doc = frappe.get_single("Slack Settings")
-        doc.anniversary_message_template = "{{ employees"
+        doc.anniversary_message_template = name
         with self.assertRaises(frappe.ValidationError):
             doc.validate()
 
     def test_accepts_valid_and_empty_templates(self):
-        """Valid Jinja and empty templates pass validation."""
-        doc = frappe._dict(birthday_message_template="Hi {{ employees | length }}", anniversary_message_template="")
-        SlackSettings.validate_celebration_templates(doc)
+        """A valid Email Template and an empty link pass validation."""
+        name = self._template("Hi {{ employees | length }}")
+        SlackSettings.validate_celebration_templates(self._settings(birthday=name, anniversary=""))
 
     def test_rejects_template_that_fails_to_render(self):
         """A template that is valid Jinja but fails at render time (e.g. uses a dunder attribute) is rejected on save."""
-        doc = frappe._dict(birthday_message_template="{{ employees.__class__ }}", anniversary_message_template=None)
+        name = self._template("{{ employees.__class__ }}")
         with self.assertRaises(frappe.ValidationError):
-            SlackSettings.validate_celebration_templates(doc)
+            SlackSettings.validate_celebration_templates(self._settings(birthday=name))
 
     def test_rejects_template_that_renders_empty(self):
         """A template that renders to nothing with a sample employee is rejected on save."""
-        doc = frappe._dict(birthday_message_template=None, anniversary_message_template="{% if false %}x{% endif %}")
+        name = self._template("{% if false %}x{% endif %}")
         with self.assertRaises(frappe.ValidationError):
-            SlackSettings.validate_celebration_templates(doc)
+            SlackSettings.validate_celebration_templates(self._settings(anniversary=name))
 
     def test_accepts_template_ending_in_file_extension(self):
         """A one-line template ending in .txt is rendered as text, not looked up as a template file."""
-        doc = frappe._dict(
-            birthday_message_template="Hi {{ employees[0].name }}, see notes.txt", anniversary_message_template=""
-        )
-        SlackSettings.validate_celebration_templates(doc)
+        name = self._template("Hi {{ employees[0].name }}, see notes.txt")
+        SlackSettings.validate_celebration_templates(self._settings(birthday=name))
 
     def test_rejects_template_referencing_unknown_value(self):
         """A template with a typo such as {{ e.nmae }} is rejected, since it would post the literal placeholder every day."""
-        doc = frappe._dict(
-            birthday_message_template="Hi {% for e in employees %}{{ e.nmae }}{% endfor %}",
-            anniversary_message_template="",
-        )
+        name = self._template("Hi {% for e in employees %}{{ e.nmae }}{% endfor %}")
         with self.assertRaises(frappe.ValidationError):
-            SlackSettings.validate_celebration_templates(doc)
+            SlackSettings.validate_celebration_templates(self._settings(birthday=name))
 
     def test_rejects_birthday_template_using_years(self):
         """years is not in the birthday context, so a birthday template using {{ e.years }} is rejected; the same template is fine for anniversaries."""
-        template = "{% for e in employees %}{{ e.name }} - {{ e.years }}{% endfor %}"
+        name = self._template("{% for e in employees %}{{ e.name }} - {{ e.years }}{% endfor %}")
         with self.assertRaises(frappe.ValidationError):
-            SlackSettings.validate_celebration_templates(
-                frappe._dict(birthday_message_template=template, anniversary_message_template="")
-            )
-        SlackSettings.validate_celebration_templates(
-            frappe._dict(birthday_message_template="", anniversary_message_template=template)
-        )
+            SlackSettings.validate_celebration_templates(self._settings(birthday=name))
+        SlackSettings.validate_celebration_templates(self._settings(anniversary=name))

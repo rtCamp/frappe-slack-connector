@@ -200,7 +200,7 @@ def send_leave_notification_to_applicant(doc: Document):
             # Commit before the lock is released: the job's own commit only comes
             # after this function returns, and a worker waiting on the lock would
             # otherwise still read an empty reference and post a second DM
-            frappe.db.commit()
+            frappe.db.commit()  # nosemgrep
     except Exception as e:
         generate_error_log(
             title="Error posting leave confirmation to applicant",
@@ -259,7 +259,7 @@ def send_leave_decision_to_applicant(doc: Document, status: str, decided_by: str
             # Commit before the lock is released: the job's own commit only comes
             # after this function returns, and a worker waiting on the lock would
             # otherwise still read an empty reference and post a second DM
-            frappe.db.commit()
+            frappe.db.commit()  # nosemgrep
     except Exception as e:
         generate_error_log(
             title="Error updating leave decision for applicant",

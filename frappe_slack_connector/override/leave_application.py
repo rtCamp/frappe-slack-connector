@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 import frappe
 from frappe.model.document import Document
-from frappe.utils import convert_utc_to_system_timezone, get_url_to_form, getdate
+from frappe.utils import cint, convert_utc_to_system_timezone, get_url_to_form, getdate
 
 from frappe_slack_connector.db.employee import get_employees_on_holiday
 from frappe_slack_connector.helpers.error import generate_error_log
@@ -364,9 +364,14 @@ def on_update_withdraw_attendance_reply(doc: Document, method=None):
     Wired to ``on_update``, ``on_update_after_submit``, ``on_cancel`` and
     ``on_discard``: Frappe only runs ``on_cancel`` for a cancel, HRMS sets
     status to Cancelled in ``before_cancel`` and ``on_discard``, and a
-    workflow may move a submitted leave to Rejected
+    workflow may move a submitted leave to Rejected. A cancel that skips
+    ``before_cancel`` (``ignore_validate``) keeps the status Approved, so a
+    document cancelled outright counts too: the summary drops it on
+    docstatus alone and the reply must follow
     """
-    if not doc.has_value_changed("status") or doc.status not in ("Rejected", "Cancelled"):
+    withdrawn = doc.has_value_changed("status") and doc.status in ("Rejected", "Cancelled")
+    cancelled = cint(doc.docstatus) == 2 and doc.has_value_changed("docstatus")
+    if not (withdrawn or cancelled):
         return
 
     _enqueue_attendance_reply_withdrawal(doc)

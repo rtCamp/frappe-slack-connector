@@ -556,6 +556,34 @@ class TestOnUpdateWithdrawAttendanceReply(IntegrationTestCase):
         )
         mocks.error_log.assert_not_called()
 
+    def test_force_cancel_that_keeps_the_status_still_strikes_the_reply(self):
+        """A cancel with ignore_validate skips HRMS before_cancel, so the status stays Approved while docstatus becomes 2; the summary drops the leave on docstatus, so the reply is struck through too."""
+        reply_ts = _slack_ts_at_noon_utc(TODAY)
+        doc = _build_leave_doc(status="Approved", status_changed=False)
+        doc.docstatus = 2
+        doc.has_value_changed.side_effect = lambda fieldname: fieldname == "docstatus"
+        mock_slack = _build_slack_mock()
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue", side_effect=_run_enqueued_inline),
+            _leave_override_env(stored_ts=reply_ts) as mocks,
+        ):
+            on_update_withdraw_attendance_reply(doc, method="on_cancel")
+        _assert_struck_through(mock_slack, reply_ts)
+        mocks.error_log.assert_not_called()
+
+    def test_submitted_leave_saved_without_a_change_does_not_strike_the_reply(self):
+        """A submitted, Approved leave (docstatus 1) whose status did not change enqueues nothing."""
+        doc = _build_leave_doc(status="Approved", status_changed=False)
+        doc.docstatus = 1
+        doc.has_value_changed.side_effect = lambda fieldname: False
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue,
+            _leave_override_env(stored_ts=_slack_ts_at_noon_utc(TODAY)),
+        ):
+            on_update_withdraw_attendance_reply(doc, method="on_update_after_submit")
+        mock_enqueue.assert_not_called()
+
     def test_reads_ts_from_database_not_from_doc(self):
         """The removal uses the ts stored in the database, not the value carried on the doc (which a client could set): a doc claiming the summary ts with a real reply stored edits only the stored reply."""
         reply_ts = _slack_ts_at_noon_utc(TODAY)

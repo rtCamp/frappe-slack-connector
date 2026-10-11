@@ -433,13 +433,22 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
             _approver_call(mocks["slack"]).kwargs["text"], "New leave application from Alice &lt;A&amp;B&gt;"
         )
 
-    def test_approver_dm_adds_the_request_back_for_a_leave_inserted_submitted(self):
-        """A leave inserted already submitted has its ledger entry when the job runs, so HRMS reports the balance after the deduction; the DM adds the requested days back to show the balance before the request."""
+    def test_approver_dm_adds_the_request_back_for_a_leave_inserted_approved_and_submitted(self):
+        """A leave inserted already approved and submitted has its ledger entry when the job runs, so HRMS reports the balance after the deduction; the DM adds the requested days back to show the balance before the request."""
         doc = _build_leave_doc(from_date="2026-06-15", to_date="2026-06-17", total_leave_days=3.0)
         doc.docstatus = 1
+        doc.status = "Approved"
         text = _blocks_text(_get_approver_blocks(doc, balance_on=7.0))
         self.assertIn("*Balance before this request:*\n10 day(s)", text)
         self.assertNotIn("Insufficient balance", text)
+
+    def test_approver_dm_does_not_add_the_request_back_for_a_submitted_rejected_leave(self):
+        """A rejected leave is submitted without a ledger entry, so nothing was deducted and nothing is added back."""
+        doc = _build_leave_doc(from_date="2026-06-15", to_date="2026-06-17", total_leave_days=3.0)
+        doc.docstatus = 1
+        doc.status = "Rejected"
+        text = _blocks_text(_get_approver_blocks(doc, balance_on=7.0))
+        self.assertIn("*Balance before this request:*\n7 day(s)", text)
 
     def test_attendance_thread_keeps_today_period_for_multi_day_half_day_leave_starting_today(self):
         """For a multi-day leave starting today with the half day today, the attendance thread says _(First Half)_ while the approver DM carries the full duration text."""

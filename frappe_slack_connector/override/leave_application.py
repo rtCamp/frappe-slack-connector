@@ -241,10 +241,11 @@ def get_leave_balance(doc: Document) -> float | None:
         )
         return flt(doc.leave_balance) if doc.leave_balance else None
 
-    # A leave inserted already submitted (API, import) has its ledger entry
-    # by the time the job runs, so HRMS has deducted it: add it back to show
-    # the balance before this request, like for a draft
-    if cint(doc.docstatus) == 1:
+    # A leave inserted already approved and submitted (API, import) has its
+    # ledger entry by the time the job runs, so HRMS has deducted it: add it
+    # back to show the balance before this request, like for a draft. A
+    # rejected leave is submitted without a ledger entry
+    if cint(doc.docstatus) == 1 and doc.status == "Approved":
         balance += flt(doc.total_leave_days)
     return balance
 

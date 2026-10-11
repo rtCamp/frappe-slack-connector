@@ -1,6 +1,6 @@
 import frappe
 from frappe.model.workflow import apply_workflow
-from frappe.utils import today
+from frappe.utils import cint, today
 
 # Custom fields (shipped in fixtures/custom_field.json) that remember the
 # applicant's "Leave Request Submitted" Slack DM so it can be edited in place
@@ -46,12 +46,25 @@ def get_applicant_message_ref(leave_id: str) -> tuple[str | None, str | None]:
     return row.get(APPLICANT_CHANNEL_FIELD) or None, row.get(APPLICANT_MSG_TS_FIELD) or None
 
 
+def effective_leave_status(status: str | None, docstatus) -> str | None:
+    """
+    The decision a leave's row really expresses: a cancelled document is
+    Cancelled whatever its status column says (a cancel with
+    ``ignore_validate`` skips the HRMS hook that sets it), otherwise the
+    status column
+    """
+    return "Cancelled" if cint(docstatus) == 2 else status
+
+
 def get_leave_status(leave_id: str) -> str | None:
     """
-    The leave's current status straight from the database, or None when the
-    row no longer exists
+    The leave's current decision status straight from the database (see
+    ``effective_leave_status``), or None when the row no longer exists
     """
-    return frappe.db.get_value("Leave Application", leave_id, "status")
+    row = frappe.db.get_value("Leave Application", leave_id, ["status", "docstatus"], as_dict=True)
+    if not row:
+        return None
+    return effective_leave_status(row.status, row.docstatus)
 
 
 def store_applicant_message_ref(leave_id: str, *, channel: str | None, ts: str | None) -> None:

@@ -8,8 +8,10 @@ from frappe_slack_connector.db.leave_application import (
     APPLICANT_CHANNEL_FIELD,
     APPLICANT_MSG_TS_FIELD,
     approve_leave,
+    effective_leave_status,
     get_applicant_message_ref,
     get_employees_on_leave,
+    get_leave_status,
     reject_leave,
     store_applicant_message_ref,
 )
@@ -236,3 +238,26 @@ class TestApplicantMessageRef(IntegrationTestCase):
                 patch(f"{LEAVE_DB_MODULE}.frappe.db.get_value", return_value=missing),
             ):
                 self.assertEqual(get_applicant_message_ref("HR-LAP-MISSING"), (None, None))
+
+
+class TestLeaveStatus(IntegrationTestCase):
+    def test_cancelled_document_reads_as_cancelled_whatever_the_status_column_says(self):
+        """A force-cancelled leave (docstatus 2, status still Approved) is Cancelled for the applicant DM; otherwise the status column stands."""
+        self.assertEqual(effective_leave_status("Approved", 2), "Cancelled")
+        self.assertEqual(effective_leave_status("Rejected", "2"), "Cancelled")
+        self.assertEqual(effective_leave_status("Approved", 1), "Approved")
+        self.assertEqual(effective_leave_status("Open", 0), "Open")
+        self.assertIsNone(effective_leave_status(None, 0))
+
+    def test_get_leave_status_reads_status_and_docstatus_together(self):
+        """get_leave_status reads both columns in one query and applies the docstatus rule; a missing row gives None."""
+        with patch(
+            f"{LEAVE_DB_MODULE}.frappe.db.get_value",
+            return_value=frappe._dict(status="Approved", docstatus=2),
+        ) as mock_get_value:
+            self.assertEqual(get_leave_status("HR-LAP-0001"), "Cancelled")
+        mock_get_value.assert_called_once_with(
+            "Leave Application", "HR-LAP-0001", ["status", "docstatus"], as_dict=True
+        )
+        with patch(f"{LEAVE_DB_MODULE}.frappe.db.get_value", return_value=None):
+            self.assertIsNone(get_leave_status("HR-LAP-0001"))

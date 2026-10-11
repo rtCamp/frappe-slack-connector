@@ -439,6 +439,16 @@ class TestOnUpdateNotifyApplicant(IntegrationTestCase):
         mock_enqueue.assert_called_once()
         self.assertEqual(mock_enqueue.call_args.kwargs["status"], "Rejected")
 
+    def test_force_cancel_that_keeps_the_status_enqueues_cancelled(self):
+        """A cancel with ignore_validate skips HRMS before_cancel, so the status stays Approved while docstatus becomes 2: the applicant must still be told the leave is Cancelled."""
+        doc = _build_leave_doc(
+            status="Approved", docstatus=2, status_changed=False, docstatus_changed=True, modified_by="hr@x.com"
+        )
+        with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
+            on_update_notify_applicant(doc, method="on_cancel")
+        mock_enqueue.assert_called_once()
+        self.assertEqual(mock_enqueue.call_args.kwargs["status"], "Cancelled")
+
     def test_different_status_on_same_doc_enqueues_again(self):
         """An approve followed by a cancel on the same doc object enqueues a decision job for each status."""
         doc = _build_leave_doc(status="Approved", docstatus=1, status_changed=True)

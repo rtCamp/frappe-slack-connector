@@ -8,6 +8,7 @@ from frappe_slack_connector.db.leave_application import (
     APPLICANT_CHANNEL_FIELD,
     APPLICANT_MSG_TS_FIELD,
     custom_fields_exist,
+    effective_leave_status,
     get_applicant_message_ref,
     get_leave_status,
     store_applicant_message_ref,
@@ -70,6 +71,7 @@ def is_leave_decided(status: str | None, docstatus) -> bool:
     the document is submitted; a rejection or cancellation is final as soon
     as it is set (some workflows keep rejected leaves as drafts).
     """
+    status = effective_leave_status(status, docstatus)
     if status in ("Rejected", "Cancelled"):
         return True
     return status == "Approved" and cint(docstatus) == 1
@@ -83,7 +85,9 @@ def _reached_decision(doc: Document) -> bool:
     """
     if doc.flags.in_insert or not is_leave_decided(doc.status, doc.docstatus):
         return False
-    if cint(doc.docstatus) == 1:
+    # Submit and cancel change docstatus; a cancel that skipped the HRMS hook
+    # (ignore_validate) changes nothing else, and still is a decision
+    if cint(doc.docstatus) in (1, 2):
         return doc.has_value_changed("status") or doc.has_value_changed("docstatus")
     return doc.has_value_changed("status")
 
@@ -114,7 +118,7 @@ def on_update_notify_applicant(doc: Document, method: str | None = None):
     """
     if not _reached_decision(doc):
         return
-    status = doc.status
+    status = effective_leave_status(doc.status, doc.docstatus)
     # A reject that saves and submits in one request fires this twice on the
     # same document object (status change, then docstatus change); queue the
     # decision once per status so parallel workers cannot both post a DM
@@ -179,7 +183,9 @@ def send_leave_notification_to_applicant(doc: Document):
                 message=f"No Slack user found for employee {doc.employee} (Leave Application {doc.name})",
             )
             return
-        status = doc.status if is_leave_decided(doc.status, doc.docstatus) else None
+        status = (
+            effective_leave_status(doc.status, doc.docstatus) if is_leave_decided(doc.status, doc.docstatus) else None
+        )
         status_by = _format_decider(slack, _decided_by(doc.modified_by, doc.leave_approver, status)) if status else None
         with _applicant_dm_lock(doc.name):
             channel, ts = get_applicant_message_ref(doc.name)

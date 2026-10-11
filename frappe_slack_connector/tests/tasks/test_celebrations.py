@@ -5,6 +5,8 @@ import frappe
 from frappe.tests import IntegrationTestCase
 
 from frappe_slack_connector.tasks.celebrations import (
+    SLACK_BLOCKS_PER_MESSAGE,
+    announcement_messages,
     celebrations_channel,
     get_employees_with_event,
     get_slack_user_ids,
@@ -538,3 +540,21 @@ class TestGetSlackUserIds(IntegrationTestCase):
         make_test_user_meta(TEST_USER, slack_userid=TEST_SLACK_USER_ID)
         result = get_slack_user_ids([TEST_USER, "nobody@example.com"])
         self.assertEqual(result, {TEST_USER: TEST_SLACK_USER_ID})
+
+
+class TestAnnouncementMessages(IntegrationTestCase):
+    def test_short_announcement_is_one_message_with_the_header_first(self):
+        header = {"type": "header"}
+        sections = [{"type": "section", "n": i} for i in range(3)]
+        self.assertEqual(announcement_messages(header, sections), [[header, *sections]])
+
+    def test_long_announcement_is_split_at_fifty_blocks_with_the_header_only_once(self):
+        """120 sections become three messages: 1 header + 49 sections, then 50, then 21; no message exceeds Slack's limit."""
+        header = {"type": "header"}
+        sections = [{"type": "section", "n": i} for i in range(120)]
+        messages = announcement_messages(header, sections)
+        self.assertEqual([len(m) for m in messages], [50, 50, 21])
+        self.assertIs(messages[0][0], header)
+        self.assertTrue(all(len(m) <= SLACK_BLOCKS_PER_MESSAGE for m in messages))
+        self.assertEqual([b for m in messages for b in m if b["type"] == "section"], sections)
+        self.assertEqual(sum(1 for m in messages for b in m if b["type"] == "header"), 1)

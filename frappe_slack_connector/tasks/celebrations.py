@@ -14,6 +14,9 @@ from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.str_utils import escape_slack_text
 from frappe_slack_connector.slack.app import SlackIntegration
 
+# Slack rejects a message with more than 50 blocks
+SLACK_BLOCKS_PER_MESSAGE = 50
+
 # Default messages: one bullet per person (the header block above the
 # message carries the greeting). The anniversary list is grouped by company,
 # each group under its company name once there is more than one company
@@ -149,26 +152,35 @@ def post_announcement(
     try:
         escaped = [frappe._dict(e, name=escape_slack_text(e.name)) for e in employees]
         text = render_announcement(template_name, default_template, {"employees": [to_context(e) for e in employees]})
-        slack.slack_app.client.chat_postMessage(
-            channel=channel,
-            text=fallback_text(escaped),
-            blocks=[
-                {
-                    "type": "header",
-                    "text": {"type": "plain_text", "text": header, "emoji": True},
-                },
-                *(
-                    {"type": "section", "text": {"type": "mrkdwn", "text": chunk}}
-                    for chunk in split_mrkdwn(text.strip())
-                ),
-            ],
-        )
+        header_block = {"type": "header", "text": {"type": "plain_text", "text": header, "emoji": True}}
+        sections = [
+            {"type": "section", "text": {"type": "mrkdwn", "text": chunk}} for chunk in split_mrkdwn(text.strip())
+        ]
+        for blocks in announcement_messages(header_block, sections):
+            slack.slack_app.client.chat_postMessage(channel=channel, text=fallback_text(escaped), blocks=blocks)
     except Exception as e:
         generate_error_log(
             title=error_title,
             message=_("Please check the celebrations channel ID and message template and try again."),
             exception=e,
         )
+
+
+def announcement_messages(
+    header_block: dict, sections: list[dict], limit: int = SLACK_BLOCKS_PER_MESSAGE
+) -> list[list[dict]]:
+    """
+    Split one announcement into as many messages as Slack's block limit
+    needs: the header leads the first message, the rest carry sections only
+    (a list long enough to need it is rare, but a rejected post would lose
+    the day's announcement, since the day is stamped regardless)
+    """
+    messages = [[header_block]]
+    for section in sections:
+        if len(messages[-1]) >= limit:
+            messages.append([])
+        messages[-1].append(section)
+    return messages
 
 
 def render_announcement(template_name: str | None, default_template: str, context: dict) -> str:

@@ -47,10 +47,13 @@ def attendance_channel() -> None:
         else "Employees on Leave"  # Default title
     )
 
-    # Update the last attendance date
-    slack_settings.last_attendance_date = frappe.utils.nowdate()
-    slack_settings.last_attendance_msg_ts = message_ts
-    slack_settings.save(ignore_permissions=True)
+    # Stamp the columns directly: a full save() writes back every column of
+    # the in-memory document loaded before the post, and would overwrite what
+    # another job stamped on Slack Settings meanwhile (the celebrations date)
+    frappe.db.set_single_value(
+        "Slack Settings",
+        {"last_attendance_date": frappe.utils.nowdate(), "last_attendance_msg_ts": message_ts},
+    )
 
 
 def send_notification(attendance_title: str) -> str | None:

@@ -118,6 +118,7 @@ class TestAttendanceChannel(IntegrationTestCase):
         """When all guards pass, attendance_channel calls send_notification and writes the returned ts + today's date back onto Slack Settings."""
         settings = _build_settings_mock(last_attendance_date=None)
         with (
+            patch(f"{ATTENDANCE_MODULE}.frappe.db.set_single_value") as mock_set_single_value,
             patch(f"{ATTENDANCE_MODULE}.frappe.get_single", return_value=settings),
             patch(f"{ATTENDANCE_MODULE}.frappe.utils.nowdate", return_value="2026-06-15"),
             patch(
@@ -133,9 +134,10 @@ class TestAttendanceChannel(IntegrationTestCase):
         ):
             attendance_channel()
         mock_send.assert_called_once()
-        self.assertEqual(settings.last_attendance_date, "2026-06-15")
-        self.assertEqual(settings.last_attendance_msg_ts, "1700000000.000999")
-        settings.save.assert_called_once_with(ignore_permissions=True)
+        settings.save.assert_not_called()
+        mock_set_single_value.assert_called_once_with(
+            "Slack Settings", {"last_attendance_date": "2026-06-15", "last_attendance_msg_ts": "1700000000.000999"}
+        )
 
 
 class TestSendNotification(IntegrationTestCase):

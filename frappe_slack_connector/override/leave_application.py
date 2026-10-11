@@ -14,15 +14,21 @@ def after_insert(doc, method):
     """
     Send a slack message to the leave approver when a new leave application
     is submitted
+
+    Queued after commit: the approver DM's balance lookup authorises the
+    user through the Leave Application row, which a worker started before
+    the insert commits cannot see
     """
     frappe.enqueue(
         send_leave_notification_bg,
         queue="short",
+        enqueue_after_commit=True,
         doc=doc,
     )
     frappe.enqueue(
         send_leave_notification_to_applicant,
         queue="short",
+        enqueue_after_commit=True,
         doc=doc,
     )
 

@@ -147,6 +147,8 @@ class TestAfterInsert(IntegrationTestCase):
         for call in mock_enqueue.call_args_list:
             self.assertEqual(call.kwargs["queue"], "short")
             self.assertIs(call.kwargs["doc"], doc)
+            # After commit: the balance lookup authorises through the committed Leave Application row
+            self.assertTrue(call.kwargs["enqueue_after_commit"])
 
 
 class TestSendLeaveNotificationBg(IntegrationTestCase):

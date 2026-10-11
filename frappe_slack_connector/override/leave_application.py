@@ -3,6 +3,8 @@ from datetime import UTC, datetime
 import frappe
 from frappe.model.document import Document
 from frappe.utils import cint, convert_utc_to_system_timezone, get_url_to_form, getdate
+from frappe.utils.synchronization import filelock
+from slack_sdk.errors import SlackApiError
 
 from frappe_slack_connector.db.employee import get_employees_on_holiday
 from frappe_slack_connector.helpers.error import generate_error_log
@@ -19,6 +21,43 @@ from frappe_slack_connector.tasks.attendance_summary import get_leave_type
 ATTENDANCE_REPLY_TS_FIELD = "custom_slack_attendance_reply_ts"
 ATTENDANCE_REPLY_CHANNEL_FIELD = "custom_slack_attendance_reply_channel"
 ATTENDANCE_REPLY_FIELDS = (ATTENDANCE_REPLY_TS_FIELD, ATTENDANCE_REPLY_CHANNEL_FIELD)
+
+# Statuses under which a leave covering today is announced (and listed in
+# the summary)
+ANNOUNCED_STATUSES = ("Open", "Approved")
+
+# Slack errors that mean the reply is gone for good; anything else (rate
+# limit, timeout, outage) is transient and the reference is kept
+MISSING_MESSAGE_ERRORS = ("message_not_found", "channel_not_found")
+
+# The post job and the withdrawal job for one leave run under this lock,
+# so a withdrawal cannot slip between the post's checks and its store
+ATTENDANCE_REPLY_LOCK_PREFIX = "fsc_attendance_reply"
+ATTENDANCE_REPLY_LOCK_TIMEOUT = 60
+
+
+def _attendance_reply_lock(leave_name: str):
+    return filelock(f"{ATTENDANCE_REPLY_LOCK_PREFIX}_{leave_name}", timeout=ATTENDANCE_REPLY_LOCK_TIMEOUT)
+
+
+def _current_leave_state(leave_name: str):
+    """
+    The committed row's status, docstatus and stored reply reference, or
+    None when the row is gone (deleted before the job ran)
+    """
+    return frappe.db.get_value(
+        "Leave Application",
+        leave_name,
+        ["status", "docstatus", *ATTENDANCE_REPLY_FIELDS],
+        as_dict=True,
+        ignore=True,
+    )
+
+
+def _is_announced(state) -> bool:
+    """Whether the committed row still belongs in the summary and the thread"""
+    return bool(state) and state.status in ANNOUNCED_STATUSES and cint(state.docstatus) != 2
+
 
 # Appended to a struck-through thread reply. One word for every path
 # (rejected, cancelled, discarded, deleted): the channel only needs to know
@@ -165,7 +204,7 @@ def post_same_day_leave_to_attendance_thread(doc: Document, slack: SlackIntegrat
     Returns the ``ts`` of the reply, or None when nothing was posted
     """
     # A leave created already decided (e.g. Rejected) is not an announcement
-    if doc.status not in ("Open", "Approved"):
+    if doc.status not in ANNOUNCED_STATUSES:
         return None
 
     today = getdate(frappe.utils.today())
@@ -195,22 +234,45 @@ def post_same_day_leave_to_attendance_thread(doc: Document, slack: SlackIntegrat
     name = _same_day_reply_name(slack, doc.employee, doc.employee_name, slack_settings.mention_user)
     day_period = get_leave_type(doc, on_date=today)
 
-    # The thread lives where the summary was posted. The summary job stores
-    # that channel's ID (when it has the field for it); the setting is the
-    # fallback, and may have been changed since the morning post
-    response = slack.slack_app.client.chat_postMessage(
-        channel=slack_settings.get("last_attendance_channel_id") or slack.SLACK_CHANNEL_ID,
-        blocks=[_same_day_reply_block(_same_day_reply_text(name, day_period))],
-        thread_ts=slack_settings.last_attendance_msg_ts,
-        reply_broadcast=True,
-    )
-    reply_ts = response["ts"]
-    frappe.db.set_value(
-        "Leave Application",
-        doc.name,
-        {ATTENDANCE_REPLY_TS_FIELD: reply_ts, ATTENDANCE_REPLY_CHANNEL_FIELD: response.get("channel")},
-        update_modified=False,
-    )
+    with _attendance_reply_lock(doc.name):
+        # ``doc`` is the row as it was inserted. Re-read it: the leave may
+        # have been rejected, cancelled or deleted before this job ran (the
+        # withdrawal hook found nothing stored then), and a stored reply
+        # means a duplicate job
+        state = _current_leave_state(doc.name)
+        if not _is_announced(state) or state.get(ATTENDANCE_REPLY_TS_FIELD):
+            return None
+
+        # The thread lives where the summary was posted. The summary job
+        # stores that channel's ID (when it has the field for it); the
+        # setting is the fallback, and may have been changed since the morning
+        response = slack.slack_app.client.chat_postMessage(
+            channel=slack_settings.get("last_attendance_channel_id") or slack.SLACK_CHANNEL_ID,
+            blocks=[_same_day_reply_block(_same_day_reply_text(name, day_period))],
+            thread_ts=slack_settings.last_attendance_msg_ts,
+            reply_broadcast=True,
+        )
+        reply_ts = response["ts"]
+        channel = response.get("channel")
+        frappe.db.set_value(
+            "Leave Application",
+            doc.name,
+            {ATTENDANCE_REPLY_TS_FIELD: reply_ts, ATTENDANCE_REPLY_CHANNEL_FIELD: channel},
+            update_modified=False,
+        )
+
+        # A withdrawal committed while Slack was posting found nothing stored
+        # and enqueued nothing, so take the reply back here
+        if not _is_announced(_current_leave_state(doc.name)):
+            _strike_reply(
+                slack,
+                leave_name=doc.name,
+                reply_ts=reply_ts,
+                channel=channel,
+                employee=doc.employee,
+                employee_name=doc.employee_name,
+                day_period=day_period,
+            )
     return reply_ts
 
 
@@ -425,8 +487,38 @@ def withdraw_attendance_reply_bg(
         )
         return
 
+    with _attendance_reply_lock(leave_name):
+        _strike_reply(
+            None,
+            leave_name=leave_name,
+            reply_ts=reply_ts,
+            channel=channel,
+            employee=employee,
+            employee_name=employee_name,
+            day_period=day_period,
+        )
+
+
+def _strike_reply(
+    slack: SlackIntegration | None,
+    *,
+    leave_name: str,
+    reply_ts: str,
+    channel: str | None,
+    employee: str,
+    employee_name: str,
+    day_period: str,
+) -> None:
+    """
+    Edit the reply into its struck-through form and clear the stored
+    reference. The reference is cleared after a successful edit, or when
+    Slack says the message is gone for good; a transient failure (rate
+    limit, timeout, outage) is logged and keeps the reference, so a later
+    withdrawal the same day still has a handle on the reply
+    """
+    cleared = True
     try:
-        slack = SlackIntegration()
+        slack = slack or SlackIntegration()
         mention_user = frappe.db.get_single_value("Slack Settings", "mention_user")
         name = _same_day_reply_name(slack, employee, employee_name, mention_user)
         text = f"~{_same_day_reply_text(name, day_period)}~ ({WITHDRAWN_LABEL})"
@@ -436,15 +528,23 @@ def withdraw_attendance_reply_bg(
             blocks=[_same_day_reply_block(text)],
             text=f"{escape_slack_text(employee_name)} is on leave today ({WITHDRAWN_LABEL})",
         )
+    except SlackApiError as e:
+        # The reply may already be gone (deleted by hand): nothing to keep
+        cleared = e.response.get("error") in MISSING_MESSAGE_ERRORS
+        generate_error_log(
+            title="Error marking attendance thread reply as withdrawn",
+            exception=e,
+        )
     except Exception as e:
-        # The reply may already be gone (deleted by hand); log and move on
+        cleared = False
         generate_error_log(
             title="Error marking attendance thread reply as withdrawn",
             exception=e,
         )
 
-    # The reference is only useful on the day it was posted, so clear it
-    # either way (a no-op when the leave itself has been deleted)
+    if not cleared:
+        return
+    # A no-op when the leave itself has been deleted
     frappe.db.set_value(
         "Leave Application",
         leave_name,

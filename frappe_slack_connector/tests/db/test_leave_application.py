@@ -5,9 +5,15 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import today
 
 from frappe_slack_connector.db.leave_application import (
+    APPLICANT_CHANNEL_FIELD,
+    APPLICANT_MSG_TS_FIELD,
     approve_leave,
+    effective_leave_status,
+    get_applicant_message_ref,
     get_employees_on_leave,
+    get_leave_status,
     reject_leave,
+    store_applicant_message_ref,
 )
 
 LEAVE_DB_MODULE = "frappe_slack_connector.db.leave_application"
@@ -153,3 +159,116 @@ class TestGetEmployeesOnLeave(IntegrationTestCase):
             self.assertEqual(get_employees_on_leave(), [])
         mock_get_all.assert_called_once()
         self.assertEqual(mock_get_all.call_args.args[0], "Leave Application")
+
+
+class TestApplicantMessageRef(IntegrationTestCase):
+    def test_store_writes_channel_and_ts_without_touching_modified(self):
+        """store_applicant_message_ref writes both custom fields via db.set_value with update_modified=False so no doc event fires."""
+        with (
+            patch(f"{LEAVE_DB_MODULE}.applicant_message_fields_exist", return_value=True),
+            patch(f"{LEAVE_DB_MODULE}.frappe.db.set_value") as mock_set_value,
+        ):
+            store_applicant_message_ref("HR-LAP-0010", channel="D0FSC0001", ts="1700000000.000001")
+        mock_set_value.assert_called_once_with(
+            "Leave Application",
+            "HR-LAP-0010",
+            {APPLICANT_CHANNEL_FIELD: "D0FSC0001", APPLICANT_MSG_TS_FIELD: "1700000000.000001"},
+            update_modified=False,
+        )
+
+    def test_store_skips_when_response_has_no_ts(self):
+        """store_applicant_message_ref does nothing when channel or ts is missing."""
+        with (
+            patch(f"{LEAVE_DB_MODULE}.applicant_message_fields_exist", return_value=True),
+            patch(f"{LEAVE_DB_MODULE}.frappe.db.set_value") as mock_set_value,
+        ):
+            store_applicant_message_ref("HR-LAP-0011", channel="D0FSC0001", ts=None)
+        mock_set_value.assert_not_called()
+
+    def test_store_skips_when_custom_fields_are_not_installed(self):
+        """store_applicant_message_ref does nothing when the custom fields are absent from Leave Application."""
+        with (
+            patch(f"{LEAVE_DB_MODULE}.applicant_message_fields_exist", return_value=False),
+            patch(f"{LEAVE_DB_MODULE}.frappe.db.set_value") as mock_set_value,
+        ):
+            store_applicant_message_ref("HR-LAP-0012", channel="D0FSC0001", ts="1700000000.000001")
+        mock_set_value.assert_not_called()
+
+    def test_get_returns_stored_channel_and_ts(self):
+        """get_applicant_message_ref returns the (channel, ts) pair stored on the Leave Application."""
+        with (
+            patch(f"{LEAVE_DB_MODULE}.applicant_message_fields_exist", return_value=True),
+            patch(
+                f"{LEAVE_DB_MODULE}.frappe.db.get_value",
+                return_value=frappe._dict(
+                    {APPLICANT_CHANNEL_FIELD: "D0FSC0001", APPLICANT_MSG_TS_FIELD: "1700000000.000001"}
+                ),
+            ),
+        ):
+            self.assertEqual(get_applicant_message_ref("HR-LAP-0013"), ("D0FSC0001", "1700000000.000001"))
+
+    def test_get_returns_none_pair_when_nothing_stored(self):
+        """get_applicant_message_ref returns (None, None) when the fields are empty or the custom fields are absent."""
+        with (
+            patch(f"{LEAVE_DB_MODULE}.applicant_message_fields_exist", return_value=True),
+            patch(
+                f"{LEAVE_DB_MODULE}.frappe.db.get_value",
+                return_value=frappe._dict({APPLICANT_CHANNEL_FIELD: None, APPLICANT_MSG_TS_FIELD: None}),
+            ),
+        ):
+            self.assertEqual(get_applicant_message_ref("HR-LAP-0014"), (None, None))
+        with patch(f"{LEAVE_DB_MODULE}.applicant_message_fields_exist", return_value=False):
+            self.assertEqual(get_applicant_message_ref("HR-LAP-0015"), (None, None))
+
+    def test_get_returns_none_pair_for_missing_leave_id(self):
+        """get_applicant_message_ref returns (None, None) without querying when the leave has no name."""
+        with (
+            patch(f"{LEAVE_DB_MODULE}.applicant_message_fields_exist", return_value=True),
+            patch(f"{LEAVE_DB_MODULE}.frappe.db.get_value") as mock_get_value,
+        ):
+            self.assertEqual(get_applicant_message_ref(None), (None, None))
+            self.assertEqual(get_applicant_message_ref(""), (None, None))
+        mock_get_value.assert_not_called()
+
+    def test_get_returns_none_pair_when_row_is_missing(self):
+        """get_applicant_message_ref returns (None, None) when the Leave Application row does not exist (get_value gives None or an empty result)."""
+        for missing in (None, ()):
+            with (
+                patch(f"{LEAVE_DB_MODULE}.applicant_message_fields_exist", return_value=True),
+                patch(f"{LEAVE_DB_MODULE}.frappe.db.get_value", return_value=missing),
+            ):
+                self.assertEqual(get_applicant_message_ref("HR-LAP-MISSING"), (None, None))
+
+
+class TestLeaveStatus(IntegrationTestCase):
+    def test_cancelled_document_reads_as_cancelled_whatever_the_status_column_says(self):
+        """A force-cancelled leave (docstatus 2, status still Approved) is Cancelled for the applicant DM; otherwise the status column stands."""
+        self.assertEqual(effective_leave_status("Approved", 2), "Cancelled")
+        self.assertEqual(effective_leave_status("Rejected", "2"), "Cancelled")
+        self.assertEqual(effective_leave_status("Approved", 1), "Approved")
+        self.assertEqual(effective_leave_status("Open", 0), "Open")
+        self.assertIsNone(effective_leave_status(None, 0))
+
+    def test_get_leave_status_reads_status_and_docstatus_together(self):
+        """get_leave_status reads both columns in one query and applies the docstatus rule; a missing row gives None."""
+        with patch(
+            f"{LEAVE_DB_MODULE}.frappe.db.get_value",
+            return_value=frappe._dict(status="Approved", docstatus=2),
+        ) as mock_get_value:
+            self.assertEqual(get_leave_status("HR-LAP-0001"), "Cancelled")
+        mock_get_value.assert_called_once_with(
+            "Leave Application", "HR-LAP-0001", ["status", "docstatus"], as_dict=True
+        )
+        with patch(f"{LEAVE_DB_MODULE}.frappe.db.get_value", return_value=None):
+            self.assertIsNone(get_leave_status("HR-LAP-0001"))
+
+    def test_locks_the_row_when_asked_to(self):
+        """for_update=True reads the reference with a row lock, so a save holding it cannot be overtaken by the job's write; the default read takes no lock."""
+        with (
+            patch(f"{LEAVE_DB_MODULE}.applicant_message_fields_exist", return_value=True),
+            patch(f"{LEAVE_DB_MODULE}.frappe.db.get_value", return_value=None) as mock_get_value,
+        ):
+            get_applicant_message_ref("HR-LAP-0001", for_update=True)
+            self.assertTrue(mock_get_value.call_args.kwargs.get("for_update"))
+            get_applicant_message_ref("HR-LAP-0001")
+            self.assertNotIn("for_update", mock_get_value.call_args.kwargs)

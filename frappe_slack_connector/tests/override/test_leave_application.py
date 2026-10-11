@@ -5,6 +5,7 @@ from frappe.tests import IntegrationTestCase
 
 from frappe_slack_connector.override.leave_application import (
     after_insert,
+    on_trash_refresh_attendance_summary,
     on_update_refresh_attendance_summary,
     send_leave_notification_bg,
     send_leave_notification_to_applicant,
@@ -356,12 +357,48 @@ class TestOnUpdateRefreshAttendanceSummary(IntegrationTestCase):
         mock_enqueue.assert_not_called()
 
 
+class TestOnTrashRefreshAttendanceSummary(IntegrationTestCase):
+    def _run(self, doc):
+        settings = _build_slack_settings_mock(last_attendance_date="2026-06-10")
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.get_single", return_value=settings),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.today", return_value="2026-06-10"),
+        ):
+            on_trash_refresh_attendance_summary(doc, method="on_trash")
+        return mock_enqueue
+
+    def test_deleting_a_counted_draft_covering_today_refreshes_the_summary(self):
+        """Deleting an Open draft that covers today (it was added to the summary when applied for) enqueues the refresh after commit; a delete runs neither on_update nor on_cancel."""
+        doc = _build_leave_doc(from_date="2026-06-10", to_date="2026-06-10", status="Open", status_changed=False)
+        mock_enqueue = self._run(doc)
+        mock_enqueue.assert_called_once()
+        self.assertIs(mock_enqueue.call_args.args[0], update_attendance_summary)
+        self.assertTrue(mock_enqueue.call_args.kwargs["enqueue_after_commit"])
+
+    def test_deleting_a_rejected_or_cancelled_leave_does_nothing(self):
+        """A leave the summary already excludes (Rejected, or docstatus 2) does not refresh it when deleted."""
+        rejected = _build_leave_doc(
+            from_date="2026-06-10", to_date="2026-06-10", status="Rejected", status_changed=False
+        )
+        self._run(rejected).assert_not_called()
+        cancelled = _build_leave_doc(
+            from_date="2026-06-10", to_date="2026-06-10", status="Approved", status_changed=False, docstatus=2
+        )
+        self._run(cancelled).assert_not_called()
+
+    def test_deleting_a_leave_not_covering_today_does_nothing(self):
+        doc = _build_leave_doc(from_date="2026-06-12", to_date="2026-06-12", status="Open", status_changed=False)
+        self._run(doc).assert_not_called()
+
+
 class TestDocEventHooks(IntegrationTestCase):
-    def test_refresh_handler_wired_to_update_cancel_and_discard(self):
-        """hooks.py registers on_update_refresh_attendance_summary for Leave Application on_update, on_cancel and on_discard (get_hooks returns a list per event)."""
+    def test_refresh_handler_wired_to_update_cancel_discard_and_trash(self):
+        """hooks.py registers on_update_refresh_attendance_summary for Leave Application on_update, on_cancel and on_discard, and on_trash_refresh_attendance_summary for on_trash (get_hooks returns a list per event)."""
         leave_events = frappe.get_hooks("doc_events")["Leave Application"]
         for event in ("on_update", "on_cancel", "on_discard"):
             self.assertIn(REFRESH_HANDLER_PATH, leave_events[event], event)
+        self.assertIn(f"{LEAVE_OVERRIDE_MODULE}.on_trash_refresh_attendance_summary", leave_events["on_trash"])
         self.assertIn(f"{LEAVE_OVERRIDE_MODULE}.after_insert", leave_events["after_insert"])
 
 

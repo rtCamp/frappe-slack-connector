@@ -48,6 +48,17 @@ def on_update_refresh_attendance_summary(doc, method=None):
     enqueue_attendance_summary_refresh(doc)
 
 
+def on_trash_refresh_attendance_summary(doc, method=None):
+    """
+    Refresh today's attendance summary when a leave that is counted in it
+    is deleted (deleting a draft runs neither ``on_update`` nor
+    ``on_cancel``). The job runs after commit, when the row is gone
+    """
+    if cint(doc.docstatus) == 2 or doc.status not in SUMMARY_INCLUDED_STATUSES:
+        return
+    enqueue_attendance_summary_refresh(doc)
+
+
 def _leaves_attendance_summary(doc) -> bool:
     """
     Whether this save takes the leave out of the summary: its status moved

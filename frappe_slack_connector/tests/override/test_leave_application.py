@@ -10,6 +10,7 @@ from slack_sdk.errors import SlackApiError
 from frappe_slack_connector.override.leave_application import (
     ATTENDANCE_REPLY_CHANNEL_FIELD,
     ATTENDANCE_REPLY_FIELDS,
+    ATTENDANCE_REPLY_TEXT_FIELD,
     ATTENDANCE_REPLY_TS_FIELD,
     after_insert,
     on_trash_withdraw_attendance_reply,
@@ -132,6 +133,7 @@ def _leave_override_env(
     today=TODAY,
     stored_ts=None,
     stored_channel=REPLY_CHANNEL,
+    stored_text=None,
     db_states=None,
     doc=None,
 ):
@@ -168,7 +170,13 @@ def _leave_override_env(
         if doctype == "Leave Application" and fieldname == list(ATTENDANCE_REPLY_FIELDS):
             assert kwargs.get("as_dict"), "the reply reference is read as a dict"
             assert kwargs.get("ignore"), "a missing column (fixtures not yet synced) must not break a save"
-            return frappe._dict({ATTENDANCE_REPLY_TS_FIELD: stored_ts, ATTENDANCE_REPLY_CHANNEL_FIELD: stored_channel})
+            return frappe._dict(
+                {
+                    ATTENDANCE_REPLY_TS_FIELD: stored_ts,
+                    ATTENDANCE_REPLY_CHANNEL_FIELD: stored_channel,
+                    ATTENDANCE_REPLY_TEXT_FIELD: stored_text,
+                }
+            )
         if doctype == "Leave Application" and fieldname == ["status", "docstatus", *ATTENDANCE_REPLY_FIELDS]:
             # The committed row's status and reply reference, re-read under the lock
             assert kwargs.get("as_dict") and kwargs.get("ignore")
@@ -176,7 +184,12 @@ def _leave_override_env(
             if state is None:
                 return None
             return frappe._dict(
-                {ATTENDANCE_REPLY_TS_FIELD: stored_ts, ATTENDANCE_REPLY_CHANNEL_FIELD: stored_channel, **state}
+                {
+                    ATTENDANCE_REPLY_TS_FIELD: stored_ts,
+                    ATTENDANCE_REPLY_CHANNEL_FIELD: stored_channel,
+                    ATTENDANCE_REPLY_TEXT_FIELD: stored_text,
+                    **state,
+                }
             )
         if (
             doctype == "Leave Application"
@@ -200,6 +213,7 @@ def _leave_override_env(
                     "custom_first_halfsecond_half": getattr(row_doc, "custom_first_halfsecond_half", None),
                     ATTENDANCE_REPLY_TS_FIELD: stored_ts,
                     ATTENDANCE_REPLY_CHANNEL_FIELD: stored_channel,
+                    ATTENDANCE_REPLY_TEXT_FIELD: stored_text,
                     **state,
                 }
             )
@@ -423,7 +437,11 @@ class TestPostSameDayLeaveToAttendanceThread(IntegrationTestCase):
         mocks.set_value.assert_called_once_with(
             "Leave Application",
             doc.name,
-            {ATTENDANCE_REPLY_TS_FIELD: REPLY_TS, ATTENDANCE_REPLY_CHANNEL_FIELD: REPLY_CHANNEL},
+            {
+                ATTENDANCE_REPLY_TS_FIELD: REPLY_TS,
+                ATTENDANCE_REPLY_CHANNEL_FIELD: REPLY_CHANNEL,
+                ATTENDANCE_REPLY_TEXT_FIELD: "<@U-applicant> is on leave today. _(Full Day)_",
+            },
             update_modified=False,
         )
         mocks.error_log.assert_not_called()
@@ -478,6 +496,23 @@ class TestPostSameDayLeaveToAttendanceThread(IntegrationTestCase):
             post_same_day_leave_to_attendance_thread(doc, slack=mock_slack)
         self.assertIn("_(Half Day)_", _thread_reply_text(mock_slack))
 
+    def test_retries_the_withdrawal_once_when_the_row_is_gone_and_the_cleanup_fails(self):
+        """A delete that commits while Slack is posting leaves no row to keep the reference; if striking the reply fails transiently, one withdrawal job carrying the new ts, channel and text is queued so the announcement is not orphaned."""
+        doc = _build_leave_doc(from_date="2026-06-10", to_date="2026-06-10")
+        mock_slack = _build_slack_mock()
+        mock_slack.slack_app.client.chat_update.side_effect = RuntimeError("timeout")
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue,
+            _leave_override_env(doc=doc, db_states=[{"status": "Open", "docstatus": 0}, None]) as mocks,
+        ):
+            post_same_day_leave_to_attendance_thread(doc, slack=mock_slack)
+        mocks.error_log.assert_called_once()
+        mock_enqueue.assert_called_once()
+        self.assertIs(mock_enqueue.call_args.args[0], withdraw_attendance_reply_bg)
+        kwargs = mock_enqueue.call_args.kwargs
+        self.assertEqual((kwargs["reply_ts"], kwargs["channel"]), (REPLY_TS, REPLY_CHANNEL))
+        self.assertEqual(kwargs["reply_text"], "<@U-applicant> is on leave today. _(Full Day)_")
+
     def test_does_not_post_twice_when_a_reply_is_already_stored(self):
         """A duplicate job (or a retry) finds the reply reference already stored and posts nothing."""
         doc = _build_leave_doc(from_date="2026-06-10", to_date="2026-06-10")
@@ -500,7 +535,8 @@ class TestPostSameDayLeaveToAttendanceThread(IntegrationTestCase):
         mock_slack.slack_app.client.chat_postMessage.assert_called_once()
         _assert_struck_through(mock_slack, REPLY_TS, channel=REPLY_CHANNEL)
         self.assertEqual(
-            mocks.set_value.call_args.args[2], {ATTENDANCE_REPLY_TS_FIELD: None, ATTENDANCE_REPLY_CHANNEL_FIELD: None}
+            mocks.set_value.call_args.args[2],
+            {ATTENDANCE_REPLY_TS_FIELD: None, ATTENDANCE_REPLY_CHANNEL_FIELD: None, ATTENDANCE_REPLY_TEXT_FIELD: None},
         )
 
     def test_reply_wording_mentions_employee_and_full_day(self):
@@ -673,7 +709,7 @@ class TestOnUpdateWithdrawAttendanceReply(IntegrationTestCase):
         mocks.set_value.assert_called_once_with(
             "Leave Application",
             doc.name,
-            {ATTENDANCE_REPLY_TS_FIELD: None, ATTENDANCE_REPLY_CHANNEL_FIELD: None},
+            {ATTENDANCE_REPLY_TS_FIELD: None, ATTENDANCE_REPLY_CHANNEL_FIELD: None, ATTENDANCE_REPLY_TEXT_FIELD: None},
             update_modified=False,
         )
         mocks.error_log.assert_not_called()
@@ -1076,7 +1112,7 @@ class TestWithdrawAttendanceReplyBg(IntegrationTestCase):
         mocks.set_value.assert_called_once_with(
             "Leave Application",
             "HR-LAP-0050",
-            {ATTENDANCE_REPLY_TS_FIELD: None, ATTENDANCE_REPLY_CHANNEL_FIELD: None},
+            {ATTENDANCE_REPLY_TS_FIELD: None, ATTENDANCE_REPLY_CHANNEL_FIELD: None, ATTENDANCE_REPLY_TEXT_FIELD: None},
             update_modified=False,
         )
 
@@ -1106,6 +1142,22 @@ class TestWithdrawAttendanceReplyBg(IntegrationTestCase):
         mock_slack.slack_app.client.chat_update.assert_not_called()
         mocks.error_log.assert_called_once()
         mocks.set_value.assert_not_called()
+
+    def test_strikes_through_the_text_as_posted_not_as_it_would_render_now(self):
+        """The stored reply text is wrapped verbatim: a mention setting turned off (or a leave edited) since the post does not rewrite what the channel saw."""
+        mock_slack = _build_slack_mock()
+        settings = _build_slack_settings_mock(mention_user=0)
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            _leave_override_env(
+                settings=settings, stored_ts=TODAY_TS, stored_text="<@U-applicant> is on leave today. _(Full Day)_"
+            ) as mocks,
+        ):
+            withdraw_attendance_reply_bg(
+                leave_name="HR-LAP-0050", reply_ts=TODAY_TS, **{**WITHDRAW_JOB_KWARGS, "day_period": "Second-Half"}
+            )
+        _assert_struck_through(mock_slack, TODAY_TS)  # mention and Full Day, as posted
+        mocks.error_log.assert_not_called()
 
     def test_leaves_the_reply_alone_when_the_leave_is_back_in_the_summary(self):
         """A queued rejection job that runs after a later transition put the leave back to Open/Approved finds an announced row and edits nothing."""

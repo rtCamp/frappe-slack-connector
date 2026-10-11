@@ -21,7 +21,10 @@ from frappe_slack_connector.tasks.attendance_summary import get_leave_type
 # strike the reply through) only accepts an ID
 ATTENDANCE_REPLY_TS_FIELD = "custom_slack_attendance_reply_ts"
 ATTENDANCE_REPLY_CHANNEL_FIELD = "custom_slack_attendance_reply_channel"
-ATTENDANCE_REPLY_FIELDS = (ATTENDANCE_REPLY_TS_FIELD, ATTENDANCE_REPLY_CHANNEL_FIELD)
+# The reply text as posted, so the strike-through wraps exactly what the
+# channel saw even if the mention setting or the leave changed since
+ATTENDANCE_REPLY_TEXT_FIELD = "custom_slack_attendance_reply_text"
+ATTENDANCE_REPLY_FIELDS = (ATTENDANCE_REPLY_TS_FIELD, ATTENDANCE_REPLY_CHANNEL_FIELD, ATTENDANCE_REPLY_TEXT_FIELD)
 
 # Statuses under which a leave covering today is announced (and listed in
 # the summary)
@@ -274,13 +277,14 @@ def post_same_day_leave_to_attendance_thread(doc: Document, slack: SlackIntegrat
 
         name = _same_day_reply_name(slack, current.employee, current.employee_name, slack_settings.mention_user)
         day_period = get_leave_type(current, on_date=today)
+        reply_text = _same_day_reply_text(name, day_period)
 
         # The thread lives where the summary was posted. The summary job
         # stores that channel's ID (when it has the field for it); the
         # setting is the fallback, and may have been changed since the morning
         response = slack.slack_app.client.chat_postMessage(
             channel=slack_settings.get("last_attendance_channel_id") or slack.SLACK_CHANNEL_ID,
-            blocks=[_same_day_reply_block(_same_day_reply_text(name, day_period))],
+            blocks=[_same_day_reply_block(reply_text)],
             thread_ts=slack_settings.last_attendance_msg_ts,
             reply_broadcast=True,
         )
@@ -289,7 +293,11 @@ def post_same_day_leave_to_attendance_thread(doc: Document, slack: SlackIntegrat
         frappe.db.set_value(
             "Leave Application",
             doc.name,
-            {ATTENDANCE_REPLY_TS_FIELD: reply_ts, ATTENDANCE_REPLY_CHANNEL_FIELD: channel},
+            {
+                ATTENDANCE_REPLY_TS_FIELD: reply_ts,
+                ATTENDANCE_REPLY_CHANNEL_FIELD: channel,
+                ATTENDANCE_REPLY_TEXT_FIELD: reply_text,
+            },
             update_modified=False,
         )
 
@@ -301,16 +309,21 @@ def post_same_day_leave_to_attendance_thread(doc: Document, slack: SlackIntegrat
 
         # A withdrawal that committed while Slack was posting enqueued a job
         # that ran before this one stored anything, so take the reply back here
-        if not _is_announced(_current_leave_state(doc.name)):
-            _strike_reply(
-                slack,
+        state = _current_leave_state(doc.name)
+        if not _is_announced(state):
+            job = dict(
                 leave_name=doc.name,
                 reply_ts=reply_ts,
                 channel=channel,
+                reply_text=reply_text,
                 employee=current.employee,
                 employee_name=current.employee_name,
                 day_period=day_period,
             )
+            if not _strike_reply(slack, **job) and state is None:
+                # The row is gone (deleted), so nothing keeps the reference for
+                # a later attempt: queue one more withdrawal carrying it
+                frappe.enqueue(withdraw_attendance_reply_bg, queue="short", **job)
     return reply_ts
 
 
@@ -381,11 +394,11 @@ def _reply_posted_today(reply_ts: str) -> bool:
     return getdate(posted_at) == getdate(frappe.utils.today())
 
 
-def get_attendance_reply_ref(leave_name: str, *, for_update: bool = False) -> tuple[str | None, str | None]:
+def get_attendance_reply_ref(leave_name: str, *, for_update: bool = False) -> tuple[str | None, str | None, str | None]:
     """
-    The stored (ts, channel ID) of the attendance thread reply for the leave,
-    read from the database; (None, None) when nothing is stored or the row
-    is gone. ``for_update`` locks the row, so a save that started before the
+    The stored (ts, channel ID, posted text) of the attendance thread reply
+    for the leave, read from the database; all None when nothing is stored
+    or the row is gone. ``for_update`` locks the row, so a save that started before the
     post job wrote the reference waits for that write to commit and reads
     it, instead of putting its stale empty value back
     """
@@ -400,8 +413,12 @@ def get_attendance_reply_ref(leave_name: str, *, for_update: bool = False) -> tu
         **({"for_update": True} if for_update else {}),
     )
     if not stored:
-        return None, None
-    return stored.get(ATTENDANCE_REPLY_TS_FIELD) or None, stored.get(ATTENDANCE_REPLY_CHANNEL_FIELD) or None
+        return None, None, None
+    return (
+        stored.get(ATTENDANCE_REPLY_TS_FIELD) or None,
+        stored.get(ATTENDANCE_REPLY_CHANNEL_FIELD) or None,
+        stored.get(ATTENDANCE_REPLY_TEXT_FIELD) or None,
+    )
 
 
 def restore_attendance_reply_ts(doc: Document, method=None):
@@ -419,12 +436,13 @@ def restore_attendance_reply_ts(doc: Document, method=None):
     # is_new() only knows about docs going through insert(); a doc built in
     # memory and never inserted has no name either
     if doc.is_new() or not doc.name:
-        reply_ts, channel = None, None
+        reply_ts, channel, reply_text = None, None, None
     else:
-        reply_ts, channel = get_attendance_reply_ref(doc.name, for_update=True)
+        reply_ts, channel, reply_text = get_attendance_reply_ref(doc.name, for_update=True)
 
     doc.set(ATTENDANCE_REPLY_TS_FIELD, reply_ts)
     doc.set(ATTENDANCE_REPLY_CHANNEL_FIELD, channel)
+    doc.set(ATTENDANCE_REPLY_TEXT_FIELD, reply_text)
 
 
 def _enqueue_attendance_reply_withdrawal(doc: Document):
@@ -444,7 +462,7 @@ def _enqueue_attendance_reply_withdrawal(doc: Document):
         # Never trust the values on the doc (see restore_attendance_reply_ts):
         # read what is stored, as the fallback for a row that is gone by the
         # time the job runs (on_trash)
-        reply_ts, channel = get_attendance_reply_ref(doc.name)
+        reply_ts, channel, reply_text = get_attendance_reply_ref(doc.name)
 
         # Only edit once the status change is committed: on_update runs
         # before on_submit, which can still throw and roll back
@@ -455,6 +473,7 @@ def _enqueue_attendance_reply_withdrawal(doc: Document):
             leave_name=doc.name,
             reply_ts=reply_ts,
             channel=channel,
+            reply_text=reply_text,
             employee=doc.employee,
             employee_name=doc.employee_name,
             day_period=get_leave_type(doc, on_date=today),
@@ -504,6 +523,7 @@ def withdraw_attendance_reply_bg(
     employee_name: str,
     day_period: str,
     channel: str | None = None,
+    reply_text: str | None = None,
 ):
     """
     Edit the attendance thread reply ``reply_ts`` posted for the leave
@@ -528,6 +548,7 @@ def withdraw_attendance_reply_bg(
                 return
             reply_ts = state.get(ATTENDANCE_REPLY_TS_FIELD) or None
             channel = state.get(ATTENDANCE_REPLY_CHANNEL_FIELD) or None
+            reply_text = state.get(ATTENDANCE_REPLY_TEXT_FIELD) or None
         # A reply from an earlier day is history and is left alone
         try:
             if not reply_ts or not _reply_posted_today(reply_ts):
@@ -554,6 +575,7 @@ def withdraw_attendance_reply_bg(
             leave_name=leave_name,
             reply_ts=reply_ts,
             channel=channel,
+            reply_text=reply_text,
             employee=employee,
             employee_name=employee_name,
             day_period=day_period,
@@ -569,20 +591,30 @@ def _strike_reply(
     employee: str,
     employee_name: str,
     day_period: str,
-) -> None:
+    reply_text: str | None = None,
+) -> bool:
     """
     Edit the reply into its struck-through form and clear the stored
-    reference. The reference is cleared after a successful edit, or when
-    Slack says the message is gone for good; a transient failure (rate
-    limit, timeout, outage) is logged and keeps the reference, so a later
-    withdrawal the same day still has a handle on the reply
+    reference; True when the reference was cleared. The reference is
+    cleared after a successful edit, or when Slack says the message is gone
+    for good; a transient failure (rate limit, timeout, outage) is logged
+    and keeps the reference, so a later withdrawal the same day still has a
+    handle on the reply
+
+    ``reply_text`` is the text as posted; the struck-through message wraps
+    exactly that, so a mention setting or leave edited since does not
+    rewrite history. It is rebuilt only for a reply stored before the text
+    was kept
     """
     cleared = True
     try:
         slack = slack or SlackIntegration()
-        mention_user = frappe.db.get_single_value("Slack Settings", "mention_user")
-        name = _same_day_reply_name(slack, employee, employee_name, mention_user)
-        text = f"~{_same_day_reply_text(name, day_period)}~ ({WITHDRAWN_LABEL})"
+        if not reply_text:
+            mention_user = frappe.db.get_single_value("Slack Settings", "mention_user")
+            reply_text = _same_day_reply_text(
+                _same_day_reply_name(slack, employee, employee_name, mention_user), day_period
+            )
+        text = f"~{reply_text}~ ({WITHDRAWN_LABEL})"
         slack.slack_app.client.chat_update(
             channel=channel or slack.SLACK_CHANNEL_ID,
             ts=reply_ts,
@@ -598,17 +630,19 @@ def _strike_reply(
         cleared = error == "message_not_found" or (error == "channel_not_found" and bool(channel))
         generate_error_log(
             title="Error marking attendance thread reply as withdrawn",
+            message=f"Leave Application {leave_name}: reply {reply_ts} in {channel or 'the attendance channel'}",
             exception=e,
         )
     except Exception as e:
         cleared = False
         generate_error_log(
             title="Error marking attendance thread reply as withdrawn",
+            message=f"Leave Application {leave_name}: reply {reply_ts} in {channel or 'the attendance channel'}",
             exception=e,
         )
 
     if not cleared:
-        return
+        return False
     # A no-op when the leave itself has been deleted
     frappe.db.set_value(
         "Leave Application",
@@ -616,6 +650,7 @@ def _strike_reply(
         dict.fromkeys(ATTENDANCE_REPLY_FIELDS),
         update_modified=False,
     )
+    return True
 
 
 def format_leave_application_blocks(

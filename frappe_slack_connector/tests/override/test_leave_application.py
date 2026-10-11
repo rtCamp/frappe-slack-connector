@@ -78,6 +78,8 @@ def _build_leave_doc(
     doc.status = status
     doc.custom_slack_attendance_reply_ts = attendance_reply_ts
     doc.has_value_changed.return_value = status_changed
+    # No before-save copy unless a test sets one: the handlers then read the stored reference from the database
+    doc.get_doc_before_save.return_value = None
     doc.get.side_effect = lambda fieldname, default=None: getattr(doc, fieldname, default)
     return doc
 
@@ -571,6 +573,40 @@ class TestOnUpdateWithdrawAttendanceReply(IntegrationTestCase):
             on_update_withdraw_attendance_reply(doc, method="on_cancel")
         _assert_struck_through(mock_slack, reply_ts)
         mocks.error_log.assert_not_called()
+
+    def test_submit_does_not_strike_the_reply(self):
+        """Submitting (docstatus 0 -> 1) changes docstatus but is not a cancel: nothing is enqueued."""
+        doc = _build_leave_doc(status="Approved", status_changed=False)
+        doc.docstatus = 1
+        doc.has_value_changed.side_effect = lambda fieldname: fieldname == "docstatus"
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue,
+            _leave_override_env(stored_ts=_slack_ts_at_noon_utc(TODAY)),
+        ):
+            on_update_withdraw_attendance_reply(doc, method="on_update")
+        mock_enqueue.assert_not_called()
+
+    def test_uses_the_before_save_copy_of_the_reference_when_there_is_one(self):
+        """On a save, the reference comes from the document's before-save copy (what the database held before this write), not from the current doc and without a second read: a force cancel that skipped the restore hook could otherwise have overwritten the column."""
+        reply_ts = _slack_ts_at_noon_utc(TODAY)
+        doc = _build_leave_doc(status="Approved", status_changed=False, attendance_reply_ts=None)
+        doc.docstatus = 2
+        doc.has_value_changed.side_effect = lambda fieldname: fieldname == "docstatus"
+        doc.get_doc_before_save.return_value = frappe._dict(
+            {ATTENDANCE_REPLY_TS_FIELD: reply_ts, ATTENDANCE_REPLY_CHANNEL_FIELD: "C0BEFORE"}
+        )
+        mock_slack = _build_slack_mock()
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue", side_effect=_run_enqueued_inline),
+            _leave_override_env(stored_ts=None) as mocks,
+        ):
+            on_update_withdraw_attendance_reply(doc, method="on_cancel")
+        _assert_struck_through(mock_slack, reply_ts, channel="C0BEFORE")
+        self.assertNotIn(
+            ("Leave Application", doc.name, list(ATTENDANCE_REPLY_FIELDS)),
+            [c.args for c in mocks.get_value.call_args_list],
+        )
 
     def test_submitted_leave_saved_without_a_change_does_not_strike_the_reply(self):
         """A submitted, Approved leave (docstatus 1) whose status did not change enqueues nothing."""

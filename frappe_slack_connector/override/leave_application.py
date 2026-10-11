@@ -328,10 +328,18 @@ def _enqueue_attendance_reply_withdrawal(doc: Document):
     block the user's action
     """
     try:
-        # Read the stored values, never the ones on the doc (see
-        # restore_attendance_reply_ts), and hand everything the job needs to
-        # it so it does not re-read a row that may be gone by then (on_trash)
-        reply_ts, channel = get_attendance_reply_ref(doc.name)
+        # Never trust the values on the doc (see restore_attendance_reply_ts).
+        # The before-save copy is what the database held before this write
+        # (a cancel with ignore_validate skips before_cancel, so the restore
+        # hook has not run and db_update may just have overwritten the
+        # column); without one (on_trash) read the row, and hand everything
+        # the job needs to it so it does not re-read a row that may be gone
+        before = doc.get_doc_before_save()
+        if before:
+            reply_ts = before.get(ATTENDANCE_REPLY_TS_FIELD) or None
+            channel = before.get(ATTENDANCE_REPLY_CHANNEL_FIELD) or None
+        else:
+            reply_ts, channel = get_attendance_reply_ref(doc.name)
         if not reply_ts or not _reply_posted_today(reply_ts):
             return
 

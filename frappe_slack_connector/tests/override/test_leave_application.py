@@ -46,6 +46,7 @@ def _build_leave_doc(
     doc.total_leave_days = total_leave_days
     doc.leave_balance = leave_balance
     doc.creation = creation
+    doc.docstatus = 0  # a draft unless a test says otherwise; a MagicMock would read as 1
     return doc
 
 
@@ -64,7 +65,7 @@ def _blocks_text(blocks):
     return "\n".join(parts)
 
 
-def _run_leave_notification_bg(doc, *, custom_fields=False, is_lwp=0, attendance_updates=0, balance_on=None):
+def _run_leave_notification_bg(doc, *, custom_fields=False, is_lwp=0, attendance_updates=0, balance_on=10.0):
     """Run send_leave_notification_bg with Slack, DB, dates and HRMS mocked (today is 2026-06-10) and return the mocks.
 
     `balance_on` configures the patched get_leave_balance_on: a float is returned, an Exception instance is raised.
@@ -112,7 +113,7 @@ def _approver_call(mock_slack):
     )
 
 
-def _get_approver_blocks(doc, *, custom_fields=False, is_lwp=0, balance_on=None):
+def _get_approver_blocks(doc, *, custom_fields=False, is_lwp=0, balance_on=10.0):
     """Run send_leave_notification_bg (attendance updates off) and return the blocks posted to the approver DM."""
     mocks = _run_leave_notification_bg(doc, custom_fields=custom_fields, is_lwp=is_lwp, balance_on=balance_on)
     mocks["slack"].slack_app.client.chat_postMessage.assert_called_once()
@@ -158,6 +159,7 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         settings = _build_slack_settings_mock(send_attendance_updates=0)
         with (
             patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_balance_on", return_value=10.0),
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_single_value", return_value=1),
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.get_single", return_value=settings),
             patch(
@@ -184,6 +186,7 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         settings = _build_slack_settings_mock(send_attendance_updates=1, last_attendance_date="2026-06-10")
         with (
             patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_balance_on", return_value=10.0),
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_single_value", return_value=1),
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.get_single", return_value=settings),
             patch(
@@ -215,6 +218,7 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         settings = _build_slack_settings_mock(send_attendance_updates=0)
         with (
             patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_balance_on", return_value=10.0),
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_single_value", return_value=1),
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.get_single", return_value=settings),
             patch(
@@ -247,6 +251,7 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         settings = _build_slack_settings_mock(send_attendance_updates=0)
         with (
             patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_balance_on", return_value=10.0),
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_single_value", return_value=0),
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.get_single", return_value=settings),
             patch(
@@ -382,6 +387,7 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
             "2026-06-15",
             "2026-06-17",
             consider_all_leaves_in_the_allocation_period=True,
+            leave_application=doc.name,
         )
         text = _blocks_text(_approver_call(mocks["slack"]).kwargs["blocks"])
         self.assertIn("*Balance before this request:*\n7 day(s)", text)
@@ -419,9 +425,19 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         lwp["get_leave_balance_on"].assert_not_called()
 
     def test_approver_dm_carries_a_text_fallback(self):
-        """The approver DM has a plain text= fallback for notification previews, naming the employee."""
-        mocks = _run_leave_notification_bg(_build_leave_doc(employee_name="Alice"), balance_on=10.0)
-        self.assertEqual(_approver_call(mocks["slack"]).kwargs["text"], "New leave application from Alice")
+        """The approver DM has a text= fallback for notification previews, naming the employee with Slack's control characters escaped."""
+        mocks = _run_leave_notification_bg(_build_leave_doc(employee_name="Alice <A&B>"), balance_on=10.0)
+        self.assertEqual(
+            _approver_call(mocks["slack"]).kwargs["text"], "New leave application from Alice &lt;A&amp;B&gt;"
+        )
+
+    def test_approver_dm_adds_the_request_back_for_a_leave_inserted_submitted(self):
+        """A leave inserted already submitted has its ledger entry when the job runs, so HRMS reports the balance after the deduction; the DM adds the requested days back to show the balance before the request."""
+        doc = _build_leave_doc(from_date="2026-06-15", to_date="2026-06-17", total_leave_days=3.0)
+        doc.docstatus = 1
+        text = _blocks_text(_get_approver_blocks(doc, balance_on=7.0))
+        self.assertIn("*Balance before this request:*\n10 day(s)", text)
+        self.assertNotIn("Insufficient balance", text)
 
     def test_attendance_thread_keeps_today_period_for_multi_day_half_day_leave_starting_today(self):
         """For a multi-day leave starting today with the half day today, the attendance thread says _(First Half)_ while the approver DM carries the full duration text."""

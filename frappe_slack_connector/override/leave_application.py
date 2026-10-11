@@ -1,11 +1,12 @@
 import frappe
 from frappe.model.document import Document
-from frappe.utils import flt, get_url_to_form, getdate
+from frappe.utils import cint, flt, get_url_to_form, getdate
 from hrms.hr.doctype.leave_application.leave_application import get_leave_balance_on
 
 from frappe_slack_connector.db.leave_application import custom_fields_exist
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
+from frappe_slack_connector.helpers.str_utils import escape_slack_text
 from frappe_slack_connector.slack.app import SlackIntegration
 
 
@@ -175,8 +176,8 @@ def send_leave_notification_bg(doc: Document):
 
             slack.slack_app.client.chat_postMessage(
                 channel=approver_slack,
-                # Plain fallback for notification previews; the blocks carry the details
-                text=f"New leave application from {doc.employee_name}",
+                # Fallback for notification previews; the blocks carry the details
+                text=f"New leave application from {escape_slack_text(doc.employee_name)}",
                 blocks=format_leave_application_blocks(
                     leave_id=doc.name,
                     leave_link=get_url_to_form("Leave Application", doc.name),
@@ -211,15 +212,20 @@ def get_leave_balance(doc: Document) -> float | None:
     as 0, which would show a zero balance and a false warning. So the
     balance is always computed here; the stored value is only the fallback
     when the lookup fails, and None means nothing to show
+
+    ``leave_application`` lets HRMS grant the lookup to a user who can read
+    this application but not the Employee (the job runs as the user who
+    saved the leave)
     """
     try:
-        return flt(
+        balance = flt(
             get_leave_balance_on(
                 doc.employee,
                 doc.leave_type,
                 doc.from_date,
                 doc.to_date,
                 consider_all_leaves_in_the_allocation_period=True,
+                leave_application=doc.name,
             )
         )
     except Exception as e:
@@ -228,6 +234,13 @@ def get_leave_balance(doc: Document) -> float | None:
             exception=e,
         )
         return flt(doc.leave_balance) if doc.leave_balance else None
+
+    # A leave inserted already submitted (API, import) has its ledger entry
+    # by the time the job runs, so HRMS has deducted it: add it back to show
+    # the balance before this request, like for a draft
+    if cint(doc.docstatus) == 1:
+        balance += flt(doc.total_leave_days)
+    return balance
 
 
 def format_leave_duration(doc: Document) -> str:
@@ -265,8 +278,8 @@ def format_leave_application_blocks(
     """
     Format the blocks for the leave application message
 
-    `leave_balance` is the balance recorded on the application when it was
-    submitted; pass None to omit it (e.g. for Leave Without Pay)
+    `leave_balance` is the balance before this request as computed when the
+    message is built; pass None to omit it (e.g. for Leave Without Pay)
     """
     requested = flt(total_days, 2) if total_days is not None else None
     balance = flt(leave_balance, 2) if leave_balance is not None else None

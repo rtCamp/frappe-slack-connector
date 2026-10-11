@@ -1,9 +1,10 @@
 import frappe
 from frappe import _, clear_messages
-from hrms.hr.doctype.leave_application.leave_application import get_leave_approver
+from hrms.hr.doctype.leave_application.leave_application import get_leave_approver, get_leave_balance_on
 
 from frappe_slack_connector.db.leave_application import custom_fields_exist
 from frappe_slack_connector.db.user_meta import get_employeeid_from_slackid, get_userid_from_slackid
+from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.http_response import send_http_response
 from frappe_slack_connector.helpers.str_utils import strip_html_tags
 from frappe_slack_connector.slack.app import SlackIntegration
@@ -73,6 +74,22 @@ def handler(slack: SlackIntegration, payload: dict):
                 leave_application.custom_first_halfsecond_half = (
                     "First Half" if half_day_period == "first_half" else "Second Half"
                 )
+
+        # The Desk form stores the balance before this request on the
+        # application (and only recomputes it for new documents), so do the
+        # same here or the form shows 0 for a leave filed from Slack. The
+        # approver DM computes its own, so a failed lookup only leaves this
+        # field empty
+        try:
+            leave_application.leave_balance = get_leave_balance_on(
+                employee,
+                leave_type,
+                start_date,
+                end_date,
+                consider_all_leaves_in_the_allocation_period=True,
+            )
+        except Exception as e:
+            generate_error_log(title="Error fetching leave balance", exception=e)
 
         leave_application.save(ignore_permissions=True)
         frappe.db.commit()

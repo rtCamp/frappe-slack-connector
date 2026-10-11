@@ -197,6 +197,10 @@ def send_leave_notification_to_applicant(doc: Document):
                 blocks=_applicant_blocks(doc, user_id, status=status, status_by=status_by),
             )
             store_applicant_message_ref(doc.name, channel=response.get("channel"), ts=response.get("ts"))
+            # Commit before the lock is released: the job's own commit only comes
+            # after this function returns, and a worker waiting on the lock would
+            # otherwise still read an empty reference and post a second DM
+            frappe.db.commit()
     except Exception as e:
         generate_error_log(
             title="Error posting leave confirmation to applicant",
@@ -252,6 +256,10 @@ def send_leave_decision_to_applicant(doc: Document, status: str, decided_by: str
                     )
             response = slack.slack_app.client.chat_postMessage(channel=user_id, text=text, blocks=blocks)
             store_applicant_message_ref(doc.name, channel=response.get("channel"), ts=response.get("ts"))
+            # Commit before the lock is released: the job's own commit only comes
+            # after this function returns, and a worker waiting on the lock would
+            # otherwise still read an empty reference and post a second DM
+            frappe.db.commit()
     except Exception as e:
         generate_error_log(
             title="Error updating leave decision for applicant",

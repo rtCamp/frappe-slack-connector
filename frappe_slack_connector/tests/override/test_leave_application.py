@@ -236,6 +236,7 @@ class TestSendLeaveNotificationToApplicant(IntegrationTestCase):
         with (
             patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
             patch(f"{LEAVE_OVERRIDE_MODULE}.store_applicant_message_ref"),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.commit"),
         ):
             send_leave_notification_to_applicant(doc)
         mock_slack.slack_app.client.chat_postMessage.assert_called_once()
@@ -258,10 +259,12 @@ class TestSendLeaveNotificationToApplicant(IntegrationTestCase):
         with (
             patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
             patch(f"{LEAVE_OVERRIDE_MODULE}.store_applicant_message_ref") as mock_store,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.commit") as mock_commit,
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=None),
         ):
             send_leave_notification_to_applicant(doc)
         mock_store.assert_called_once_with(doc.name, channel="D0FSC0001", ts="1700000000.000001")
+        mock_commit.assert_called_once()
         self.assertEqual(
             mock_slack.slack_app.client.chat_postMessage.call_args.kwargs["text"], "Leave request submitted"
         )
@@ -275,6 +278,7 @@ class TestSendLeaveNotificationToApplicant(IntegrationTestCase):
         with (
             patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
             patch(f"{LEAVE_OVERRIDE_MODULE}.store_applicant_message_ref"),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.commit"),
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_single_value", return_value=1),
         ):
             send_leave_notification_to_applicant(doc)
@@ -293,14 +297,16 @@ class TestSendLeaveNotificationToApplicant(IntegrationTestCase):
             patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
             patch(f"{LEAVE_OVERRIDE_MODULE}.get_applicant_message_ref", return_value=("D0FSC0001", "9.9")),
             patch(f"{LEAVE_OVERRIDE_MODULE}.store_applicant_message_ref") as mock_store,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.commit") as mock_commit,
         ):
             send_leave_notification_to_applicant(doc)
         mock_slack.slack_app.client.chat_postMessage.assert_not_called()
         mock_slack.slack_app.client.chat_update.assert_not_called()
         mock_store.assert_not_called()
+        mock_commit.assert_not_called()
 
     def test_posts_and_stores_under_the_per_leave_lock(self):
-        """The reference check, the post and the store all happen while the per-leave lock is held, so the decision job cannot interleave."""
+        """The reference check, the post, the store and its commit all happen while the per-leave lock is held, so the decision job cannot interleave or read an empty reference."""
         doc = _build_leave_doc()
         mock_slack = MagicMock()
         mock_slack.get_slack_user_id.return_value = TEST_SLACK_USER_ID
@@ -320,6 +326,7 @@ class TestSendLeaveNotificationToApplicant(IntegrationTestCase):
                 f"{LEAVE_OVERRIDE_MODULE}.store_applicant_message_ref",
                 side_effect=lambda *a, **k: order.append("store"),
             ),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.commit", side_effect=lambda: order.append("commit")),
         ):
             mock_slack.slack_app.client.chat_postMessage.side_effect = lambda **k: (
                 order.append("post")
@@ -331,7 +338,8 @@ class TestSendLeaveNotificationToApplicant(IntegrationTestCase):
             )
             send_leave_notification_to_applicant(doc)
         mock_lock.assert_called_once_with(doc.name)
-        self.assertEqual(order, ["lock", "ref", "post", "store", "unlock"])
+        # The reference is committed before the lock is released, or a waiting worker still reads it empty
+        self.assertEqual(order, ["lock", "ref", "post", "store", "commit", "unlock"])
 
     def test_skips_dm_and_logs_when_employee_has_no_slack_id(self):
         """When the employee has no Slack ID, no chat_postMessage is attempted and the failure is logged."""
@@ -629,6 +637,7 @@ class TestSendLeaveDecisionToApplicant(IntegrationTestCase):
             stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_single_value", return_value=mention_user))
             stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value="Approver Person"))
             mock_store = stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.store_applicant_message_ref"))
+            stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.commit"))
             mock_log = stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.generate_error_log"))
             yield mock_store, mock_log
 

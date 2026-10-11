@@ -7,6 +7,7 @@ from frappe.utils.synchronization import filelock
 from slack_sdk.errors import SlackApiError
 
 from frappe_slack_connector.db.employee import get_employees_on_holiday
+from frappe_slack_connector.db.leave_application import custom_fields_exist
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
 from frappe_slack_connector.helpers.str_utils import escape_slack_text
@@ -53,6 +54,33 @@ def _current_leave_state(leave_name: str):
 def _is_announced(state) -> bool:
     """Whether the committed row still belongs in the summary and the thread"""
     return bool(state) and state.status in ANNOUNCED_STATUSES and cint(state.docstatus) != 2
+
+
+def _covers(leave, day) -> bool:
+    """Whether the leave's dates include ``day`` (dates may be strings or dates)"""
+    return getdate(leave.from_date) <= day <= getdate(leave.to_date)
+
+
+def _load_leave(leave_name: str):
+    """
+    The committed row with everything the thread reply needs (status,
+    dates, employee, half-day fields, stored reply), or None when it is gone
+    """
+    fields = [
+        "name",
+        "status",
+        "docstatus",
+        "from_date",
+        "to_date",
+        "employee",
+        "employee_name",
+        "half_day",
+        "half_day_date",
+        *ATTENDANCE_REPLY_FIELDS,
+    ]
+    if custom_fields_exist():
+        fields.append("custom_first_halfsecond_half")
+    return frappe.db.get_value("Leave Application", leave_name, fields, as_dict=True, ignore=True)
 
 
 # Appended to a struck-through thread reply. One word for every path
@@ -213,31 +241,39 @@ def post_same_day_leave_to_attendance_thread(doc: Document, slack: SlackIntegrat
     ):
         return None
 
-    # from_date/to_date may be strings or dates depending on how the doc was built
-    if not (getdate(doc.from_date) <= today <= getdate(doc.to_date)):
-        return None
-
-    # Match the summary, which only lists active employees
-    if frappe.db.get_value("Employee", doc.employee, "status") != "Active":
-        return None
-
-    # Same rule as the summary: a leave spanning today is only "leave" when
-    # today is a working day on the employee's own holiday list
-    if doc.employee in get_employees_on_holiday([doc.employee], today):
+    # Cheap pre-check on the queued row; everything is checked again below
+    # from the committed row
+    if not _covers(doc, today):
         return None
 
     slack = slack or SlackIntegration()
-    name = _same_day_reply_name(slack, doc.employee, doc.employee_name, slack_settings.mention_user)
-    day_period = get_leave_type(doc, on_date=today)
 
     with _attendance_reply_lock(doc.name):
-        # ``doc`` is the row as it was inserted. Re-read it: the leave may
-        # have been rejected, cancelled or deleted before this job ran (the
-        # withdrawal hook found nothing stored then), and a stored reply
-        # means a duplicate job
-        state = _current_leave_state(doc.name)
-        if not _is_announced(state) or state.get(ATTENDANCE_REPLY_TS_FIELD):
+        # ``doc`` is the row as it was inserted and may be stale by now: the
+        # leave may have been rejected, cancelled or deleted (the withdrawal
+        # hook found nothing stored then), its dates or half day edited, and
+        # a stored reply means a duplicate job. Every gate and the text come
+        # from the committed row
+        current = _load_leave(doc.name)
+        if (
+            current is None
+            or not _is_announced(current)
+            or current.get(ATTENDANCE_REPLY_TS_FIELD)
+            or not _covers(current, today)
+        ):
             return None
+
+        # Match the summary, which only lists active employees
+        if frappe.db.get_value("Employee", current.employee, "status") != "Active":
+            return None
+
+        # Same rule as the summary: a leave spanning today is only "leave"
+        # when today is a working day on the employee's own holiday list
+        if current.employee in get_employees_on_holiday([current.employee], today):
+            return None
+
+        name = _same_day_reply_name(slack, current.employee, current.employee_name, slack_settings.mention_user)
+        day_period = get_leave_type(current, on_date=today)
 
         # The thread lives where the summary was posted. The summary job
         # stores that channel's ID (when it has the field for it); the
@@ -271,8 +307,8 @@ def post_same_day_leave_to_attendance_thread(doc: Document, slack: SlackIntegrat
                 leave_name=doc.name,
                 reply_ts=reply_ts,
                 channel=channel,
-                employee=doc.employee,
-                employee_name=doc.employee_name,
+                employee=current.employee,
+                employee_name=current.employee_name,
                 day_period=day_period,
             )
     return reply_ts
@@ -486,6 +522,10 @@ def withdraw_attendance_reply_bg(
         # values passed in are the fallback for a row that is gone (on_trash)
         state = _current_leave_state(leave_name)
         if state is not None:
+            # A later transition put the leave back in the summary (rejected,
+            # then reopened and approved): its reply stands
+            if _is_announced(state):
+                return
             reply_ts = state.get(ATTENDANCE_REPLY_TS_FIELD) or None
             channel = state.get(ATTENDANCE_REPLY_CHANNEL_FIELD) or None
         # A reply from an earlier day is history and is left alone

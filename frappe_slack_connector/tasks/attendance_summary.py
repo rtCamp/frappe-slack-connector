@@ -268,8 +268,17 @@ def update_attendance_summary() -> None:
 
         # chat.update needs a channel ID (a name gives channel_not_found), so
         # edit in the channel Slack reported when the summary was posted; the
-        # setting is only a fallback for a summary posted before that was stored
-        channel_id = slack_settings.get("last_attendance_channel_id") or slack.SLACK_CHANNEL_ID
+        # setting is only a fallback for a summary posted before that was
+        # stored, and may hold a name, so resolve it
+        channel_id = slack_settings.get("last_attendance_channel_id") or slack.resolve_channel_id(
+            slack.SLACK_CHANNEL_ID
+        )
+        if not channel_id:
+            generate_error_log(
+                title=_("Error updating attendance summary in Slack"),
+                message=_("The attendance channel could not be resolved to a channel ID."),
+            )
+            return
         message_ts = slack_settings.last_attendance_msg_ts
         blocks = build_attendance_blocks(get_attendance_title(slack_settings))
         content_hash = attendance_blocks_hash(blocks)

@@ -445,14 +445,15 @@ class TestUpdateAttendanceSummary(IntegrationTestCase):
         mock_slack.slack_app.client.chat_postMessage.assert_not_called()
 
     def test_falls_back_to_the_channel_setting_when_no_channel_was_stored(self):
-        """A summary posted before the channel ID was stored (upgrade day) is edited in the configured channel."""
+        """A summary posted before the channel ID was stored (upgrade day) is edited in the configured channel, resolved to an ID when the setting holds a name."""
         settings = _build_settings_mock(
             last_attendance_date="2026-06-15",
             last_attendance_msg_ts="1700000000.000777",
             last_attendance_channel_id=None,
         )
         mock_slack = MagicMock()
-        mock_slack.SLACK_CHANNEL_ID = TEST_SLACK_CHANNEL_ID
+        mock_slack.SLACK_CHANNEL_ID = "attendance"
+        mock_slack.resolve_channel_id.return_value = TEST_SLACK_CHANNEL_ID
         with (
             patch(f"{ATTENDANCE_MODULE}.frappe.get_single", return_value=settings),
             patch(f"{ATTENDANCE_MODULE}.SlackIntegration", return_value=mock_slack),
@@ -463,7 +464,28 @@ class TestUpdateAttendanceSummary(IntegrationTestCase):
             _patch_block_inputs([]),
         ):
             update_attendance_summary()
+        mock_slack.resolve_channel_id.assert_called_once_with("attendance")
         self.assertEqual(mock_slack.slack_app.client.chat_update.call_args.kwargs["channel"], TEST_SLACK_CHANNEL_ID)
+
+    def test_logs_and_skips_when_the_fallback_channel_cannot_be_resolved(self):
+        """Without a stored channel and with a setting Slack does not know, the edit is skipped with an Error Log instead of a channel_not_found from chat.update."""
+        settings = _build_settings_mock(
+            last_attendance_date="2026-06-15",
+            last_attendance_msg_ts="1700000000.000777",
+            last_attendance_channel_id=None,
+        )
+        mock_slack = MagicMock()
+        mock_slack.SLACK_CHANNEL_ID = "no-such-channel"
+        mock_slack.resolve_channel_id.return_value = None
+        with (
+            patch(f"{ATTENDANCE_MODULE}.frappe.get_single", return_value=settings),
+            patch(f"{ATTENDANCE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{ATTENDANCE_MODULE}.generate_error_log") as mock_log,
+            _patch_block_inputs([]),
+        ):
+            update_attendance_summary()
+        mock_slack.slack_app.client.chat_update.assert_not_called()
+        mock_log.assert_called_once()
 
     def test_uses_leave_notification_subject_as_title(self):
         """update_attendance_summary builds the blocks with Slack Settings.leave_notification_subject as the title, like the morning post."""

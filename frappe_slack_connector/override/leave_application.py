@@ -26,10 +26,6 @@ ATTENDANCE_REPLY_FIELDS = (ATTENDANCE_REPLY_TS_FIELD, ATTENDANCE_REPLY_CHANNEL_F
 # the summary)
 ANNOUNCED_STATUSES = ("Open", "Approved")
 
-# Slack errors that mean the reply is gone for good; anything else (rate
-# limit, timeout, outage) is transient and the reference is kept
-MISSING_MESSAGE_ERRORS = ("message_not_found", "channel_not_found")
-
 # The post job and the withdrawal job for one leave run under this lock,
 # so a withdrawal cannot slip between the post's checks and its store
 ATTENDANCE_REPLY_LOCK_PREFIX = "fsc_attendance_reply"
@@ -261,8 +257,14 @@ def post_same_day_leave_to_attendance_thread(doc: Document, slack: SlackIntegrat
             update_modified=False,
         )
 
-        # A withdrawal committed while Slack was posting found nothing stored
-        # and enqueued nothing, so take the reply back here
+        # Commit under the lock: the withdrawal job for this leave waits on
+        # the lock and must find the reference, and the job's own commit only
+        # comes after this function returns (a manual commit, so the lock
+        # really serialises check, post and store)
+        frappe.db.commit()  # nosemgrep
+
+        # A withdrawal that committed while Slack was posting enqueued a job
+        # that ran before this one stored anything, so take the reply back here
         if not _is_announced(_current_leave_state(doc.name)):
             _strike_reply(
                 slack,
@@ -343,16 +345,23 @@ def _reply_posted_today(reply_ts: str) -> bool:
     return getdate(posted_at) == getdate(frappe.utils.today())
 
 
-def get_attendance_reply_ref(leave_name: str) -> tuple[str | None, str | None]:
+def get_attendance_reply_ref(leave_name: str, *, for_update: bool = False) -> tuple[str | None, str | None]:
     """
     The stored (ts, channel ID) of the attendance thread reply for the leave,
     read from the database; (None, None) when nothing is stored or the row
-    is gone
+    is gone. ``for_update`` locks the row, so a save that started before the
+    post job wrote the reference waits for that write to commit and reads
+    it, instead of putting its stale empty value back
     """
     # ignore=True: nothing to restore while the custom fields are not yet
     # installed (a save between the code upgrade and the fixture sync)
     stored = frappe.db.get_value(
-        "Leave Application", leave_name, list(ATTENDANCE_REPLY_FIELDS), as_dict=True, ignore=True
+        "Leave Application",
+        leave_name,
+        list(ATTENDANCE_REPLY_FIELDS),
+        as_dict=True,
+        ignore=True,
+        **({"for_update": True} if for_update else {}),
     )
     if not stored:
         return None, None
@@ -376,7 +385,7 @@ def restore_attendance_reply_ts(doc: Document, method=None):
     if doc.is_new() or not doc.name:
         reply_ts, channel = None, None
     else:
-        reply_ts, channel = get_attendance_reply_ref(doc.name)
+        reply_ts, channel = get_attendance_reply_ref(doc.name, for_update=True)
 
     doc.set(ATTENDANCE_REPLY_TS_FIELD, reply_ts)
     doc.set(ATTENDANCE_REPLY_CHANNEL_FIELD, channel)
@@ -384,26 +393,22 @@ def restore_attendance_reply_ts(doc: Document, method=None):
 
 def _enqueue_attendance_reply_withdrawal(doc: Document):
     """
-    Enqueue marking the attendance thread reply stored on the leave as
-    withdrawn, if it was posted today. A reply from an earlier day is history
-    and is left alone. Never raises: a bad ts or a queue outage must not
-    block the user's action
+    Enqueue marking the attendance thread reply for the leave as withdrawn,
+    when the leave covers today. The job decides from the committed row:
+    the reply may not be posted yet when the withdrawal is saved (the post
+    job for the insert runs after its own commit), so the decision cannot
+    be taken here from what is stored now. Never raises: a bad date or a
+    queue outage must not block the user's action
     """
     try:
-        # Never trust the values on the doc (see restore_attendance_reply_ts).
-        # The before-save copy is what the database held before this write
-        # (a cancel with ignore_validate skips before_cancel, so the restore
-        # hook has not run and db_update may just have overwritten the
-        # column); without one (on_trash) read the row, and hand everything
-        # the job needs to it so it does not re-read a row that may be gone
-        before = doc.get_doc_before_save()
-        if before:
-            reply_ts = before.get(ATTENDANCE_REPLY_TS_FIELD) or None
-            channel = before.get(ATTENDANCE_REPLY_CHANNEL_FIELD) or None
-        else:
-            reply_ts, channel = get_attendance_reply_ref(doc.name)
-        if not reply_ts or not _reply_posted_today(reply_ts):
+        today = getdate(frappe.utils.today())
+        if not (getdate(doc.from_date) <= today <= getdate(doc.to_date)):
             return
+
+        # Never trust the values on the doc (see restore_attendance_reply_ts):
+        # read what is stored, as the fallback for a row that is gone by the
+        # time the job runs (on_trash)
+        reply_ts, channel = get_attendance_reply_ref(doc.name)
 
         # Only edit once the status change is committed: on_update runs
         # before on_submit, which can still throw and roll back
@@ -416,7 +421,7 @@ def _enqueue_attendance_reply_withdrawal(doc: Document):
             channel=channel,
             employee=doc.employee,
             employee_name=doc.employee_name,
-            day_period=get_leave_type(doc, on_date=getdate(frappe.utils.today())),
+            day_period=get_leave_type(doc, on_date=today),
         )
     except Exception as e:
         generate_error_log(
@@ -457,7 +462,7 @@ def on_trash_withdraw_attendance_reply(doc: Document, method=None):
 
 def withdraw_attendance_reply_bg(
     leave_name: str,
-    reply_ts: str,
+    reply_ts: str | None = None,
     *,
     employee: str,
     employee_name: str,
@@ -475,19 +480,35 @@ def withdraw_attendance_reply_bg(
     attendance channel setting is only a fallback for a reply stored before
     the ID was, and fails when that setting holds a channel name
     """
-    if not reply_ts:
-        return
-
-    # The bot must only ever edit its own thread replies, never the summary
-    # message the thread hangs off
-    if reply_ts == frappe.db.get_single_value("Slack Settings", "last_attendance_msg_ts"):
-        generate_error_log(
-            title="Refused to edit the attendance summary",
-            message=f"Leave Application {leave_name} stores the summary ts {reply_ts} as its reply ts",
-        )
-        return
-
     with _attendance_reply_lock(leave_name):
+        # The committed row wins (the post job may have stored the reply
+        # after the withdrawal was saved, and commits under this lock); the
+        # values passed in are the fallback for a row that is gone (on_trash)
+        state = _current_leave_state(leave_name)
+        if state is not None:
+            reply_ts = state.get(ATTENDANCE_REPLY_TS_FIELD) or None
+            channel = state.get(ATTENDANCE_REPLY_CHANNEL_FIELD) or None
+        # A reply from an earlier day is history and is left alone
+        try:
+            if not reply_ts or not _reply_posted_today(reply_ts):
+                return
+        except Exception as e:
+            generate_error_log(
+                title="Error marking attendance thread reply as withdrawn",
+                message=f"Leave Application {leave_name} stores an unreadable reply ts {reply_ts!r}",
+                exception=e,
+            )
+            return
+
+        # The bot must only ever edit its own thread replies, never the
+        # summary message the thread hangs off
+        if reply_ts == frappe.db.get_single_value("Slack Settings", "last_attendance_msg_ts"):
+            generate_error_log(
+                title="Refused to edit the attendance summary",
+                message=f"Leave Application {leave_name} stores the summary ts {reply_ts} as its reply ts",
+            )
+            return
+
         _strike_reply(
             None,
             leave_name=leave_name,
@@ -529,8 +550,12 @@ def _strike_reply(
             text=f"{escape_slack_text(employee_name)} is on leave today ({WITHDRAWN_LABEL})",
         )
     except SlackApiError as e:
-        # The reply may already be gone (deleted by hand): nothing to keep
-        cleared = e.response.get("error") in MISSING_MESSAGE_ERRORS
+        # The reply may already be gone (deleted by hand): nothing to keep.
+        # channel_not_found only proves that when the stored channel ID was
+        # used; the setting fallback may be a name, which chat.update rejects
+        # with the same error while the reply is still there
+        error = e.response.get("error")
+        cleared = error == "message_not_found" or (error == "channel_not_found" and bool(channel))
         generate_error_log(
             title="Error marking attendance thread reply as withdrawn",
             exception=e,

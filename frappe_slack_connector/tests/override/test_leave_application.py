@@ -42,6 +42,9 @@ def _slack_ts_at_noon_utc(day: str) -> str:
     return f"{moment.timestamp():.6f}"
 
 
+TODAY_TS = _slack_ts_at_noon_utc(TODAY)
+
+
 def _build_leave_doc(
     *,
     name="HR-LAP-0050",
@@ -163,7 +166,9 @@ def _leave_override_env(
                 state = {"status": "Open", "docstatus": 0}
             if state is None:
                 return None
-            return frappe._dict({ATTENDANCE_REPLY_TS_FIELD: None, ATTENDANCE_REPLY_CHANNEL_FIELD: None, **state})
+            return frappe._dict(
+                {ATTENDANCE_REPLY_TS_FIELD: stored_ts, ATTENDANCE_REPLY_CHANNEL_FIELD: stored_channel, **state}
+            )
         return real_get_value(doctype, filters, fieldname, *args, **kwargs)
 
     def fake_get_single_value(doctype, fieldname, *args, **kwargs):
@@ -179,6 +184,7 @@ def _leave_override_env(
         patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", side_effect=fake_get_value) as mock_get_value,
         patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_single_value", side_effect=fake_get_single_value),
         patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.set_value") as mock_set_value,
+        patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.commit") as mock_commit,
         patch(f"{LEAVE_OVERRIDE_MODULE}.generate_error_log") as mock_error_log,
         patch(
             f"{LEAVE_OVERRIDE_MODULE}.get_employees_on_holiday",
@@ -188,6 +194,7 @@ def _leave_override_env(
         yield SimpleNamespace(
             get_value=mock_get_value,
             set_value=mock_set_value,
+            commit=mock_commit,
             error_log=mock_error_log,
             on_holiday=mock_on_holiday,
         )
@@ -640,27 +647,30 @@ class TestOnUpdateWithdrawAttendanceReply(IntegrationTestCase):
             on_update_withdraw_attendance_reply(doc, method="on_update")
         mock_enqueue.assert_not_called()
 
-    def test_uses_the_before_save_copy_of_the_reference_when_there_is_one(self):
-        """On a save, the reference comes from the document's before-save copy (what the database held before this write), not from the current doc and without a second read: a force cancel that skipped the restore hook could otherwise have overwritten the column."""
+    def test_prefers_the_committed_row_over_the_values_passed_in(self):
+        """The job reads the committed row under the lock: a withdrawal saved before the post job stored the reply enqueued nothing to pass along, but the row carries the reference by the time the job runs, and that is what gets struck through."""
         reply_ts = _slack_ts_at_noon_utc(TODAY)
-        doc = _build_leave_doc(status="Approved", status_changed=False, attendance_reply_ts=None)
-        doc.docstatus = 2
-        doc.has_value_changed.side_effect = lambda fieldname: fieldname == "docstatus"
-        doc.get_doc_before_save.return_value = frappe._dict(
-            {ATTENDANCE_REPLY_TS_FIELD: reply_ts, ATTENDANCE_REPLY_CHANNEL_FIELD: "C0BEFORE"}
-        )
+        doc = _build_leave_doc(status="Cancelled", status_changed=True)
         mock_slack = _build_slack_mock()
         with (
             patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
-            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue", side_effect=_run_enqueued_inline),
-            _leave_override_env(stored_ts=None) as mocks,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue", side_effect=_run_enqueued_inline) as mock_enqueue,
+            _leave_override_env(
+                stored_ts=None,
+                db_states=[
+                    {
+                        "status": "Cancelled",
+                        "docstatus": 2,
+                        ATTENDANCE_REPLY_TS_FIELD: reply_ts,
+                        ATTENDANCE_REPLY_CHANNEL_FIELD: "C0LATER",
+                    }
+                ],
+            ) as mocks,
         ):
             on_update_withdraw_attendance_reply(doc, method="on_cancel")
-        _assert_struck_through(mock_slack, reply_ts, channel="C0BEFORE")
-        self.assertNotIn(
-            ("Leave Application", doc.name, list(ATTENDANCE_REPLY_FIELDS)),
-            [c.args for c in mocks.get_value.call_args_list],
-        )
+        self.assertIsNone(mock_enqueue.call_args.kwargs["reply_ts"])
+        _assert_struck_through(mock_slack, reply_ts, channel="C0LATER")
+        mocks.error_log.assert_not_called()
 
     def test_submitted_leave_saved_without_a_change_does_not_strike_the_reply(self):
         """A submitted, Approved leave (docstatus 1) whose status did not change enqueues nothing."""
@@ -692,14 +702,18 @@ class TestOnUpdateWithdrawAttendanceReply(IntegrationTestCase):
         mocks.error_log.assert_not_called()
 
     def test_ignores_ts_on_doc_when_database_has_none(self):
-        """A ts present only on the doc (never stored by the bot) enqueues nothing."""
+        """A ts present only on the doc (never stored by the bot) is ignored: the job reads the row, finds nothing and edits nothing."""
         doc = _build_leave_doc(status="Rejected", status_changed=True, attendance_reply_ts=_slack_ts_at_noon_utc(TODAY))
+        mock_slack = _build_slack_mock()
         with (
-            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue", side_effect=_run_enqueued_inline) as mock_enqueue,
             _leave_override_env(stored_ts=None) as mocks,
         ):
             on_update_withdraw_attendance_reply(doc, method="on_update")
-        mock_enqueue.assert_not_called()
+        self.assertIsNone(mock_enqueue.call_args.kwargs["reply_ts"])
+        mock_slack.slack_app.client.chat_update.assert_not_called()
+        mocks.set_value.assert_not_called()
         mocks.error_log.assert_not_called()
 
     def test_cancellation_same_day_deletes_reply(self):
@@ -716,17 +730,17 @@ class TestOnUpdateWithdrawAttendanceReply(IntegrationTestCase):
         mocks.error_log.assert_not_called()
 
     def test_rejection_on_a_later_day_does_not_delete_old_reply(self):
-        """Rejecting a leave the day after its thread reply was posted leaves the old reply alone and enqueues nothing."""
+        """Rejecting a leave the day after its thread reply was posted leaves the old reply alone: the job finds a ts from another day and edits nothing."""
         doc = _build_leave_doc(status="Rejected", status_changed=True)
         mock_slack = _build_slack_mock()
         with (
             patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
-            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue", side_effect=_run_enqueued_inline) as mock_enqueue,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue", side_effect=_run_enqueued_inline),
             _leave_override_env(stored_ts=_slack_ts_at_noon_utc("2026-06-09")) as mocks,
         ):
             on_update_withdraw_attendance_reply(doc, method="on_update")
-        mock_enqueue.assert_not_called()
         mock_slack.slack_app.client.chat_update.assert_not_called()
+        mocks.set_value.assert_not_called()
         mocks.error_log.assert_not_called()
 
     def test_does_nothing_when_status_unchanged(self):
@@ -750,11 +764,25 @@ class TestOnUpdateWithdrawAttendanceReply(IntegrationTestCase):
         mock_enqueue.assert_not_called()
 
     def test_does_nothing_without_stored_ts(self):
-        """A rejected leave that never had a thread reply (no stored ts) enqueues nothing."""
+        """A rejected leave that never had a thread reply (nothing stored when the job runs) edits nothing."""
         doc = _build_leave_doc(status="Rejected", status_changed=True)
+        mock_slack = _build_slack_mock()
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue", side_effect=_run_enqueued_inline),
+            _leave_override_env(stored_ts=None) as mocks,
+        ):
+            on_update_withdraw_attendance_reply(doc, method="on_update")
+        mock_slack.slack_app.client.chat_update.assert_not_called()
+        mocks.set_value.assert_not_called()
+        mocks.error_log.assert_not_called()
+
+    def test_does_not_enqueue_when_the_leave_does_not_cover_today(self):
+        """A withdrawn leave that does not cover today never had a same-day reply: nothing is enqueued."""
+        doc = _build_leave_doc(status="Rejected", status_changed=True, from_date="2026-06-11", to_date="2026-06-12")
         with (
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue,
-            _leave_override_env(stored_ts=None),
+            _leave_override_env(stored_ts=_slack_ts_at_noon_utc(TODAY)),
         ):
             on_update_withdraw_attendance_reply(doc, method="on_update")
         mock_enqueue.assert_not_called()
@@ -787,15 +815,18 @@ class TestOnUpdateWithdrawAttendanceReply(IntegrationTestCase):
         mocks.error_log.assert_not_called()
 
     def test_logs_and_does_not_raise_on_malformed_ts(self):
-        """A stored ts that is not a number is logged and never blocks the reject/cancel; nothing is enqueued."""
+        """A stored ts that is not a number is logged by the job and never blocks the reject/cancel; nothing is edited."""
         doc = _build_leave_doc(status="Rejected", status_changed=True)
+        mock_slack = _build_slack_mock()
         with (
-            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue", side_effect=_run_enqueued_inline),
             _leave_override_env(stored_ts="not-a-ts") as mocks,
         ):
             on_update_withdraw_attendance_reply(doc, method="on_update")
         mocks.error_log.assert_called_once()
-        mock_enqueue.assert_not_called()
+        mock_slack.slack_app.client.chat_update.assert_not_called()
+        mocks.set_value.assert_not_called()
 
     def test_logs_and_does_not_raise_when_enqueue_fails(self):
         """A queue outage while scheduling the removal is logged and does not block the reject/cancel."""
@@ -826,14 +857,17 @@ class TestOnTrashWithdrawAttendanceReply(IntegrationTestCase):
         mocks.error_log.assert_not_called()
 
     def test_deleting_leave_on_a_later_day_keeps_old_reply(self):
-        """Deleting a leave the day after its reply was posted leaves the old reply alone."""
+        """Deleting a leave the day after its reply was posted leaves the old reply alone (the row is gone when the job runs, so it falls back to the values read before the delete)."""
         doc = _build_leave_doc(status="Open")
+        mock_slack = _build_slack_mock()
         with (
-            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue,
-            _leave_override_env(stored_ts=_slack_ts_at_noon_utc("2026-06-09")) as mocks,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue", side_effect=_run_enqueued_inline),
+            _leave_override_env(stored_ts=_slack_ts_at_noon_utc("2026-06-09"), db_states=[None]) as mocks,
         ):
             on_trash_withdraw_attendance_reply(doc, method="on_trash")
-        mock_enqueue.assert_not_called()
+        mock_slack.slack_app.client.chat_update.assert_not_called()
+        mocks.set_value.assert_not_called()
         mocks.error_log.assert_not_called()
 
 
@@ -864,7 +898,7 @@ class TestRestoreAttendanceReplyTs(IntegrationTestCase):
         ):
             restore_attendance_reply_ts(doc, method="before_validate")
         mock_get_value.assert_called_once_with(
-            "Leave Application", doc.name, list(ATTENDANCE_REPLY_FIELDS), as_dict=True, ignore=True
+            "Leave Application", doc.name, list(ATTENDANCE_REPLY_FIELDS), as_dict=True, ignore=True, for_update=True
         )
         self.assertEqual(doc.get(ATTENDANCE_REPLY_TS_FIELD), REPLY_TS)
         self.assertEqual(doc.get(ATTENDANCE_REPLY_CHANNEL_FIELD), REPLY_CHANNEL)
@@ -878,7 +912,7 @@ class TestRestoreAttendanceReplyTs(IntegrationTestCase):
         ):
             restore_attendance_reply_ts(doc, method="before_validate")
         mock_get_value.assert_called_once_with(
-            "Leave Application", doc.name, list(ATTENDANCE_REPLY_FIELDS), as_dict=True, ignore=True
+            "Leave Application", doc.name, list(ATTENDANCE_REPLY_FIELDS), as_dict=True, ignore=True, for_update=True
         )
         self.assertEqual(doc.get(ATTENDANCE_REPLY_TS_FIELD), REPLY_TS)
         self.assertEqual(doc.get(ATTENDANCE_REPLY_CHANNEL_FIELD), REPLY_CHANNEL)
@@ -952,6 +986,22 @@ class TestLeaveApplicationHooks(IntegrationTestCase):
 
 
 class TestWithdrawAttendanceReplyBg(IntegrationTestCase):
+    def test_clears_the_reference_only_for_a_terminal_channel_error_with_a_stored_channel(self):
+        """channel_not_found is terminal when the stored channel ID was used, but not when the job fell back to the setting (which may be a name Slack rejects while the reply still exists)."""
+        for channel, cleared in ((REPLY_CHANNEL, True), (None, False)):
+            with self.subTest(channel=channel):
+                mock_slack = _build_slack_mock()
+                mock_slack.slack_app.client.chat_update.side_effect = SlackApiError(
+                    "channel_not_found", {"ok": False, "error": "channel_not_found"}
+                )
+                with (
+                    patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+                    _leave_override_env(stored_ts=TODAY_TS, stored_channel=channel) as mocks,
+                ):
+                    withdraw_attendance_reply_bg(leave_name="HR-LAP-0050", reply_ts=TODAY_TS, **WITHDRAW_JOB_KWARGS)
+                mocks.error_log.assert_called_once()
+                self.assertEqual(mocks.set_value.called, cleared)
+
     def test_logs_and_clears_ts_when_the_reply_is_gone(self):
         """When Slack says the reply no longer exists (deleted by hand) the failure is logged, nothing raises, and the stored reference is cleared: there is nothing left to withdraw."""
         mock_slack = _build_slack_mock()
@@ -960,9 +1010,9 @@ class TestWithdrawAttendanceReplyBg(IntegrationTestCase):
         )
         with (
             patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
-            _leave_override_env() as mocks,
+            _leave_override_env(stored_ts=TODAY_TS) as mocks,
         ):
-            withdraw_attendance_reply_bg(leave_name="HR-LAP-0050", reply_ts=REPLY_TS, **WITHDRAW_JOB_KWARGS)
+            withdraw_attendance_reply_bg(leave_name="HR-LAP-0050", reply_ts=TODAY_TS, **WITHDRAW_JOB_KWARGS)
         mocks.error_log.assert_called_once()
         mocks.set_value.assert_called_once_with(
             "Leave Application",
@@ -979,30 +1029,31 @@ class TestWithdrawAttendanceReplyBg(IntegrationTestCase):
                 mock_slack.slack_app.client.chat_update.side_effect = failure
                 with (
                     patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
-                    _leave_override_env() as mocks,
+                    _leave_override_env(stored_ts=TODAY_TS) as mocks,
                 ):
-                    withdraw_attendance_reply_bg(leave_name="HR-LAP-0050", reply_ts=REPLY_TS, **WITHDRAW_JOB_KWARGS)
+                    withdraw_attendance_reply_bg(leave_name="HR-LAP-0050", reply_ts=TODAY_TS, **WITHDRAW_JOB_KWARGS)
                 mocks.error_log.assert_called_once()
                 mocks.set_value.assert_not_called()
 
     def test_refuses_to_delete_the_summary_message(self):
         """A reply ts equal to the stored summary ts is never edited: the failure is logged and the field is left for inspection."""
         mock_slack = _build_slack_mock()
+        settings = _build_slack_settings_mock(last_attendance_msg_ts=TODAY_TS)
         with (
             patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
-            _leave_override_env() as mocks,
+            _leave_override_env(settings=settings, stored_ts=TODAY_TS) as mocks,
         ):
-            withdraw_attendance_reply_bg(leave_name="HR-LAP-0050", reply_ts=SUMMARY_TS, **WITHDRAW_JOB_KWARGS)
+            withdraw_attendance_reply_bg(leave_name="HR-LAP-0050", reply_ts=TODAY_TS, **WITHDRAW_JOB_KWARGS)
         mock_slack.slack_app.client.chat_update.assert_not_called()
         mocks.error_log.assert_called_once()
         mocks.set_value.assert_not_called()
 
     def test_does_nothing_without_ts(self):
-        """The background job is a no-op when called without a ts."""
+        """The background job is a no-op when neither the row nor the call carries a ts."""
         mock_slack = _build_slack_mock()
         with (
             patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
-            _leave_override_env() as mocks,
+            _leave_override_env(stored_ts=None) as mocks,
         ):
             withdraw_attendance_reply_bg(leave_name="HR-LAP-0050", reply_ts=None, **WITHDRAW_JOB_KWARGS)
         mock_slack.slack_app.client.chat_update.assert_not_called()
@@ -1014,10 +1065,10 @@ class TestWithdrawAttendanceReplyBg(IntegrationTestCase):
         mock_slack.SLACK_CHANNEL_ID = "attendance"
         with (
             patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
-            _leave_override_env() as mocks,
+            _leave_override_env(stored_ts=TODAY_TS) as mocks,
         ):
-            withdraw_attendance_reply_bg(leave_name="HR-LAP-0050", reply_ts=REPLY_TS, **WITHDRAW_JOB_KWARGS)
-        _assert_struck_through(mock_slack, REPLY_TS, channel=REPLY_CHANNEL)
+            withdraw_attendance_reply_bg(leave_name="HR-LAP-0050", reply_ts=TODAY_TS, **WITHDRAW_JOB_KWARGS)
+        _assert_struck_through(mock_slack, TODAY_TS, channel=REPLY_CHANNEL)
         mocks.error_log.assert_not_called()
 
     def test_falls_back_to_the_configured_channel_without_a_stored_one(self):
@@ -1025,12 +1076,12 @@ class TestWithdrawAttendanceReplyBg(IntegrationTestCase):
         mock_slack = _build_slack_mock()
         with (
             patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
-            _leave_override_env() as mocks,
+            _leave_override_env(stored_ts=TODAY_TS, stored_channel=None) as mocks,
         ):
             withdraw_attendance_reply_bg(
-                leave_name="HR-LAP-0050", reply_ts=REPLY_TS, **{**WITHDRAW_JOB_KWARGS, "channel": None}
+                leave_name="HR-LAP-0050", reply_ts=TODAY_TS, **{**WITHDRAW_JOB_KWARGS, "channel": None}
             )
-        _assert_struck_through(mock_slack, REPLY_TS, channel=TEST_SLACK_CHANNEL_ID)
+        _assert_struck_through(mock_slack, TODAY_TS, channel=TEST_SLACK_CHANNEL_ID)
         mocks.error_log.assert_not_called()
 
     def test_uses_plain_name_when_mentions_are_off(self):
@@ -1039,17 +1090,17 @@ class TestWithdrawAttendanceReplyBg(IntegrationTestCase):
         settings = _build_slack_settings_mock(mention_user=0)
         with (
             patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
-            _leave_override_env(settings=settings),
+            _leave_override_env(settings=settings, stored_ts=TODAY_TS),
         ):
             withdraw_attendance_reply_bg(
                 leave_name="HR-LAP-0050",
-                reply_ts=REPLY_TS,
+                reply_ts=TODAY_TS,
                 channel=REPLY_CHANNEL,
                 employee="EMP-001",
                 employee_name="Alice <A&B>",
                 day_period="Second-Half",
             )
-        _assert_struck_through(mock_slack, REPLY_TS, name="Alice &lt;A&amp;B&gt;", day_period="Second-Half")
+        _assert_struck_through(mock_slack, TODAY_TS, name="Alice &lt;A&amp;B&gt;", day_period="Second-Half")
         self.assertEqual(
             mock_slack.slack_app.client.chat_update.call_args.kwargs["text"],
             "Alice &lt;A&amp;B&gt; is on leave today (Cancelled)",

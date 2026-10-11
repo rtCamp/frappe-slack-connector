@@ -175,6 +175,8 @@ def send_leave_notification_bg(doc: Document):
 
             slack.slack_app.client.chat_postMessage(
                 channel=approver_slack,
+                # Plain fallback for notification previews; the blocks carry the details
+                text=f"New leave application from {doc.employee_name}",
                 blocks=format_leave_application_blocks(
                     leave_id=doc.name,
                     leave_link=get_url_to_form("Leave Application", doc.name),
@@ -199,12 +201,17 @@ def send_leave_notification_bg(doc: Document):
 
 def get_leave_balance(doc: Document) -> float | None:
     """
-    Balance before this request. HRMS only stores `leave_balance` on the
-    application when it is filed from a form, so compute it the same way
-    for applications created on the server (e.g. from Slack)
+    Balance before this request, computed with the same HRMS call the Desk
+    form uses
+
+    The ``leave_balance`` stored on the application cannot be trusted as a
+    signal: the form fills it, but an application created on the server
+    (the Slack modal) has none, and the column is NOT NULL so any reload
+    before this job runs (a Notification on save does one) reads it back
+    as 0, which would show a zero balance and a false warning. So the
+    balance is always computed here; the stored value is only the fallback
+    when the lookup fails, and None means nothing to show
     """
-    if doc.leave_balance is not None:
-        return flt(doc.leave_balance)
     try:
         return flt(
             get_leave_balance_on(
@@ -220,7 +227,7 @@ def get_leave_balance(doc: Document) -> float | None:
             title="Error fetching leave balance",
             exception=e,
         )
-        return None
+        return flt(doc.leave_balance) if doc.leave_balance else None
 
 
 def format_leave_duration(doc: Document) -> str:

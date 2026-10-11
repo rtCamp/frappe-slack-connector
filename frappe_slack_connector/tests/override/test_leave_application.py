@@ -265,15 +265,15 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
 
     def test_approver_dm_shows_requested_days_and_balance_before_request(self):
         """The approver DM shows the requested days and the balance before the request for a leave type with an allocation."""
-        doc = _build_leave_doc(from_date="2026-06-15", to_date="2026-06-17", total_leave_days=3.0, leave_balance=10.0)
-        text = _blocks_text(_get_approver_blocks(doc))
+        doc = _build_leave_doc(from_date="2026-06-15", to_date="2026-06-17", total_leave_days=3.0)
+        text = _blocks_text(_get_approver_blocks(doc, balance_on=10.0))
         self.assertIn("*Requested:*\n3 day(s)", text)
         self.assertIn("*Balance before this request:*\n10 day(s)", text)
 
     def test_approver_dm_warns_when_requested_days_exceed_balance(self):
-        """When total_leave_days exceeds leave_balance the approver DM carries the insufficient-balance warning with the shortfall and resulting balance."""
-        doc = _build_leave_doc(from_date="2026-06-15", to_date="2026-06-17", total_leave_days=3.0, leave_balance=1.0)
-        text = _blocks_text(_get_approver_blocks(doc))
+        """When total_leave_days exceeds the balance HRMS reports, the approver DM carries the insufficient-balance warning with the shortfall and resulting balance."""
+        doc = _build_leave_doc(from_date="2026-06-15", to_date="2026-06-17", total_leave_days=3.0)
+        text = _blocks_text(_get_approver_blocks(doc, balance_on=1.0))
         self.assertIn(
             ":warning: *Insufficient balance:* this request exceeds the available balance by 2 day(s). "
             "Approving it will take the balance to -2.",
@@ -281,9 +281,9 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         )
 
     def test_approver_dm_has_no_warning_when_balance_is_sufficient(self):
-        """No insufficient-balance warning is added when leave_balance covers total_leave_days (including when they are equal)."""
-        doc = _build_leave_doc(from_date="2026-06-15", to_date="2026-06-17", total_leave_days=3.0, leave_balance=3.0)
-        text = _blocks_text(_get_approver_blocks(doc))
+        """No insufficient-balance warning is added when the balance covers total_leave_days (including when they are equal)."""
+        doc = _build_leave_doc(from_date="2026-06-15", to_date="2026-06-17", total_leave_days=3.0)
+        text = _blocks_text(_get_approver_blocks(doc, balance_on=3.0))
         self.assertNotIn("Insufficient balance", text)
         self.assertIn("*Balance before this request:*\n3 day(s)", text)
 
@@ -355,11 +355,19 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         text = _blocks_text(_get_approver_blocks(doc, custom_fields=False))
         self.assertIn("*Duration:*\n:hourglass_flowing_sand: Half day on Jun 16, 2026 (Tue)\n", text)
 
-    def test_approver_dm_shows_zero_balance_and_warning_for_non_lwp_leave(self):
-        """A non-LWP leave with leave_balance=0.0 shows the stored balance (0 day(s)) and the warning; zero is not treated as missing and does not trigger the HRMS lookup."""
+    def test_approver_dm_computes_balance_even_when_doc_carries_zero(self):
+        """leave_balance is a NOT NULL column, so a server-created leave reads back as 0.0 after any reload before the job runs (a Notification on save reloads the doc): the balance must still come from HRMS, not show 0 with a false warning."""
         doc = _build_leave_doc(from_date="2026-06-15", to_date="2026-06-16", total_leave_days=2.0, leave_balance=0.0)
-        mocks = _run_leave_notification_bg(doc, balance_on=99.0)
-        mocks["get_leave_balance_on"].assert_not_called()
+        mocks = _run_leave_notification_bg(doc, balance_on=12.0)
+        mocks["get_leave_balance_on"].assert_called_once()
+        text = _blocks_text(_approver_call(mocks["slack"]).kwargs["blocks"])
+        self.assertIn("*Balance before this request:*\n12 day(s)", text)
+        self.assertNotIn("Insufficient balance", text)
+
+    def test_approver_dm_shows_a_real_zero_balance_with_the_warning(self):
+        """When HRMS really reports 0, the DM shows 0 day(s) and the insufficient-balance warning."""
+        doc = _build_leave_doc(from_date="2026-06-15", to_date="2026-06-16", total_leave_days=2.0, leave_balance=0.0)
+        mocks = _run_leave_notification_bg(doc, balance_on=0.0)
         text = _blocks_text(_approver_call(mocks["slack"]).kwargs["blocks"])
         self.assertIn("*Balance before this request:*\n0 day(s)", text)
         self.assertIn("exceeds the available balance by 2 day(s). Approving it will take the balance to -2.", text)
@@ -380,8 +388,16 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         self.assertNotIn("Insufficient balance", text)
         mocks["generate_error_log"].assert_not_called()
 
+    def test_approver_dm_falls_back_to_the_stored_balance_when_the_lookup_fails(self):
+        """When get_leave_balance_on raises but the form stored a balance, that value is shown (and the failure logged)."""
+        doc = _build_leave_doc(from_date="2026-06-15", to_date="2026-06-17", total_leave_days=3.0, leave_balance=10.0)
+        mocks = _run_leave_notification_bg(doc, balance_on=PermissionError("no leave access"))
+        mocks["generate_error_log"].assert_called_once()
+        text = _blocks_text(_approver_call(mocks["slack"]).kwargs["blocks"])
+        self.assertIn("*Balance before this request:*\n10 day(s)", text)
+
     def test_approver_dm_omits_balance_and_logs_when_balance_lookup_fails(self):
-        """When get_leave_balance_on raises, the error is logged, the balance block and warning are omitted, and the approver DM is still posted."""
+        """When get_leave_balance_on raises and nothing usable is stored, the error is logged, the balance block and warning are omitted, and the approver DM is still posted."""
         doc = _build_leave_doc(from_date="2026-06-15", to_date="2026-06-17", total_leave_days=3.0, leave_balance=None)
         mocks = _run_leave_notification_bg(doc, balance_on=PermissionError("no leave access"))
         mocks["generate_error_log"].assert_called_once()
@@ -392,12 +408,20 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         self.assertNotIn("Insufficient balance", text)
         self.assertIn("*Requested:*\n3 day(s)", text)
 
-    def test_approver_dm_does_not_compute_balance_for_lwp_or_when_stored(self):
-        """get_leave_balance_on is not called when the doc already carries leave_balance, nor for a Leave Without Pay type."""
-        stored = _run_leave_notification_bg(_build_leave_doc(leave_balance=10.0))
-        stored["get_leave_balance_on"].assert_not_called()
+    def test_approver_dm_always_computes_balance_except_for_lwp(self):
+        """get_leave_balance_on is called even when the doc carries leave_balance (the stored value can be stale or a NOT NULL 0), and never for a Leave Without Pay type."""
+        stored = _run_leave_notification_bg(_build_leave_doc(leave_balance=10.0), balance_on=9.0)
+        stored["get_leave_balance_on"].assert_called_once()
+        self.assertIn(
+            "*Balance before this request:*\n9 day(s)", _blocks_text(_approver_call(stored["slack"]).kwargs["blocks"])
+        )
         lwp = _run_leave_notification_bg(_build_leave_doc(leave_type="Leave Without Pay", leave_balance=None), is_lwp=1)
         lwp["get_leave_balance_on"].assert_not_called()
+
+    def test_approver_dm_carries_a_text_fallback(self):
+        """The approver DM has a plain text= fallback for notification previews, naming the employee."""
+        mocks = _run_leave_notification_bg(_build_leave_doc(employee_name="Alice"), balance_on=10.0)
+        self.assertEqual(_approver_call(mocks["slack"]).kwargs["text"], "New leave application from Alice")
 
     def test_attendance_thread_keeps_today_period_for_multi_day_half_day_leave_starting_today(self):
         """For a multi-day leave starting today with the half day today, the attendance thread says _(First Half)_ while the approver DM carries the full duration text."""

@@ -19,6 +19,10 @@ def get_employees_on_leave() -> list:
     approved while the employee is still active and the employee may then
     leave the organisation before the leave date, so the Employee status is
     checked at query time rather than trusting the Leave Application alone.
+
+    Cancelled documents are excluded by ``docstatus`` as well as by status:
+    a cancel that skips the HRMS controller (``flags.ignore_validate``)
+    leaves ``status`` at Approved while ``docstatus`` becomes 2.
     """
     current_date = today()
 
@@ -45,9 +49,12 @@ def get_employees_on_leave() -> list:
                 "in",
                 ["Open", "Approved"],
             ),
+            "docstatus": ("!=", 2),
         },
         fields=fields,
-        order_by="to_date asc",
+        # Deterministic order: the summary content is fingerprinted to skip
+        # no-op edits, so ties must not reorder between two builds
+        order_by="to_date asc, name asc",
     )
 
     if not leave_applications:

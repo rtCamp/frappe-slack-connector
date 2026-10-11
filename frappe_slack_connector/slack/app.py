@@ -1,9 +1,14 @@
+import re
+
 import frappe
 from frappe import _
 from slack_bolt import App
 
 from frappe_slack_connector.db.user_meta import get_user_meta
 from frappe_slack_connector.helpers.error import generate_error_log
+
+# Shape of a Slack conversation ID (public C…, private G…, DM D…)
+CHANNEL_ID_PATTERN = re.compile(r"^[CGD][A-Z0-9]{6,}$")
 
 ####################################################################
 #                                                                  #
@@ -195,6 +200,23 @@ class SlackIntegration:
         """
         slack_user = self.get_slack_user(*args, **kwargs)
         return slack_user.get("id") if slack_user else None
+
+    def resolve_channel_id(self, channel: str | None) -> str | None:
+        """
+        The channel ID for a setting that may hold a channel name.
+        chat.postMessage accepts either, but chat.update and chat.delete need
+        the ID. An ID is returned as is; a name (with or without "#") is
+        looked up among the workspace's channels; None when empty or unknown
+        """
+        if not channel:
+            return None
+        if CHANNEL_ID_PATTERN.match(channel):
+            return channel
+        name = channel.lstrip("#").lower()
+        for found in self.get_slack_channels():
+            if found["name"].lower() == name:
+                return found["id"]
+        return None
 
     def get_slack_channels(self, limit: int = 200) -> list[dict]:
         """

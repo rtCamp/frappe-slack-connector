@@ -539,7 +539,7 @@ class TestRestoreApplicantMessageRef(IntegrationTestCase):
             ) as mock_ref,
         ):
             restore_applicant_message_ref(doc, method="before_validate")
-        mock_ref.assert_called_once_with("HR-LAP-RESTORE")
+        mock_ref.assert_called_once_with("HR-LAP-RESTORE", for_update=True)
         self.assertEqual(doc.get(APPLICANT_CHANNEL_FIELD), "D0FSC0001")
         self.assertEqual(doc.get(APPLICANT_MSG_TS_FIELD), "1700000000.000001")
 

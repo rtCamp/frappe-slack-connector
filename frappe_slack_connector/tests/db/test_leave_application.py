@@ -261,3 +261,14 @@ class TestLeaveStatus(IntegrationTestCase):
         )
         with patch(f"{LEAVE_DB_MODULE}.frappe.db.get_value", return_value=None):
             self.assertIsNone(get_leave_status("HR-LAP-0001"))
+
+    def test_locks_the_row_when_asked_to(self):
+        """for_update=True reads the reference with a row lock, so a save holding it cannot be overtaken by the job's write; the default read takes no lock."""
+        with (
+            patch(f"{LEAVE_DB_MODULE}.applicant_message_fields_exist", return_value=True),
+            patch(f"{LEAVE_DB_MODULE}.frappe.db.get_value", return_value=None) as mock_get_value,
+        ):
+            get_applicant_message_ref("HR-LAP-0001", for_update=True)
+            self.assertTrue(mock_get_value.call_args.kwargs.get("for_update"))
+            get_applicant_message_ref("HR-LAP-0001")
+            self.assertNotIn("for_update", mock_get_value.call_args.kwargs)

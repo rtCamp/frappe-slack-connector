@@ -26,11 +26,14 @@ def applicant_message_fields_exist() -> bool:
     return meta.has_field(APPLICANT_CHANNEL_FIELD) and meta.has_field(APPLICANT_MSG_TS_FIELD)
 
 
-def get_applicant_message_ref(leave_id: str) -> tuple[str | None, str | None]:
+def get_applicant_message_ref(leave_id: str, *, for_update: bool = False) -> tuple[str | None, str | None]:
     """
     Return the (channel, ts) of the applicant's Slack DM for the given leave,
     or (None, None) when nothing is stored, the leave has no name yet, or
-    the row does not exist
+    the row does not exist. ``for_update`` locks the row for the rest of the
+    transaction, so a save that read the reference waits for a background
+    job's write to commit first (and reads it) instead of putting its stale
+    value back, and a job that writes waits for the save to commit
     """
     if not leave_id or not applicant_message_fields_exist():
         return None, None
@@ -39,6 +42,7 @@ def get_applicant_message_ref(leave_id: str) -> tuple[str | None, str | None]:
         leave_id,
         [APPLICANT_CHANNEL_FIELD, APPLICANT_MSG_TS_FIELD],
         as_dict=True,
+        **({"for_update": True} if for_update else {}),
     )
     # get_value returns None (or an empty result) when the row is missing
     if not row or not isinstance(row, dict):

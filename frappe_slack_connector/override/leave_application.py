@@ -159,7 +159,11 @@ def restore_applicant_message_ref(doc: Document, method: str | None = None):
     if previous is not None:
         channel, ts = previous.get(APPLICANT_CHANNEL_FIELD), previous.get(APPLICANT_MSG_TS_FIELD)
     else:
-        channel, ts = get_applicant_message_ref(doc.name)
+        # Lock the row until this save commits: a job that stored the
+        # reference just before waits for the save and its write is read here
+        # rather than overwritten by db_update, and a job that wants to store
+        # one waits for the save
+        channel, ts = get_applicant_message_ref(doc.name, for_update=True)
     doc.set(APPLICANT_CHANNEL_FIELD, channel or None)
     doc.set(APPLICANT_MSG_TS_FIELD, ts or None)
 

@@ -32,7 +32,15 @@
   "send_daily_allocation_updates",
   "send_weekly_allocation_updates",
   "workload_mention_users",
-  "workload_channel_id"
+  "workload_channel_id",
+  "celebrations_section",
+  "send_celebration_updates",
+  "celebrations_channel_id",
+  "celebrations_time",
+  "column_break_cele",
+  "birthday_message_template",
+  "anniversary_message_template",
+  "last_celebrations_date"
  ],
  "fields": [
   {
@@ -139,7 +147,7 @@
   },
   {
    "default": "0",
-   "description": "Enable sending a reminder if a team member hasn\u2019t filled in their timesheet for the previous working day or has logged less than 8 hours.",
+   "description": "Enable sending a reminder if a team member hasn’t filled in their timesheet for the previous working day or has logged less than 8 hours.",
    "fieldname": "timesheet_previousday_reminder",
    "fieldtype": "Check",
    "label": "Send previous day reminder to fill the timesheet"
@@ -214,12 +222,67 @@
    "fieldname": "workload_channel_id",
    "fieldtype": "Data",
    "label": "Workload Channel ID"
+  },
+  {
+   "description": "Daily birthday and work anniversary announcements. Employees with a Slack ID are always mentioned: these come once a year.",
+   "fieldname": "celebrations_section",
+   "fieldtype": "Section Break",
+   "label": "Celebrations"
+  },
+  {
+   "default": "0",
+   "fieldname": "send_celebration_updates",
+   "fieldtype": "Check",
+   "label": "Send Birthday and Work Anniversary Updates"
+  },
+  {
+   "depends_on": "eval:doc.send_celebration_updates == 1;",
+   "description": "Falls back to the attendance channel when empty",
+   "fieldname": "celebrations_channel_id",
+   "fieldtype": "Data",
+   "label": "Celebrations Channel ID"
+  },
+  {
+   "default": "09:00:00",
+   "depends_on": "eval:doc.send_celebration_updates == 1;",
+   "description": "Time of day to post the announcements",
+   "fieldname": "celebrations_time",
+   "fieldtype": "Time",
+   "label": "Time",
+   "mandatory_depends_on": "eval:doc.send_celebration_updates == 1;"
+  },
+  {
+   "fieldname": "column_break_cele",
+   "fieldtype": "Column Break"
+  },
+  {
+   "depends_on": "eval:doc.send_celebration_updates == 1;",
+   "description": "Email Template whose Response (HTML) holds the Jinja for the birthday message (enable Use HTML on it). Leave empty for the default. Context: <code>employees</code> (list of <code>name</code>, <code>mention</code>, <code>company</code>).",
+   "fieldname": "birthday_message_template",
+   "fieldtype": "Link",
+   "label": "Birthday Message Template",
+   "options": "Email Template"
+  },
+  {
+   "depends_on": "eval:doc.send_celebration_updates == 1;",
+   "description": "Email Template whose Response (HTML) holds the Jinja for the work anniversary message (enable Use HTML on it). Leave empty for the default. Context: <code>employees</code> (list of <code>name</code>, <code>mention</code>, <code>company</code>, <code>years</code> at the company).",
+   "fieldname": "anniversary_message_template",
+   "fieldtype": "Link",
+   "label": "Work Anniversary Message Template",
+   "options": "Email Template"
+  },
+  {
+   "fieldname": "last_celebrations_date",
+   "fieldtype": "Date",
+   "hidden": 1,
+   "label": "Last Celebrations Date",
+   "read_only": 1
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-02-23 18:43:41.334908",
+ "modified": "2026-10-09 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Slack Connector",
  "name": "Slack Settings",

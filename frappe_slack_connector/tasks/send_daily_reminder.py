@@ -1,8 +1,8 @@
 import time
 
 import frappe
+from erpnext.setup.doctype.employee.employee import get_holiday_list_for_employee
 from frappe.utils import add_days, get_time, getdate
-from hrms.hr.utils import get_holiday_list_for_employee
 
 from frappe_slack_connector.db.timesheet import is_next_pms_installed
 from frappe_slack_connector.helpers.error import generate_error_log
@@ -109,7 +109,7 @@ def send_slack_notification(reminder_template: str, allowed_departments: list):
     # Get holiday lists for all employees (with fallback to company holiday list)
     employee_holiday_lists = {}
     for employee in employees:
-        holiday_list = get_holiday_list_for_employee(employee.name)
+        holiday_list = get_holiday_list_for_employee(employee.name, raise_exception=False, as_on=date)
         if holiday_list:
             employee_holiday_lists[employee.name] = holiday_list
 

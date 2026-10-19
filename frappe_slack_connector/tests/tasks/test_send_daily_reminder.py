@@ -85,7 +85,7 @@ def _enter_notification_patches(stack, *, router, holiday_list_for=None):
     stack.enter_context(
         patch(
             f"{REMINDER_MODULE}.get_holiday_list_for_employee",
-            side_effect=lambda emp: (holiday_list_for or {}).get(emp),
+            side_effect=lambda emp, *args, **kwargs: (holiday_list_for or {}).get(emp),
         )
     )
     stack.enter_context(patch(f"{REMINDER_MODULE}.frappe.render_template", return_value="rendered"))

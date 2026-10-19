@@ -32,7 +32,13 @@
   "send_daily_allocation_updates",
   "send_weekly_allocation_updates",
   "workload_mention_users",
-  "workload_channel_id"
+  "workload_channel_id",
+  "frappe_cloud_section",
+  "send_frappe_cloud_deploy_updates",
+  "frappe_cloud_webhook_secret",
+  "frappe_cloud_channel_id",
+  "column_break_frappe_cloud",
+  "frappe_cloud_bench_groups"
  ],
  "fields": [
   {
@@ -214,12 +220,52 @@
    "fieldname": "workload_channel_id",
    "fieldtype": "Data",
    "label": "Workload Channel ID"
+  },
+  {
+   "fieldname": "frappe_cloud_section",
+   "fieldtype": "Section Break",
+   "label": "Frappe Cloud Deploy Updates"
+  },
+  {
+   "default": "0",
+   "description": "Post Frappe Cloud bench deploy progress to a Slack thread. Add a webhook in Frappe Cloud (Settings \u2192 Webhooks) pointing to https://&lt;this-site&gt;/api/method/frappe_slack_connector.api.frappe_cloud_webhook.receive with the events Bench Deploy Status Update, Bench Status Update and Site Status Update.",
+   "fieldname": "send_frappe_cloud_deploy_updates",
+   "fieldtype": "Check",
+   "label": "Send Frappe Cloud deploy updates"
+  },
+  {
+   "depends_on": "eval:doc.send_frappe_cloud_deploy_updates",
+   "description": "Use the same secret in the Frappe Cloud webhook",
+   "fieldname": "frappe_cloud_webhook_secret",
+   "fieldtype": "Password",
+   "label": "Webhook Secret",
+   "mandatory_depends_on": "eval:doc.send_frappe_cloud_deploy_updates"
+  },
+  {
+   "depends_on": "eval:doc.send_frappe_cloud_deploy_updates",
+   "description": "Channel for bench groups without their own channel",
+   "fieldname": "frappe_cloud_channel_id",
+   "fieldtype": "Data",
+   "label": "Deploy Channel ID",
+   "mandatory_depends_on": "eval:doc.send_frappe_cloud_deploy_updates"
+  },
+  {
+   "fieldname": "column_break_frappe_cloud",
+   "fieldtype": "Column Break"
+  },
+  {
+   "depends_on": "eval:doc.send_frappe_cloud_deploy_updates",
+   "description": "Leave empty to post updates for every bench group of the Frappe Cloud team",
+   "fieldname": "frappe_cloud_bench_groups",
+   "fieldtype": "Table",
+   "label": "Watched Bench Groups",
+   "options": "Frappe Cloud Bench Group"
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-02-23 18:43:41.334908",
+ "modified": "2026-10-19 12:23:29.000000",
  "modified_by": "Administrator",
  "module": "Frappe Slack Connector",
  "name": "Slack Settings",

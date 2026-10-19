@@ -1,0 +1,49 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2026-10-19 12:23:29.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "bench_group",
+  "sites",
+  "channel_id"
+ ],
+ "fields": [
+  {
+   "description": "The bench group name as shown in Frappe Cloud, for example bench-0019",
+   "fieldname": "bench_group",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Bench Group",
+   "reqd": 1
+  },
+  {
+   "description": "One site per line. Leave empty to post updates for every site on this bench group.",
+   "fieldname": "sites",
+   "fieldtype": "Small Text",
+   "in_list_view": 1,
+   "label": "Sites"
+  },
+  {
+   "description": "Leave empty to use the default deploy channel",
+   "fieldname": "channel_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Channel ID"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-10-19 12:23:29.000000",
+ "modified_by": "Administrator",
+ "module": "Frappe Slack Connector",
+ "name": "Frappe Cloud Bench Group",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

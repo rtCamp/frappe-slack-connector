@@ -1,0 +1,109 @@
+{
+ "actions": [],
+ "autoname": "field:deploy",
+ "creation": "2026-10-19 12:23:29.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "deploy",
+  "bench_group",
+  "status",
+  "column_break_main",
+  "channel_id",
+  "thread_ts",
+  "build_error_section",
+  "build_error",
+  "posted_events"
+ ],
+ "fields": [
+  {
+   "description": "Name of the deploy in Frappe Cloud",
+   "fieldname": "deploy",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Deploy",
+   "read_only": 1,
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "bench_group",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Bench Group",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_main",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "channel_id",
+   "fieldtype": "Data",
+   "label": "Channel ID",
+   "read_only": 1
+  },
+  {
+   "description": "Timestamp of the parent Slack message",
+   "fieldname": "thread_ts",
+   "fieldtype": "Data",
+   "label": "Thread TS",
+   "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "build_error_section",
+   "fieldtype": "Section Break",
+   "label": "Build Error"
+  },
+  {
+   "fieldname": "build_error",
+   "fieldtype": "Long Text",
+   "label": "Build Error",
+   "read_only": 1
+  },
+  {
+   "description": "Events already posted to the thread, used to skip duplicate deliveries",
+   "fieldname": "posted_events",
+   "fieldtype": "Small Text",
+   "hidden": 1,
+   "label": "Posted Events",
+   "read_only": 1
+  }
+ ],
+ "in_create": 1,
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-10-19 12:23:29.000000",
+ "modified_by": "Administrator",
+ "module": "Frappe Slack Connector",
+ "name": "Frappe Cloud Deploy Thread",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "deploy"
+}

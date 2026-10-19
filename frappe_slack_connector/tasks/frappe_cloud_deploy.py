@@ -8,11 +8,10 @@ from frappe_slack_connector.slack.app import SlackIntegration
 
 ####################################################################
 #                                                                  #
-# Frappe Cloud deploy updates                                      #
+# Frappe Cloud bench updates                                       #
 # -----------------------------------------------------------------#
-# Posts one Slack message per Frappe Cloud deploy, and replies in  #
-# its thread for every later status change of the deploy, its new  #
-# benches and the sites moved onto them.                           #
+# Posts one Slack thread per Frappe Cloud deploy with only the     #
+# milestones: update started, update complete, and failures.       #
 #                                                                  #
 ####################################################################
 
@@ -22,9 +21,8 @@ DEPLOY_EVENT = "Bench Deploy Status Update"
 BENCH_EVENT = "Bench Status Update"
 SITE_EVENT = "Site Status Update"
 
-# Bench and site statuses worth posting; the rest are noise for a deploy thread
-BENCH_STATUSES = {"Installing", "Updating", "Active", "Broken"}
-SITE_STATUSES = {"Updating", "Active", "Broken", "Recovering"}
+# Draft and Scheduled deploys have not started building yet
+STARTED_DEPLOY_STATUSES = {"Pending", "Preparing", "Running", "Success", "Failure"}
 
 # Bench and site events carry no reference to the deploy, so they go to the
 # latest deploy thread of their bench group if it was started within this window
@@ -33,18 +31,7 @@ THREAD_WINDOW_HOURS = 48
 BUILD_ERROR_CHAR_LIMIT = 2500
 DASHBOARD_DEPLOY_URL = "https://frappecloud.com/dashboard/groups/{group}/deploys/{deploy}"
 
-STATUS_EMOJI = {
-    "Success": ":white_check_mark:",
-    "Active": ":white_check_mark:",
-    "Failure": ":x:",
-    "Broken": ":x:",
-    "Preparing": ":gear:",
-    "Running": ":gear:",
-    "Installing": ":gear:",
-    "Updating": ":gear:",
-    "Recovering": ":gear:",
-}
-DEFAULT_EMOJI = ":hourglass_flowing_sand:"
+PARENT_TEXT = "Bench Update :thread:"
 
 
 def process_event(payload: dict) -> None:
@@ -67,9 +54,9 @@ def process_event(payload: dict) -> None:
         if event == DEPLOY_EVENT:
             post_deploy_update(data, watch.channel_id)
         elif event == BENCH_EVENT:
-            post_bench_update(data)
-        elif event == SITE_EVENT and (not watch.sites or data.get("name") in watch.sites):
-            post_site_update(data)
+            post_bench_update(data, watch.sites)
+        elif event == SITE_EVENT and data.get("name") in watch.sites:
+            post_site_update(data, watch.sites)
     except Exception as e:
         frappe.db.rollback()
         generate_error_log(
@@ -93,7 +80,7 @@ def _unwrap_payload(payload: dict) -> tuple[str | None, dict]:
 
 def get_watch(settings, group: str | None) -> frappe._dict | None:
     """
-    Return the channel and sites to report for the bench group, or None when
+    Return the channel and sites to wait for on the bench group, or None when
     the bench group is not watched. An empty table watches every bench group.
     """
     if not group:
@@ -113,69 +100,99 @@ def get_watch(settings, group: str | None) -> frappe._dict | None:
 
 def post_deploy_update(data: dict, channel_id: str) -> None:
     """
-    Post the parent message for a new deploy, or update it and reply in its thread
+    Start the thread once the build begins, and report a failed build
     """
     deploy, group, status = data.get("name"), data.get("group"), data.get("status")
-    if not deploy or not status:
+    candidate = data.get("deploy_candidate")
+    if not deploy or status not in STARTED_DEPLOY_STATUSES:
         return
 
-    thread = get_or_create_thread(deploy, group, channel_id)
-    if not mark_posted(thread, f"deploy:{status}"):
+    if not frappe.db.exists(THREAD_DOCTYPE, deploy) and is_superseded(group, candidate):
+        # A retried delivery of an older deploy arriving after a newer one has started
         return
 
+    thread = get_or_create_thread(deploy, group, channel_id, candidate)
     thread.status = status
-    build_error = _clean(data.get("build_error"))
-    if build_error:
-        thread.build_error = build_error
-
     slack = SlackIntegration()
-    parent_text = get_parent_text(thread)
-    if thread.thread_ts:
-        slack.slack_app.client.chat_update(channel=thread.channel_id, ts=thread.thread_ts, text=parent_text)
-    else:
-        response = slack.slack_app.client.chat_postMessage(channel=thread.channel_id, text=parent_text)
+
+    if not thread.thread_ts:
+        response = slack.slack_app.client.chat_postMessage(channel=thread.channel_id, text=PARENT_TEXT)
         thread.thread_ts = response["ts"]
-        # The setting may hold a channel name, but chat.update only accepts the channel ID
         thread.channel_id = response.get("channel") or thread.channel_id
 
-    reply(slack, thread, get_deploy_reply_text(data))
+    if status != "Failure" and mark_posted(thread, "started"):
+        url = DASHBOARD_DEPLOY_URL.format(group=group, deploy=deploy)
+        reply(slack, thread, f"Bench update started on `{group}` (<{url}|view deploy>)")
+
+    if status == "Failure" and mark_posted(thread, "failed"):
+        thread.build_error = _clean(data.get("build_error"))
+        text = f":x: Bench update failed: the build for `{group}` failed"
+        if thread.build_error:
+            text += f"\n```{thread.build_error[-BUILD_ERROR_CHAR_LIMIT:]}```"
+        reply(slack, thread, text)
+
     thread.save(ignore_permissions=True)
 
 
-def post_bench_update(data: dict) -> None:
+def post_bench_update(data: dict, sites: set[str]) -> None:
     """
-    Reply in the latest deploy thread when one of its benches changes status
+    Report a broken bench, and mark the update complete once the new bench is
+    live when there are no sites to wait for
     """
     bench, status = data.get("name"), data.get("status")
-    if not bench or status not in BENCH_STATUSES:
+    thread = get_thread_for_bench(data.get("group"), bench)
+    if not thread:
         return
 
-    thread = get_latest_thread(data.get("group"))
-    if not thread or not mark_posted(thread, f"bench:{bench}:{status}"):
-        return
+    if status == "Broken" and mark_posted(thread, f"broken:{bench}"):
+        thread.status = "Failure"
+        reply(SlackIntegration(), thread, f":x: Bench update failed: the new bench `{bench}` is broken")
+        thread.save(ignore_permissions=True)
+    elif status == "Active" and mark_posted(thread, "bench:Active"):
+        complete_if_done(thread, sites)
+        thread.save(ignore_permissions=True)
 
-    cluster = f" ({data['cluster']})" if data.get("cluster") else ""
-    reply(SlackIntegration(), thread, f"{get_emoji(status)} Bench `{bench}`{cluster} is *{status}*")
-    thread.save(ignore_permissions=True)
 
-
-def post_site_update(data: dict) -> None:
+def post_site_update(data: dict, sites: set[str]) -> None:
     """
-    Reply in the latest deploy thread when a site on the bench group changes status
+    Record a watched site coming back online on the deploy's new bench
     """
-    site, status = data.get("name"), data.get("status")
-    if not site or status not in SITE_STATUSES:
+    site, status, group = data.get("name"), data.get("status"), data.get("group")
+
+    if status == "Broken":
+        # A site whose update failed may still be on its old bench, so report it in the latest thread
+        thread = get_latest_thread(group)
+        if thread and mark_posted(thread, f"broken:{site}"):
+            thread.status = "Failure"
+            reply(SlackIntegration(), thread, f":x: Bench update failed: site `{site}` is broken")
+            thread.save(ignore_permissions=True)
         return
 
-    thread = get_latest_thread(data.get("group"))
-    if not thread or not mark_posted(thread, f"site:{site}:{status}"):
+    thread = get_thread_for_bench(group, data.get("bench"))
+    if thread and status == "Active" and "bench:Active" in _posted(thread) and mark_posted(thread, f"site:{site}"):
+        complete_if_done(thread, sites)
+        thread.save(ignore_permissions=True)
+
+
+def complete_if_done(thread, sites: set[str]) -> None:
+    """
+    Post the completion message once the new bench is live and every watched site is back online
+    """
+    posted = _posted(thread)
+    if "bench:Active" not in posted or any(f"site:{site}" not in posted for site in sites):
+        return
+    if not mark_posted(thread, "complete"):
         return
 
-    reply(SlackIntegration(), thread, f"{get_emoji(status)} Site `{site}` is *{status}*")
-    thread.save(ignore_permissions=True)
+    thread.status = "Complete"
+    if sites:
+        text = ":white_check_mark: Bench update complete, all sites are back online"
+    else:
+        text = ":white_check_mark: Bench update complete, the new bench is live"
+    reply(SlackIntegration(), thread, text)
 
 
-def get_or_create_thread(deploy: str, group: str | None, channel_id: str):
+def get_or_create_thread(deploy: str, group: str | None, channel_id: str, candidate: str | None):
     """
     Return the thread for the deploy, locked until the job commits so that
     concurrent events of the same deploy do not post two parent messages
@@ -186,6 +203,7 @@ def get_or_create_thread(deploy: str, group: str | None, channel_id: str):
                 {
                     "doctype": THREAD_DOCTYPE,
                     "deploy": deploy,
+                    "deploy_candidate": candidate,
                     "bench_group": group,
                     "channel_id": channel_id,
                 }
@@ -196,66 +214,81 @@ def get_or_create_thread(deploy: str, group: str | None, channel_id: str):
     return frappe.get_doc(THREAD_DOCTYPE, deploy, for_update=True)
 
 
-def get_latest_thread(group: str | None):
+def _recent_threads(group: str | None) -> list[frappe._dict]:
     """
-    Return the latest deploy thread of the bench group started within the window
+    Deploy threads of the bench group started within the window, newest first
     """
     if not group:
-        return None
-    name = frappe.db.get_value(
+        return []
+    return frappe.get_all(
         THREAD_DOCTYPE,
-        {
+        filters={
             "bench_group": group,
             "thread_ts": ("is", "set"),
             "creation": (">=", add_to_date(now_datetime(), hours=-THREAD_WINDOW_HOURS)),
         },
-        "name",
+        fields=["name", "deploy_candidate"],
         order_by="creation desc",
     )
-    return frappe.get_doc(THREAD_DOCTYPE, name, for_update=True) if name else None
+
+
+def get_latest_thread(group: str | None):
+    """
+    Return the latest deploy thread of the bench group started within the window
+    """
+    threads = _recent_threads(group)
+    return frappe.get_doc(THREAD_DOCTYPE, threads[0].name, for_update=True) if threads else None
+
+
+def get_thread_for_bench(group: str | None, bench: str | None):
+    """
+    Return the deploy thread that created the bench. Frappe Cloud names a bench
+    after its deploy candidate, so deploy-49638-000005 builds bench-49638-000005-<server>.
+    """
+    if not bench:
+        return None
+    for thread in _recent_threads(group):
+        if thread.deploy_candidate and bench.startswith(f"bench-{thread.deploy_candidate.removeprefix('deploy-')}-"):
+            return frappe.get_doc(THREAD_DOCTYPE, thread.name, for_update=True)
+    return None
+
+
+def is_superseded(group: str | None, candidate: str | None) -> bool:
+    """
+    Whether a newer deploy candidate of the bench group already has a thread
+    """
+    number = _candidate_number(candidate)
+    if number is None:
+        return False
+    return any((_candidate_number(t.deploy_candidate) or 0) > number for t in _recent_threads(group))
+
+
+def _candidate_number(candidate: str | None) -> int | None:
+    """
+    The sequence number of a deploy candidate, 5 for deploy-49638-000005
+    """
+    suffix = (candidate or "").rsplit("-", 1)[-1]
+    return int(suffix) if suffix.isdigit() else None
 
 
 def mark_posted(thread, key: str) -> bool:
     """
-    Record the event on the thread. Returns False if it was already posted,
+    Record the milestone on the thread. Returns False if it was already recorded,
     since Frappe Cloud retries deliveries and can send a bench status twice.
     """
-    posted = (thread.posted_events or "").splitlines()
+    posted = _posted(thread)
     if key in posted:
         return False
     thread.posted_events = "\n".join([*posted, key])
     return True
 
 
+def _posted(thread) -> list[str]:
+    return (thread.posted_events or "").splitlines()
+
+
 def reply(slack: SlackIntegration, thread, text: str) -> None:
     slack.slack_app.client.chat_postMessage(channel=thread.channel_id, thread_ts=thread.thread_ts, text=text)
-
-
-def get_parent_text(thread) -> str:
-    url = DASHBOARD_DEPLOY_URL.format(group=thread.bench_group, deploy=thread.deploy)
-    return (
-        f"{get_emoji(thread.status)} *Frappe Cloud deploy* `{thread.deploy}` on `{thread.bench_group}`: "
-        f"*{thread.status}*\n<{url}|View in Frappe Cloud>"
-    )
-
-
-def get_deploy_reply_text(data: dict) -> str:
-    status = data.get("status")
-    text = f"{get_emoji(status)} Build is *{status}*"
-
-    build_duration = _clean(data.get("build_duration"))
-    if status == "Success" and build_duration:
-        # Drop the microseconds from "0:00:41.794537"
-        text += f" in {build_duration.split('.')[0]}"
-
-    build_error = _clean(data.get("build_error"))
-    if status == "Failure" and build_error:
-        text += f"\n```{build_error[-BUILD_ERROR_CHAR_LIMIT:]}```"
-    return text
-
-
-def get_emoji(status: str | None) -> str:
-    return STATUS_EMOJI.get(status, DEFAULT_EMOJI)
 
 
 def _clean(value) -> str:

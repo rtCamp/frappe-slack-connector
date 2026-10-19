@@ -20,7 +20,7 @@
    "reqd": 1
   },
   {
-   "description": "One site per line. Leave empty to post updates for every site on this bench group.",
+   "description": "One site per line. The update is reported complete once all of them are back online on the new bench. Leave empty to report it complete as soon as the new bench is live.",
    "fieldname": "sites",
    "fieldtype": "Small Text",
    "in_list_view": 1,

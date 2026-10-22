@@ -1,10 +1,10 @@
 from datetime import datetime
 
 import frappe
-from erpnext.setup.doctype.holiday_list.holiday_list import is_holiday
 from frappe import _
 from frappe.utils import get_time, getdate, today
 
+from frappe_slack_connector.db.employee import is_company_holiday
 from frappe_slack_connector.db.leave_application import (
     custom_fields_exist,
     get_employees_on_leave,
@@ -20,8 +20,10 @@ def attendance_channel() -> None:
     Enqueues the background job to post the message
     Conditions:
      - Check send attendance updates is enabled
-     - Check if the current date is a working day (weekends, holidays)
+     - Check if the current date is a weekday
      - Check if current date notification is sent
+     - On a company holiday, post only if someone on another holiday
+       list (support, US) is on leave; otherwise there is nothing to report
      - If not, send the notification, set the updated date in Slack Settings
     """
     slack_settings = frappe.get_single("Slack Settings")
@@ -31,7 +33,6 @@ def attendance_channel() -> None:
     if (
         slack_settings.send_attendance_updates != 1
         or current_day > 4  # sat = 5, sun = 6
-        or is_holiday(current_date)
         or (
             slack_settings.last_attendance_date is not None
             and slack_settings.last_attendance_date == frappe.utils.nowdate()
@@ -40,11 +41,19 @@ def attendance_channel() -> None:
     ):
         return
 
+    # get_employees_on_leave already drops employees whose own holiday list
+    # marks today a holiday, so on a company holiday only employees on
+    # another calendar remain. Nobody left means a day off for everyone.
+    users_on_leave = get_employees_on_leave()
+    if not users_on_leave and is_company_holiday(current_date):
+        return
+
     # Send the attendance summary to the Slack channel
     message_ts = send_notification(
         slack_settings.leave_notification_subject
         if slack_settings.leave_notification_subject
-        else "Employees on Leave"  # Default title
+        else "Employees on Leave",  # Default title
+        users_on_leave,
     )
 
     # Update the last attendance date
@@ -53,10 +62,13 @@ def attendance_channel() -> None:
     slack_settings.save(ignore_permissions=True)
 
 
-def send_notification(attendance_title: str) -> str | None:
+def send_notification(attendance_title: str, users_on_leave: list | None = None) -> str | None:
     """
     Background job to post the attendance summary to the Slack channel
     Returns the message timestamp if successful
+
+    ``users_on_leave`` is the result of ``get_employees_on_leave``; it is
+    fetched here when the caller has not already done so
     """
     slack = SlackIntegration()
     mention_users = frappe.db.get_single_value("Slack Settings", "mention_user")
@@ -65,7 +77,8 @@ def send_notification(attendance_title: str) -> str | None:
         leave_groups["First-Half"] = []
         leave_groups["Second-Half"] = []
 
-    users_on_leave = get_employees_on_leave()
+    if users_on_leave is None:
+        users_on_leave = get_employees_on_leave()
 
     if users_on_leave:
         # Batch fetch employee user_ids

@@ -143,9 +143,24 @@ class TestGetEmployeesOnLeave(IntegrationTestCase):
 
     def test_excludes_employees_who_are_not_active(self):
         """An approved leave for an employee whose status is no longer Active must not be reported."""
-        on_leave = {row.employee for row in get_employees_on_leave()}
+        with patch(f"{LEAVE_DB_MODULE}.get_employees_on_holiday", return_value=set()):
+            on_leave = {row.employee for row in get_employees_on_leave()}
         self.assertIn(self.ACTIVE_EMPLOYEE, on_leave)
         self.assertNotIn(self.LEFT_EMPLOYEE, on_leave)
+
+    def test_excludes_employees_for_whom_today_is_a_holiday(self):
+        """An employee whose own holiday list marks today a holiday is not on leave today, even with a leave covering the date."""
+        with patch(
+            f"{LEAVE_DB_MODULE}.get_employees_on_holiday", return_value={self.ACTIVE_EMPLOYEE}
+        ) as mock_on_holiday:
+            on_leave = {row.employee for row in get_employees_on_leave()}
+        self.assertNotIn(self.ACTIVE_EMPLOYEE, on_leave)
+        # Only active employees are checked, and against today.
+        mock_on_holiday.assert_called_once()
+        checked, on_date = mock_on_holiday.call_args.args
+        self.assertIn(self.ACTIVE_EMPLOYEE, checked)
+        self.assertNotIn(self.LEFT_EMPLOYEE, checked)
+        self.assertEqual(on_date, today())
 
     def test_returns_empty_list_when_nobody_is_on_leave(self):
         """When no Leave Application covers today the function returns [] without querying Employee."""

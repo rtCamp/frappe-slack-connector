@@ -97,7 +97,7 @@ class TestApproveLeaveHandler(IntegrationTestCase):
         self.assertIn("Rejected", section_text)
 
     def test_opens_error_modal_when_db_update_raises(self):
-        """handler opens an error modal via views_open when the approve/reject DB call raises."""
+        """handler logs the error and opens an error modal via views_open when the approve/reject DB call raises."""
         payload = _build_action_payload(action_id="leave_approve")
         mock_slack = MagicMock()
         with (
@@ -105,8 +105,12 @@ class TestApproveLeaveHandler(IntegrationTestCase):
             patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
             patch(f"{APPROVE_LEAVE_MODULE}.approve_leave", side_effect=RuntimeError("boom")),
             patch(f"{APPROVE_LEAVE_MODULE}.reject_leave"),
+            patch(f"{APPROVE_LEAVE_MODULE}.generate_error_log") as mock_log,
         ):
             handler(slack=mock_slack, payload=payload)
+        # Logged before the modal: an expired trigger_id must not lose the original error
+        mock_log.assert_called_once()
+        self.assertEqual(str(mock_log.call_args.kwargs["exception"]), "boom")
         mock_slack.slack_app.client.views_open.assert_called_once()
         kwargs = mock_slack.slack_app.client.views_open.call_args.kwargs
         self.assertEqual(kwargs["trigger_id"], "T-trigger-1")

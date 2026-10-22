@@ -134,7 +134,7 @@ class TestSubmitLeaveHandler(IntegrationTestCase):
         self.assertEqual(mock_leave_app.half_day_date, "2026-06-01")
 
     def test_returns_error_modal_when_save_raises(self):
-        """When the Leave Application save raises, handler returns an HTTP response containing an error modal payload."""
+        """When the Leave Application save raises, handler logs the error and returns an HTTP response containing an error modal payload."""
         payload = _build_submission_payload()
         mock_leave_app = MagicMock()
         mock_leave_app.save.side_effect = RuntimeError("boom")
@@ -152,12 +152,20 @@ class TestSubmitLeaveHandler(IntegrationTestCase):
             ),
             patch(f"{SUBMIT_LEAVE_MODULE}.custom_fields_exist", return_value=False),
             patch(f"{SUBMIT_LEAVE_MODULE}.send_http_response") as mock_response,
+            patch(f"{SUBMIT_LEAVE_MODULE}.generate_error_log") as mock_log,
         ):
             handler(slack=MagicMock(), payload=payload)
         mock_response.assert_called_once()
         body = mock_response.call_args.kwargs["body"]
         self.assertEqual(body["response_action"], "push")
         self.assertEqual(body["view"]["title"]["text"], "Error")
+        # The failure is recorded server-side, not only shown in the modal
+        # (the balance lookup on the mock doc logs its own entry first)
+        submit_logs = [
+            c for c in mock_log.call_args_list if c.kwargs["title"] == "Error submitting leave request from Slack"
+        ]
+        self.assertEqual(len(submit_logs), 1)
+        self.assertIs(submit_logs[0].kwargs["exception"], mock_leave_app.save.side_effect)
 
     def test_switches_session_to_applicant_before_saving(self):
         """handler resolves the Frappe user for the Slack user and calls frappe.set_user with it before the Leave Application is saved, so the save and the enqueued notification jobs do not run as Guest."""
@@ -195,10 +203,12 @@ class TestSubmitLeaveHandler(IntegrationTestCase):
             patch(f"{SUBMIT_LEAVE_MODULE}.get_leave_approver", return_value="approver@x.com"),
             patch(f"{SUBMIT_LEAVE_MODULE}.custom_fields_exist", return_value=False),
             patch(f"{SUBMIT_LEAVE_MODULE}.send_http_response") as mock_response,
+            patch(f"{SUBMIT_LEAVE_MODULE}.generate_error_log") as mock_log,
         ):
             handler(slack=MagicMock(), payload=payload)
         mock_set_user.assert_not_called()
         mock_get_doc.assert_not_called()
+        mock_log.assert_called_once()
         body = mock_response.call_args.kwargs["body"]
         self.assertEqual(body["response_action"], "push")
         self.assertIn("No user found for this Slack user", body["view"]["blocks"][2]["text"]["text"])

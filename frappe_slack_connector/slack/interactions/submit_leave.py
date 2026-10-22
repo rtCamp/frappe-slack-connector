@@ -98,6 +98,9 @@ def handler(slack: SlackIntegration, payload: dict):
         clear_messages()
 
     except Exception as e:
+        # Log before replying: the modal shows the message to the applicant, but
+        # nothing else records why a Slack-filed leave was refused
+        generate_error_log(title="Error submitting leave request from Slack", exception=e)
         response = {
             "response_action": "push",
             "view": {

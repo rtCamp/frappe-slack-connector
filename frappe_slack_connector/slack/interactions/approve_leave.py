@@ -57,6 +57,9 @@ def handler(slack: SlackIntegration, payload: dict):
             blocks=blocks,
         )
     except Exception as e:
+        # Log first: the error modal below needs a live trigger_id, and when it
+        # fails too the only trace of the original error would be lost
+        generate_error_log(title="Error taking action on leave request from Slack", exception=e)
         # show an error modal with the exception message
         slack.slack_app.client.views_open(
             trigger_id=payload["trigger_id"],

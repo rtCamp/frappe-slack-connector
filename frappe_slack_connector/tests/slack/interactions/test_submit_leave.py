@@ -161,9 +161,7 @@ class TestSubmitLeaveHandler(IntegrationTestCase):
         self.assertEqual(body["view"]["title"]["text"], "Error")
         # The failure is recorded server-side, not only shown in the modal
         # (the balance lookup on the mock doc logs its own entry first)
-        submit_logs = [
-            c for c in mock_log.call_args_list if c.kwargs["title"] == "Error submitting leave request from Slack"
-        ]
+        submit_logs = [c for c in mock_log.call_args_list if c.kwargs["title"] == "Error submitting leave request"]
         self.assertEqual(len(submit_logs), 1)
         self.assertIs(submit_logs[0].kwargs["exception"], mock_leave_app.save.side_effect)
 

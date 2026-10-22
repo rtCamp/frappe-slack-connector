@@ -1,3 +1,5 @@
+import traceback
+
 import frappe
 
 
@@ -12,9 +14,9 @@ def generate_error_log(
     """
     Generate an error log with the given title and message
     """
-    exc = str(exception)
-    if not exc:
-        exc = frappe.get_traceback()
+    # The traceback, not just str(exception): frappe.log_error stores the message
+    # it is given, and a bare "Not permitted" names no file or line
+    exc = "".join(traceback.format_exception(exception)) if exception else frappe.get_traceback()
     frappe.log_error(
         title="Slack: " + title,
         message=f"{message}\nException:\n{exc}" if exception else message,

@@ -2,8 +2,9 @@ from datetime import UTC, datetime
 
 import frappe
 from frappe.model.document import Document
-from frappe.utils import cint, convert_utc_to_system_timezone, get_url_to_form, getdate
+from frappe.utils import cint, convert_utc_to_system_timezone, flt, get_url_to_form, getdate
 from frappe.utils.synchronization import filelock
+from hrms.hr.doctype.leave_application.leave_application import get_leave_balance_on
 from slack_sdk.errors import SlackApiError
 
 from frappe_slack_connector.db.employee import get_employees_on_holiday
@@ -96,6 +97,10 @@ def after_insert(doc, method):
     """
     Send a slack message to the leave approver when a new leave application
     is submitted
+
+    Queued after commit: the approver DM's balance lookup authorises the
+    user through the Leave Application row, which a worker started before
+    the insert commits cannot see
     """
     # Rows created by Data Import are not announcements. Decide here: the
     # background job runs with fresh frappe.local, where the flag is reset.
@@ -361,18 +366,27 @@ def send_leave_notification_bg(doc: Document, announce_in_thread: bool = True):
 
         # Send message to approver
         if approver_slack is not None:
+            # Leave Without Pay types have no allocation, so the balance is meaningless
+            leave_balance = None
+            if not frappe.db.get_value("Leave Type", doc.leave_type, "is_lwp"):
+                leave_balance = get_leave_balance(doc)
+
             slack.slack_app.client.chat_postMessage(
                 channel=approver_slack,
+                # Fallback for notification previews; the blocks carry the details
+                text=f"New leave application from {escape_slack_text(doc.employee_name)}",
                 blocks=format_leave_application_blocks(
                     leave_id=doc.name,
                     leave_link=get_url_to_form("Leave Application", doc.name),
                     employee_name=mention,
                     leave_type=doc.leave_type,
-                    is_half_day=doc.half_day,
+                    duration=format_leave_duration(doc),
                     leave_submission_date=standard_date_fmt(doc.creation),
                     from_date=standard_date_fmt(doc.from_date),
                     to_date=standard_date_fmt(doc.to_date),
                     reason=doc.description,
+                    total_days=flt(doc.total_leave_days),
+                    leave_balance=leave_balance,
                 ),
             )
 
@@ -653,6 +667,67 @@ def _strike_reply(
     return True
 
 
+def get_leave_balance(doc: Document) -> float | None:
+    """
+    Balance before this request, computed with the same HRMS call the Desk
+    form uses
+
+    The ``leave_balance`` stored on the application cannot be trusted as a
+    signal: the form fills it, but an application created on the server
+    (the Slack modal) has none, and the column is NOT NULL so any reload
+    before this job runs (a Notification on save does one) reads it back
+    as 0, which would show a zero balance and a false warning. So the
+    balance is always computed here; the stored value is only the fallback
+    when the lookup fails, and None means nothing to show
+
+    ``leave_application`` lets HRMS grant the lookup to a user who can read
+    this application but not the Employee (the job runs as the user who
+    saved the leave)
+    """
+    try:
+        balance = flt(
+            get_leave_balance_on(
+                doc.employee,
+                doc.leave_type,
+                doc.from_date,
+                doc.to_date,
+                consider_all_leaves_in_the_allocation_period=True,
+                leave_application=doc.name,
+            )
+        )
+    except Exception as e:
+        generate_error_log(
+            title="Error fetching leave balance",
+            exception=e,
+        )
+        return flt(doc.leave_balance) if doc.leave_balance else None
+
+    # A leave inserted already approved and submitted (API, import) has its
+    # ledger entry by the time the job runs, so HRMS has deducted it: add it
+    # back to show the balance before this request, like for a draft. A
+    # rejected leave is submitted without a ledger entry
+    if cint(doc.docstatus) == 1 and doc.status == "Approved":
+        balance += flt(doc.total_leave_days)
+    return balance
+
+
+def format_leave_duration(doc: Document) -> str:
+    """
+    Describe how much of the leave is taken: "Full Day", the half for a
+    single-day half-day leave, or the half-day date for a multi-day leave
+    that includes one half day
+    """
+    if not doc.half_day:
+        return "Full Day"
+
+    period = doc.custom_first_halfsecond_half if custom_fields_exist() else None
+    if getdate(doc.from_date) == getdate(doc.to_date):
+        return period or "Half Day"
+
+    half_day_on = f"Half day on {standard_date_fmt(doc.half_day_date)}" if doc.half_day_date else "One half day"
+    return f"{half_day_on} — {period}" if period else half_day_on
+
+
 def format_leave_application_blocks(
     *,
     leave_id: str,
@@ -661,14 +736,33 @@ def format_leave_application_blocks(
     leave_submission_date: str,
     from_date: str,
     to_date: str,
-    is_half_day: bool,
+    duration: str,
     reason: str = "",
     employee_link: str = "#",
     leave_link: str = "#",
+    total_days: float | None = None,
+    leave_balance: float | None = None,
 ) -> list:
     """
     Format the blocks for the leave application message
+
+    `leave_balance` is the balance before this request as computed when the
+    message is built; pass None to omit it (e.g. for Leave Without Pay)
     """
+    requested = flt(total_days, 2) if total_days is not None else None
+    balance = flt(leave_balance, 2) if leave_balance is not None else None
+
+    details = [{"type": "mrkdwn", "text": f"*Duration:*\n:hourglass_flowing_sand: {duration}"}]
+    if requested is not None:
+        details.append({"type": "mrkdwn", "text": f"*Requested:*\n{requested:g} day(s)"})
+    if balance is not None:
+        details.append(
+            {
+                "type": "mrkdwn",
+                "text": f"*Balance before this request:*\n{balance:g} day(s)",
+            }
+        )
+
     blocks = [
         {
             "type": "header",
@@ -712,28 +806,33 @@ def format_leave_application_blocks(
                 {"type": "mrkdwn", "text": f"*To:*\n:date: {to_date}"},
             ],
         },
+        {"type": "section", "fields": details},
+    ]
+
+    # Warn the approver when the request cannot be covered by the recorded balance
+    if requested is not None and balance is not None and requested > balance:
+        shortfall = flt(requested - balance, 2)
+        resulting_balance = flt(balance - requested, 2)
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": ":warning: *Insufficient balance:* this request exceeds the available balance "
+                    + f"by {shortfall:g} day(s). Approving it will take the balance to {resulting_balance:g}.",
+                },
+            }
+        )
+
+    blocks.append(
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
                 "text": f"*Reason:*\n>{reason if reason else 'No reason provided'}",
             },
-        },
-    ]
-
-    # Add a context menu indicating it is a half day
-    if is_half_day:
-        blocks.append(
-            {
-                "type": "context",
-                "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": "Half Day: :white_check_mark:",
-                    }
-                ],
-            }
-        )
+        }
+    )
 
     blocks.extend(
         [

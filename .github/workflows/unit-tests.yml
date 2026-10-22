@@ -6,6 +6,13 @@ on:
   push:
     branches: [version-16, develop]
   pull_request:
+  # The upstream branches move between our pushes: hrms dropped a re-export
+  # in 16.20.0 and the release branch kept passing until the next deploy broke
+  # the Slack endpoints. The weekly run tests both branches against the
+  # current upstream version-16 so that shows up here first.
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -14,6 +21,13 @@ concurrency:
 jobs:
   Tests:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Scheduled and manual runs cover both long-lived branches; pushes and
+        # pull requests test the ref that triggered them (an empty ref keeps
+        # actions/checkout's default)
+        ref: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('["develop", "version-16"]') || fromJSON('[""]') }}
 
     services:
       redis-cache:
@@ -31,6 +45,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.ref }}
 
       - uses: actions/setup-python@v6
         with:
@@ -69,3 +85,18 @@ jobs:
         run: |
           bench --site test_site set-config allow_tests true
           bench --site test_site run-tests --app frappe_slack_connector
+
+      - name: Alert on a scheduled failure
+        # GitHub only emails the workflow's author; scheduled runs need a louder channel
+        if: failure() && github.event_name == 'schedule'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_ALERT_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BRANCH: ${{ matrix.ref }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "SLACK_ALERT_WEBHOOK_URL is not set; only GitHub's failure email goes out"
+            exit 0
+          fi
+          payload=$(jq -nc --arg text ":red_circle: frappe_slack_connector tests failed against upstream version-16 on \`$BRANCH\`: $RUN_URL" '{text: $text}')
+          curl -sf -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"

@@ -44,6 +44,12 @@ NOTE: If using `frappe-manager`, you might require to `fm restart` to provision 
 ## Slack Setup
 Visit the detailed [Slack setup guide](https://github.com/rtCamp/frappe-slack-connector/wiki/Getting-Started) on wiki.
 
+## Health check
+
+`GET /api/method/frappe_slack_connector.api.health.slack_endpoints` imports every module Slack calls into (interactions, `/apply-leave`, `/timesheet`) and answers `{"ok": true}` with HTTP 200, or HTTP 503 naming the modules that no longer load. Point an uptime monitor at it: Frappe imports a handler on its first request, so a dependency that moved underneath one (an upstream app renaming a helper, for example) otherwise only shows up as HTTP 417 on the live Slack endpoints, with nothing in Error Log.
+
+The unit-tests workflow also runs weekly against the current upstream `version-16` branches of Frappe, ERPNext and HRMS on both `develop` and `version-16`; set the `SLACK_ALERT_WEBHOOK_URL` repository secret to have a scheduled failure posted to Slack.
+
 ## Documentation
 
 Please refer to our [Wiki](https://github.com/rtCamp/frappe-slack-connector/wiki) for details.

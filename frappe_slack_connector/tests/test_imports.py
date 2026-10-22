@@ -1,6 +1,6 @@
 import importlib
-import pkgutil
 import re
+from pathlib import Path
 
 import frappe
 from frappe.tests import IntegrationTestCase
@@ -11,15 +11,27 @@ from frappe_slack_connector import hooks
 APP = "frappe_slack_connector"
 # A dotted path into this app, as hooks.py writes them
 DOTTED_PATH = re.compile(rf"^{APP}\.[\w.]+$")
+# Top-level directories that hold no app code
+SKIPPED_DIRS = {"tests", "public", "node_modules", "__pycache__"}
 
 
 def _app_modules() -> list[str]:
-    """Every importable module in the app except the tests themselves."""
-    return [
-        name
-        for _, name, _ in pkgutil.walk_packages(frappe_slack_connector.__path__, prefix=f"{APP}.")
-        if not name.startswith(f"{APP}.tests")
-    ]
+    """
+    Every module in the app, found on disk: several directories (tasks/,
+    slack/interactions/) have no __init__.py and pkgutil skips those. The
+    tests themselves are left out
+    """
+    root = Path(frappe_slack_connector.__file__).parent
+    names = []
+    for path in sorted(root.rglob("*.py")):
+        parts = path.relative_to(root).with_suffix("").parts
+        if parts[0] in SKIPPED_DIRS:
+            continue
+        if parts[-1] == "__init__":
+            parts = parts[:-1]
+        if parts:
+            names.append(".".join((APP, *parts)))
+    return names
 
 
 def _dotted_paths(value) -> set[str]:
@@ -74,4 +86,9 @@ class TestImports(IntegrationTestCase):
         paths = _hook_paths()
         self.assertIn(f"{APP}.tasks.send_daily_reminder.send_reminder", paths)
         self.assertIn(f"{APP}.override.leave_application.after_insert", paths)
-        self.assertIn(f"{APP}.api.slack_interactions", _app_modules())
+        modules = _app_modules()
+        self.assertIn(f"{APP}.api.slack_interactions", modules)
+        # Directories without __init__.py must still be walked
+        self.assertIn(f"{APP}.slack.interactions.submit_leave", modules)
+        self.assertIn(f"{APP}.tasks.send_daily_reminder", modules)
+        self.assertFalse([m for m in modules if m.startswith(f"{APP}.tests")])

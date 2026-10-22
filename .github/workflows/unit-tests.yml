@@ -15,7 +15,10 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # The event is part of the group so a scheduled run and a push to the same
+  # branch do not cancel each other (a cancelled run is not a failure, so it
+  # would also send no alert)
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -24,10 +27,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Scheduled and manual runs cover both long-lived branches; pushes and
-        # pull requests test the ref that triggered them (an empty ref keeps
+        # Scheduled runs cover both long-lived branches; pushes, pull requests
+        # and manual runs test the ref that triggered them (an empty ref keeps
         # actions/checkout's default)
-        ref: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('["develop", "version-16"]') || fromJSON('[""]') }}
+        ref: ${{ github.event_name == 'schedule' && fromJSON('["develop", "version-16"]') || fromJSON('[""]') }}
 
     services:
       redis-cache:

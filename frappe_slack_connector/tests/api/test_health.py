@@ -13,11 +13,11 @@ class TestSlackEndpointsHealth(IntegrationTestCase):
     def setUp(self):
         super().setUp()
         frappe.response.pop("http_status_code", None)
-        frappe.cache.delete_value(LOG_THROTTLE_KEY)
+        frappe.cache.delete(frappe.cache.make_key(LOG_THROTTLE_KEY))
 
     def tearDown(self):
         frappe.response.pop("http_status_code", None)
-        frappe.cache.delete_value(LOG_THROTTLE_KEY)
+        frappe.cache.delete(frappe.cache.make_key(LOG_THROTTLE_KEY))
         super().tearDown()
 
     def test_reports_ok_when_every_entry_point_loads(self):
@@ -58,6 +58,9 @@ class TestSlackEndpointsHealth(IntegrationTestCase):
             slack_endpoints()
             slack_endpoints()
         mock_log.assert_called_once()
+        # The claim is a single SET NX EX, so concurrent workers cannot both win it
+        ttl = frappe.cache.ttl(frappe.cache.make_key(LOG_THROTTLE_KEY))
+        self.assertTrue(0 < ttl <= 3600)
         self.assertEqual(frappe.response["http_status_code"], 503)
 
     def test_reports_an_entry_point_that_lost_its_guest_whitelist(self):

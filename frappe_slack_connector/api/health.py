@@ -30,8 +30,12 @@ def slack_endpoints() -> dict:
     if not failures:
         return {"ok": True}
 
-    if not frappe.cache.get_value(LOG_THROTTLE_KEY):
-        frappe.cache.set_value(LOG_THROTTLE_KEY, 1, expires_in_sec=LOG_THROTTLE_SECONDS)
+    # Claim the hour atomically (SET NX EX) so overlapping probes on different
+    # workers cannot each write an Error Log
+    # make_key scopes the key to this site, which is what the multitenancy rule guards
+    if frappe.cache.set(  # nosemgrep: frappe-semgrep.rules.frappe-cache-breaks-multitenancy
+        frappe.cache.make_key(LOG_THROTTLE_KEY), 1, ex=LOG_THROTTLE_SECONDS, nx=True
+    ):
         frappe.log_error(
             title="Slack: entry point import failed",
             message="\n".join(f"{name}: {error}" for name, error in failures.items()),

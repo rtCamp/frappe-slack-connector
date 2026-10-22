@@ -66,6 +66,7 @@ def _build_leave_doc(
     status="Open",
     status_changed=False,
     attendance_reply_ts=None,
+    docstatus=0,
 ):
     """Build a MagicMock that mimics a Leave Application doc with the fields the override code reads.
 
@@ -88,6 +89,7 @@ def _build_leave_doc(
     doc.leave_balance = leave_balance
     doc.creation = creation
     doc.status = status
+    doc.docstatus = docstatus  # a draft unless a test says otherwise; a MagicMock would read as 1
     doc.custom_slack_attendance_reply_ts = attendance_reply_ts
     doc.has_value_changed.return_value = status_changed
     # No before-save copy unless a test sets one: the handlers then read the stored reference from the database
@@ -155,6 +157,9 @@ def _run_leave_notification_bg(doc, *, custom_fields=False, is_lwp=0, attendance
         patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.utils.today", return_value="2026-06-10"),
         patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.utils.nowdate", return_value="2026-06-10"),
         patch(f"{LEAVE_OVERRIDE_MODULE}.custom_fields_exist", return_value=custom_fields),
+        # The thread reply's day period comes from the attendance summary helper, which has its own import
+        patch("frappe_slack_connector.tasks.attendance_summary.custom_fields_exist", return_value=custom_fields),
+        patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.commit"),
         patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_balance_on", **balance_kwargs) as mock_balance_on,
         patch(f"{LEAVE_OVERRIDE_MODULE}.generate_error_log") as mock_error_log,
     ):
@@ -458,11 +463,13 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         settings = _build_slack_settings_mock(send_attendance_updates=0)
         with (
             patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
-            _leave_override_env(doc=doc, settings=settings),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_balance_on", return_value=10.0),
+            _leave_override_env(doc=doc, settings=settings) as mocks,
         ):
             send_leave_notification_bg(doc)
         for call in mock_slack.slack_app.client.chat_postMessage.call_args_list:
             self.assertNotIn("thread_ts", call.kwargs)
+        mocks.error_log.assert_not_called()
 
     def test_skips_thread_post_when_announce_in_thread_is_false(self):
         """With announce_in_thread=False (imported rows) the thread helper is never called; the approver DM still goes out."""
@@ -471,6 +478,7 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         with (
             patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
             patch(f"{LEAVE_OVERRIDE_MODULE}.post_same_day_leave_to_attendance_thread") as mock_thread,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_balance_on", return_value=10.0),
             _leave_override_env(doc=doc),
         ):
             send_leave_notification_bg(doc, announce_in_thread=False)

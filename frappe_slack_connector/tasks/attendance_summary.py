@@ -3,11 +3,11 @@ import json
 from datetime import datetime
 
 import frappe
-from erpnext.setup.doctype.holiday_list.holiday_list import is_holiday
 from frappe import _
 from frappe.utils import get_time, getdate, today
 from frappe.utils.synchronization import filelock
 
+from frappe_slack_connector.db.employee import is_company_holiday
 from frappe_slack_connector.db.leave_application import (
     custom_fields_exist,
     get_employees_on_leave,
@@ -32,8 +32,10 @@ def attendance_channel() -> None:
     Enqueues the background job to post the message
     Conditions:
      - Check send attendance updates is enabled
-     - Check if the current date is a working day (weekends, holidays)
+     - Check if the current date is a weekday
      - Check if current date notification is sent
+     - On a company holiday, post only if someone on another holiday
+       list (support, US) is on leave; otherwise there is nothing to report
      - If not, send the notification, set the updated date in Slack Settings
     """
     slack_settings = frappe.get_single("Slack Settings")
@@ -43,7 +45,6 @@ def attendance_channel() -> None:
     if (
         slack_settings.send_attendance_updates != 1
         or current_day > 4  # sat = 5, sun = 6
-        or is_holiday(current_date)
         or (
             slack_settings.last_attendance_date is not None
             and slack_settings.last_attendance_date == frappe.utils.nowdate()
@@ -52,8 +53,15 @@ def attendance_channel() -> None:
     ):
         return
 
+    # get_employees_on_leave already drops employees whose own holiday list
+    # marks today a holiday, so on a company holiday only employees on
+    # another calendar remain. Nobody left means a day off for everyone.
+    users_on_leave = get_employees_on_leave()
+    if not users_on_leave and is_company_holiday(current_date):
+        return
+
     # Send the attendance summary to the Slack channel
-    message_ts, channel_id = send_notification(get_attendance_title(slack_settings)) or (None, None)
+    message_ts, channel_id = send_notification(get_attendance_title(slack_settings), users_on_leave) or (None, None)
 
     # Stamp the day with a direct write: a full save() would write back every
     # column of the in-memory doc loaded before the post, overwriting whatever
@@ -130,13 +138,18 @@ def remember_attendance_hash(message_ts: str, content_hash: str) -> None:
         )
 
 
-def build_attendance_blocks(attendance_title: str, *, updated_at: str | None = None) -> list:
+def build_attendance_blocks(
+    attendance_title: str, *, updated_at: str | None = None, users_on_leave: list | None = None
+) -> list:
     """
     Build the Slack blocks for today's attendance summary
     Runs the leave query, groups the employees by leave type and formats
     the result. When ``updated_at`` is given a trailing context block is
     appended so readers can tell the message was edited in place; this is
     the only difference between the morning post and an in-place update.
+
+    ``users_on_leave`` is the result of ``get_employees_on_leave``; it is
+    fetched here when the caller has not already done so
     """
     mention_users = frappe.db.get_single_value("Slack Settings", "mention_user")
     leave_groups = {"Full Day": [], "Half Day": []}
@@ -144,7 +157,8 @@ def build_attendance_blocks(attendance_title: str, *, updated_at: str | None = N
         leave_groups["First-Half"] = []
         leave_groups["Second-Half"] = []
 
-    users_on_leave = get_employees_on_leave()
+    if users_on_leave is None:
+        users_on_leave = get_employees_on_leave()
 
     if users_on_leave:
         # Batch fetch employee user_ids
@@ -201,7 +215,7 @@ def build_attendance_blocks(attendance_title: str, *, updated_at: str | None = N
     return blocks
 
 
-def send_notification(attendance_title: str) -> tuple[str, str] | None:
+def send_notification(attendance_title: str, users_on_leave: list | None = None) -> tuple[str, str] | None:
     """
     Background job to post the attendance summary to the Slack channel
     Returns the message timestamp and the ID of the channel it landed in
@@ -209,7 +223,14 @@ def send_notification(attendance_title: str) -> tuple[str, str] | None:
     successful
     """
     slack = SlackIntegration()
-    blocks = build_attendance_blocks(attendance_title)
+    if not slack.SLACK_CHANNEL_ID:
+        generate_error_log(
+            title=_("Attendance channel not set"),
+            message=_("Set the Attendance Channel ID in Slack Settings."),
+        )
+        return None
+
+    blocks = build_attendance_blocks(attendance_title, users_on_leave=users_on_leave)
 
     try:
         message = slack.slack_app.client.chat_postMessage(

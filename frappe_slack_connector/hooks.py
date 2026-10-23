@@ -174,10 +174,12 @@ doc_events = {
         "on_discard": [
             "frappe_slack_connector.override.leave_application.on_update_refresh_attendance_summary",
             "frappe_slack_connector.override.leave_application.on_update_withdraw_attendance_reply",
+            "frappe_slack_connector.override.leave_application.on_discard_notify_applicant",
         ],
         "on_trash": [
             "frappe_slack_connector.override.leave_application.on_trash_withdraw_attendance_reply",
             "frappe_slack_connector.override.leave_application.on_trash_refresh_attendance_summary",
+            "frappe_slack_connector.override.leave_application.on_trash_notify_applicant",
         ],
     },
 }

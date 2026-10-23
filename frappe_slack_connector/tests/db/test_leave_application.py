@@ -98,7 +98,9 @@ class TestRejectLeave(IntegrationTestCase):
 class TestGetEmployeesOnLeave(IntegrationTestCase):
     """Rows are written with ``db_insert`` so no Leave Application / Employee
     controller validation (allocations, approvers, holiday lists) runs. The
-    function under test only reads the two tables, so that is all it needs."""
+    function under test reads the two tables and resolves each employee's
+    holiday list; that lookup is patched in ``setUp`` (see there), and has its
+    own on-site test in ``test_employee.py``."""
 
     ACTIVE_EMPLOYEE = "_T-FSC-EMP-ACTIVE"
     LEFT_EMPLOYEE = "_T-FSC-EMP-LEFT"
@@ -165,34 +167,43 @@ class TestGetEmployeesOnLeave(IntegrationTestCase):
                 }
             ).db_insert()
 
+    def setUp(self):
+        # The fixture employees have no holiday list, so the lookup falls back to
+        # the company's; on a weekly off or a public holiday that would drop every
+        # fixture employee and make these assertions vacuous. The holiday rule has
+        # its own test below, which overrides this patch
+        super().setUp()
+        patcher = patch(f"{LEAVE_DB_MODULE}.get_employees_on_holiday", return_value=set())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _employees_on_leave(self) -> set[str]:
+        on_leave = {row.employee for row in get_employees_on_leave()}
+        # Positive control: an exclusion test must not pass because nothing was returned
+        self.assertIn(self.ACTIVE_EMPLOYEE, on_leave)
+        return on_leave
+
     def test_excludes_employees_who_are_not_active(self):
         """An approved leave for an employee whose status is no longer Active must not be reported."""
-        with patch(f"{LEAVE_DB_MODULE}.get_employees_on_holiday", return_value=set()):
-            on_leave = {row.employee for row in get_employees_on_leave()}
-        self.assertIn(self.ACTIVE_EMPLOYEE, on_leave)
-        self.assertNotIn(self.LEFT_EMPLOYEE, on_leave)
+        self.assertNotIn(self.LEFT_EMPLOYEE, self._employees_on_leave())
 
     def test_includes_open_and_approved_leave(self):
         """Leave is approved by default, so both Open (draft) and Approved (submitted) leave covering today is reported."""
-        on_leave = {row.employee for row in get_employees_on_leave()}
-        self.assertIn(self.OPEN_EMPLOYEE, on_leave)
-        self.assertIn(self.ACTIVE_EMPLOYEE, on_leave)
+        self.assertIn(self.OPEN_EMPLOYEE, self._employees_on_leave())
 
     def test_excludes_rejected_leave(self):
         """A submitted leave with status Rejected covering today is not reported, so a rebuilt summary drops the person."""
-        on_leave = {row.employee for row in get_employees_on_leave()}
-        self.assertNotIn(self.REJECTED_EMPLOYEE, on_leave)
+        self.assertNotIn(self.REJECTED_EMPLOYEE, self._employees_on_leave())
 
     def test_excludes_cancelled_and_discarded_leave(self):
         """A cancelled submitted leave and a discarded draft (both status Cancelled, docstatus 2) covering today are not reported."""
-        on_leave = {row.employee for row in get_employees_on_leave()}
+        on_leave = self._employees_on_leave()
         self.assertNotIn(self.CANCELLED_EMPLOYEE, on_leave)
         self.assertNotIn(self.DISCARDED_EMPLOYEE, on_leave)
 
     def test_excludes_cancelled_docstatus_even_when_status_still_approved(self):
         """A leave at docstatus 2 whose status was left at Approved (cancel with ignore_validate skips HRMS before_cancel) is excluded by the docstatus filter."""
-        on_leave = {row.employee for row in get_employees_on_leave()}
-        self.assertNotIn(self.FORCE_CANCELLED_EMPLOYEE, on_leave)
+        self.assertNotIn(self.FORCE_CANCELLED_EMPLOYEE, self._employees_on_leave())
 
     def test_excludes_employees_for_whom_today_is_a_holiday(self):
         """An employee whose own holiday list marks today a holiday is not on leave today, even with a leave covering the date."""
@@ -201,6 +212,8 @@ class TestGetEmployeesOnLeave(IntegrationTestCase):
         ) as mock_on_holiday:
             on_leave = {row.employee for row in get_employees_on_leave()}
         self.assertNotIn(self.ACTIVE_EMPLOYEE, on_leave)
+        # Positive control: only the employee on holiday is dropped
+        self.assertIn(self.OPEN_EMPLOYEE, on_leave)
         # Only active employees are checked, and against today.
         mock_on_holiday.assert_called_once()
         checked, on_date = mock_on_holiday.call_args.args

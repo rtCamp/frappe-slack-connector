@@ -1,6 +1,9 @@
+import unittest
 from unittest.mock import patch
 
+import frappe
 from frappe.tests import IntegrationTestCase
+from frappe.utils import today
 
 from frappe_slack_connector.db.employee import (
     get_default_holiday_list,
@@ -95,3 +98,82 @@ class TestGetEmployeesOnHoliday(IntegrationTestCase):
         ):
             self.assertEqual(get_employees_on_holiday(["EMP-1", "EMP-2"], "2026-10-02"), set())
         mock_get_all.assert_not_called()
+
+
+class TestGetEmployeesOnHolidayOnSite(IntegrationTestCase):
+    """
+    The real lookup, against rows on the site: HRMS v16 resolves an
+    employee's holiday list through submitted Holiday List Assignment rows
+    (``Employee.holiday_list`` is ignored), then the Holiday rows of the
+    distinct lists are read in one query. Fixtures are written with
+    ``db_insert`` so neither controller runs; the class transaction rolls
+    them back.
+    """
+
+    ON_HOLIDAY = "_T-FSC-HOL-ON"
+    WORKING = "_T-FSC-HOL-OFF"
+    LIST_WITH_TODAY = "_T-FSC-HL-TODAY"
+    LIST_WITHOUT_TODAY = "_T-FSC-HL-NONE"
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        if not frappe.db.exists("DocType", "Holiday List Assignment"):
+            raise unittest.SkipTest("Holiday List Assignment needs HRMS v16")
+        company = frappe.defaults.get_global_default("company")
+        day = today()
+        for name in (cls.LIST_WITH_TODAY, cls.LIST_WITHOUT_TODAY):
+            frappe.get_doc(
+                {
+                    "doctype": "Holiday List",
+                    "name": name,
+                    "holiday_list_name": name,
+                    "from_date": "2020-01-01",
+                    "to_date": "2099-12-31",
+                }
+            ).db_insert()
+        frappe.get_doc(
+            {
+                "doctype": "Holiday",
+                "name": "_T-FSC-HOLIDAY-TODAY",
+                "parent": cls.LIST_WITH_TODAY,
+                "parenttype": "Holiday List",
+                "parentfield": "holidays",
+                "idx": 1,
+                "holiday_date": day,
+                "description": "test holiday",
+            }
+        ).db_insert()
+        for employee, holiday_list in ((cls.ON_HOLIDAY, cls.LIST_WITH_TODAY), (cls.WORKING, cls.LIST_WITHOUT_TODAY)):
+            frappe.get_doc(
+                {
+                    "doctype": "Employee",
+                    "name": employee,
+                    "first_name": employee,
+                    "employee_name": employee,
+                    "status": "Active",
+                    "company": company,
+                    "gender": "Other",
+                    "date_of_birth": "1990-01-01",
+                    "date_of_joining": "2020-01-01",
+                }
+            ).db_insert()
+            frappe.get_doc(
+                {
+                    "doctype": "Holiday List Assignment",
+                    "name": f"_T-FSC-HLA-{employee}",
+                    "docstatus": 1,
+                    "applicable_for": "Employee",
+                    "assigned_to": employee,
+                    "holiday_list": holiday_list,
+                    "from_date": "2020-01-01",
+                }
+            ).db_insert()
+
+    def test_resolves_each_employees_own_assignment_and_reads_the_holiday_rows(self):
+        """The employee whose assigned list marks today a holiday is returned; the one on a list without today is not."""
+        on_holiday = get_employees_on_holiday([self.ON_HOLIDAY, self.WORKING], today())
+        self.assertEqual(on_holiday, {self.ON_HOLIDAY})
+
+    def test_another_date_is_not_a_holiday_for_either(self):
+        self.assertEqual(get_employees_on_holiday([self.ON_HOLIDAY, self.WORKING], "2020-06-15"), set())

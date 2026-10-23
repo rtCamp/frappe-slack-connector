@@ -98,7 +98,8 @@ def slack_time_token(moment: datetime, *, with_date: bool = False) -> str:
     aware = moment.replace(tzinfo=ZoneInfo(get_system_timezone()))
     time_text = moment.strftime("%I:%M %p").lstrip("0")
     if with_date:
-        return f"<!date^{int(aware.timestamp())}^{{date_short_pretty}} at {{time}}|{moment.strftime('%b %d, %Y')} at {time_text}>"
+        day_text = f"{moment.strftime('%b')} {moment.day}, {moment.year}"
+        return f"<!date^{int(aware.timestamp())}^{{date_short_pretty}} at {{time}}|{day_text} at {time_text}>"
     return f"<!date^{int(aware.timestamp())}^{{time}}|{time_text}>"
 
 

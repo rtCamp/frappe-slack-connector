@@ -892,6 +892,12 @@ class TestSlackTimeToken(IntegrationTestCase):
         epoch = int(datetime(2026, 6, 15, 9, 2, tzinfo=UTC).timestamp())
         self.assertEqual(token, f"<!date^{epoch}^{{time}}|2:32 PM>")
 
+    def test_with_date_renders_a_pretty_day_and_an_unpadded_fallback(self):
+        with patch(f"{ATTENDANCE_MODULE}.get_system_timezone", return_value="UTC"):
+            token = slack_time_token(datetime(2026, 6, 5, 14, 32), with_date=True)
+        epoch = int(datetime(2026, 6, 5, 14, 32, tzinfo=UTC).timestamp())
+        self.assertEqual(token, f"<!date^{epoch}^{{date_short_pretty}} at {{time}}|Jun 5, 2026 at 2:32 PM>")
+
     def test_fallback_drops_the_leading_zero_and_keeps_am(self):
         with patch(f"{ATTENDANCE_MODULE}.get_system_timezone", return_value="UTC"):
             token = slack_time_token(datetime(2026, 6, 15, 8, 5))

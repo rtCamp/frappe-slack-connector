@@ -16,6 +16,11 @@ from frappe_slack_connector.override.leave_application import (
 from frappe_slack_connector.slack.app import SlackIntegration
 
 LEAVE_DECISION_FIELDS = ["status", "docstatus", "modified_by", "modified", "leave_approver"]
+# What a decision landing between the handler's read and its action raises: the
+# save finds the row changed (TimestampMismatchError); on MariaDB with snapshot
+# isolation the locking read in that check fails instead, which Frappe reports
+# as a deadlock; the workflow's own state check is kept for completeness
+RACE_ERRORS = (WorkflowTransitionError, frappe.TimestampMismatchError, frappe.QueryDeadlockError)
 
 
 def _current_decision(leave_id: str) -> dict | None:
@@ -29,10 +34,23 @@ def _current_decision(leave_id: str) -> dict | None:
     if not is_leave_decided(row.status, row.docstatus):
         return None
     status = effective_leave_status(row.status, row.docstatus)
+    # modified_by / modified are the last writer and write, which a later edit
+    # of a decided leave can move. The workflow records who took the last
+    # transition and when as a "Workflow" comment; prefer that when present
+    decided_by, decided_at = row.modified_by, row.modified
+    transitions = frappe.get_all(
+        "Comment",
+        filters={"reference_doctype": "Leave Application", "reference_name": leave_id, "comment_type": "Workflow"},
+        fields=["owner", "creation"],
+        order_by="creation desc",
+        limit=1,
+    )
+    if transitions:
+        decided_by, decided_at = transitions[0].owner, transitions[0].creation
     return {
         "status": status,
-        "decided_by": _decided_by(row.modified_by, row.leave_approver, status),
-        "decided_at": row.modified,
+        "decided_by": _decided_by(decided_by, row.leave_approver, status),
+        "decided_at": decided_at,
     }
 
 
@@ -67,13 +85,11 @@ def handler(slack: SlackIntegration, payload: dict):
                     approve_leave(leave_id)
                 else:
                     reject_leave(leave_id)
-            except WorkflowTransitionError, frappe.TimestampMismatchError:
+            except RACE_ERRORS:
                 # Decided between the read above and the action (a race with
-                # another approver or a double click). The workflow raises the
-                # first when it loads the new state, the save the second when
-                # it finds the row changed. Under REPEATABLE READ the re-read
-                # would see the same snapshot as the first read, so end the
-                # transaction first, then report the decision that landed
+                # another approver or a double click). Under REPEATABLE READ
+                # the re-read would see the same snapshot as the first read, so
+                # end the transaction first, then report the decision that landed
                 frappe.db.rollback()
                 decision = _current_decision(leave_id)
                 if decision is None:

@@ -228,6 +228,8 @@ APPLICANT_DECISION_HEADERS = {
     "Rejected": ":x: Leave Request Rejected",
     "Cancelled": ":no_entry_sign: Leave Request Cancelled",
 }
+# Reasons are unbounded Small Text; Slack caps a text element around 3000 characters
+REASON_MAX_CHARS = 3000
 STATUS_EMOJI = {
     "Open": ":stopwatch:",
     "Approved": ":white_check_mark:",
@@ -387,6 +389,10 @@ def on_trash_notify_applicant(doc: Document, method: str | None = None):
     its rewrite: once deleted, the leave can be neither checked nor looked
     up, so the job gets everything it needs here
     """
+    # A decided leave's DM already shows its real outcome, who took it and
+    # when; purging the row must not overwrite that with the deleter
+    if is_leave_decided(doc.status, doc.docstatus):
+        return
     channel, ts = get_applicant_message_ref(doc.name)
     if not (channel and ts):
         return
@@ -398,14 +404,19 @@ def on_trash_notify_applicant(doc: Document, method: str | None = None):
         channel=channel,
         ts=ts,
         decided_by=frappe.session.user,
+        deleted_at=frappe.utils.now_datetime(),
     )
 
 
-def send_leave_deleted_to_applicant(doc: Document, channel: str, ts: str, decided_by: str | None = None):
+def send_leave_deleted_to_applicant(
+    doc: Document, channel: str, ts: str, decided_by: str | None = None, deleted_at=None
+):
     """
-    Rewrite the applicant's DM for a deleted leave as a cancellation. No
-    status check or reference lookup: the row is gone. No balance either,
-    HRMS cannot authorise the lookup for a leave that no longer exists
+    Rewrite the applicant's DM for a deleted open leave as a cancellation.
+    No status check or reference lookup: the row is gone. No balance
+    either, HRMS cannot authorise the lookup for a leave that no longer
+    exists. Same lock and same-message check as the decision job, so a
+    decision job still in flight cannot put an older status back
     """
     try:
         slack = SlackIntegration()
@@ -418,12 +429,15 @@ def send_leave_deleted_to_applicant(doc: Document, channel: str, ts: str, decide
             user_id,
             status=status,
             status_by=_format_decider(slack, _decided_by(decided_by, doc.leave_approver, status)),
-            decided_at=frappe.utils.now_datetime(),
+            decided_at=deleted_at or frappe.utils.now_datetime(),
             unpaid=bool(frappe.db.get_value("Leave Type", doc.leave_type, "is_lwp")),
         )
-        slack.slack_app.client.chat_update(
-            channel=channel, ts=ts, **leave_message_payload(blocks, text=_applicant_text(status))
-        )
+        with _applicant_dm_lock(doc.name):
+            if not _is_applicant_dm(doc, channel, ts):
+                return
+            slack.slack_app.client.chat_update(
+                channel=channel, ts=ts, **leave_message_payload(blocks, text=_applicant_text(status))
+            )
     except Exception as e:
         generate_error_log(
             title="Error updating the applicant DM for a deleted leave",
@@ -757,7 +771,9 @@ def reason_blocks(reason: str | None) -> list:
     a section would let ``_``, ``*``, ``<!channel>`` or a disguised link in
     the reason format or ping its way into the approver's DM
     """
-    lines = [line.strip() for line in (reason or "").splitlines() if line.strip()] or ["No reason provided"]
+    text = "\n".join(line.rstrip() for line in (reason or "").splitlines()).strip() or "No reason provided"
+    if len(text) > REASON_MAX_CHARS:
+        text = text[: REASON_MAX_CHARS - 1] + "…"
     return [
         {"type": "section", "text": {"type": "mrkdwn", "text": ":speech_balloon: *Reason*"}},
         {
@@ -765,7 +781,7 @@ def reason_blocks(reason: str | None) -> list:
             "elements": [
                 {
                     "type": "rich_text_quote",
-                    "elements": [{"type": "text", "text": "\n".join(lines), "style": {"italic": True}}],
+                    "elements": [{"type": "text", "text": text, "style": {"italic": True}}],
                 }
             ],
         },

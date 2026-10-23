@@ -20,10 +20,12 @@ def _leave_row(status="Open", docstatus=0, modified_by="approver@x.com", modifie
 
 
 @contextlib.contextmanager
-def _patch_leave(row=None, *, get_value=None):
-    """Patch the leave lookup (``row``, or a ``get_value`` side effect) and pin the site timezone: patching
-    frappe.db.get_value globally would otherwise break the timezone lookup behind the decision-time token."""
+def _patch_leave(row=None, *, get_value=None, transitions=()):
+    """Patch the leave lookup (``row``, or a ``get_value`` side effect), the leave's "Workflow" comments
+    (``transitions``) and pin the site timezone: patching frappe.db.get_value globally would otherwise break
+    the timezone lookup behind the decision-time token."""
     with contextlib.ExitStack() as stack:
+        stack.enter_context(patch(f"{APPROVE_LEAVE_MODULE}.frappe.get_all", return_value=list(transitions)))
         if get_value is not None:
             stack.enter_context(patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.get_value", side_effect=get_value))
         else:
@@ -217,6 +219,30 @@ class TestApproveLeaveHandler(IntegrationTestCase):
     def test_race_lost_in_the_save_reports_the_other_decision(self):
         """The row changed after the workflow's non-locking load: save() raises TimestampMismatchError."""
         self._race(frappe.TimestampMismatchError("Leave Application has been modified after you have opened it"))
+
+    def test_race_lost_in_a_locking_read_reports_the_other_decision(self):
+        """On MariaDB with snapshot isolation the locking read in the timestamp check fails, which Frappe reports as a deadlock."""
+        self._race(frappe.QueryDeadlockError("Record has changed since last read in table 'tabLeave Application'"))
+
+    def test_stale_click_takes_the_decider_and_time_from_the_last_workflow_transition(self):
+        """modified_by/modified move with any later edit; the workflow's own comment records who took the transition and when."""
+        payload = _build_action_payload(action_id="leave_approve")
+        mock_slack = MagicMock()
+        row = _leave_row(status="Rejected", docstatus=0, modified_by="editor@x.com", modified="2026-06-20 08:00:00")
+        transition = frappe._dict(owner="bob@x.com", creation="2026-06-12 09:00:00")
+        with (
+            patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
+            _patch_leave(row, transitions=[transition]),
+            patch(f"{APPROVE_LEAVE_MODULE}.approve_leave") as mock_approve,
+            patch(f"{APPROVE_LEAVE_MODULE}._format_decider", return_value="<@U-bob>") as mock_decider,
+        ):
+            handler(slack=mock_slack, payload=payload)
+        mock_approve.assert_not_called()
+        mock_decider.assert_called_once_with(mock_slack, "bob@x.com")
+        kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
+        status_line = next(b["elements"][0]["text"] for b in kwargs["blocks"] if b.get("type") == "context")
+        self.assertTrue(status_line.endswith("|Jun 12, 2026 at 9:00 AM>_"), status_line)
 
     def test_race_that_leaves_the_leave_open_still_raises(self):
         """A workflow error on a leave that is still open is a real error: the modal shows it."""

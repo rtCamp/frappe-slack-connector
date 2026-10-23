@@ -2869,13 +2869,19 @@ class TestReasonBlocks(IntegrationTestCase):
             _reason_quote(blocks),
             {
                 "type": "text",
-                "text": "my_friend's wedding_\n*urgent* <!channel> & <https://evil|Approve here>",
+                "text": "my_friend's wedding_\n\n*urgent* <!channel> & <https://evil|Approve here>",
                 "style": {"italic": True},
             },
         )
 
     def test_empty_reason_reads_no_reason_provided(self):
         self.assertEqual(_reason_quote(reason_blocks("  \n"))["text"], "No reason provided")
+
+    def test_keeps_paragraph_breaks_and_caps_very_long_reasons(self):
+        self.assertEqual(_reason_quote(reason_blocks("first  \n\nsecond\n"))["text"], "first\n\nsecond")
+        text = _reason_quote(reason_blocks("x" * 3500))["text"]
+        self.assertEqual(len(text), 3000)
+        self.assertTrue(text.endswith("…"))
 
 
 class TestFormatDecider(IntegrationTestCase):
@@ -2916,6 +2922,19 @@ class TestDiscardAndTrashNotifyApplicant(IntegrationTestCase):
         kwargs = mock_enqueue.call_args.kwargs
         self.assertIs(mock_enqueue.call_args.args[0], send_leave_deleted_to_applicant)
         self.assertEqual((kwargs["channel"], kwargs["ts"]), ("D0FSC0001", "1700000000.000001"))
+        self.assertIsNotNone(kwargs["deleted_at"])
+
+    def test_trash_of_a_decided_leave_leaves_the_dm_alone(self):
+        """A rejected draft or a cancelled leave already shows its real outcome; purging the row must not rewrite it as cancelled by the deleter."""
+        for status, docstatus in (("Rejected", 0), ("Cancelled", 2), ("Approved", 1)):
+            doc = _build_leave_doc(status=status, docstatus=docstatus)
+            with (
+                patch(f"{LEAVE_OVERRIDE_MODULE}.get_applicant_message_ref") as mock_ref,
+                patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue,
+            ):
+                on_trash_notify_applicant(doc, method="on_trash")
+            mock_ref.assert_not_called()
+            mock_enqueue.assert_not_called()
 
     def test_trash_without_a_stored_dm_queues_nothing(self):
         doc = _build_leave_doc()
@@ -2927,7 +2946,37 @@ class TestDiscardAndTrashNotifyApplicant(IntegrationTestCase):
         mock_enqueue.assert_not_called()
 
     def test_deleted_leave_dm_is_rewritten_as_cancelled_without_a_balance_lookup(self):
-        """The row is gone: the DM is edited into a cancellation naming the deleter, and HRMS is not asked for a balance."""
+        """The row is gone: the DM is edited into a cancellation naming the deleter at the deletion time, and HRMS is not asked for a balance."""
+        doc = _build_leave_doc()
+        mock_slack = MagicMock()
+        slack_ids = {"hr@x.com": "U-hr", "approver@x.com": "U-approver"}
+        mock_slack.get_slack_user_id.side_effect = lambda *a, **k: (
+            "U-applicant" if "employee_id" in k else slack_ids.get(k.get("user_email"))
+        )
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=0),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_single_value", return_value=1),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_balance_on") as mock_balance,
+        ):
+            send_leave_deleted_to_applicant(
+                doc,
+                channel="D0FSC0001",
+                ts="1700000000.000001",
+                decided_by="hr@x.com",
+                deleted_at=datetime(2026, 6, 12, 9, 30),
+            )
+        mock_balance.assert_not_called()
+        kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
+        self.assertEqual((kwargs["channel"], kwargs["ts"]), ("D0FSC0001", "1700000000.000001"))
+        self.assertEqual(kwargs["text"], "Your leave request has been cancelled")
+        status_line = kwargs["blocks"][-1]["elements"][0]["text"]
+        self.assertIn("*Status:* :no_entry_sign: *Cancelled* by <@U-hr> · _<!date^", status_line)
+        self.assertTrue(status_line.endswith("|Jun 12, 2026 at 9:30 AM>_"))
+        self.assertNotIn("Balance before this request", _blocks_text(kwargs["blocks"]))
+
+    def test_deleted_leave_dm_refuses_a_reference_that_is_not_a_dm(self):
+        """Same guard as the decision job: never edit anything but the applicant's DM."""
         doc = _build_leave_doc()
         mock_slack = MagicMock()
         mock_slack.get_slack_user_id.side_effect = _build_slack_user_lookup()
@@ -2935,17 +2984,11 @@ class TestDiscardAndTrashNotifyApplicant(IntegrationTestCase):
             patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=0),
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_single_value", return_value=1),
-            patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_balance_on") as mock_balance,
-            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.utils.now_datetime", return_value=datetime(2026, 6, 12, 9, 30)),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.generate_error_log") as mock_log,
         ):
-            send_leave_deleted_to_applicant(doc, channel="D0FSC0001", ts="1700000000.000001", decided_by="hr@x.com")
-        mock_balance.assert_not_called()
-        kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
-        self.assertEqual((kwargs["channel"], kwargs["ts"]), ("D0FSC0001", "1700000000.000001"))
-        self.assertEqual(kwargs["text"], "Your leave request has been cancelled")
-        status_line = kwargs["blocks"][-1]["elements"][0]["text"]
-        self.assertIn("*Status:* :no_entry_sign: *Cancelled* by <@U-approver> · _<!date^", status_line)
-        self.assertNotIn("Balance before this request", _blocks_text(kwargs["blocks"]))
+            send_leave_deleted_to_applicant(doc, channel="C0MORNING", ts="1700000000.000001", decided_by="hr@x.com")
+        mock_slack.slack_app.client.chat_update.assert_not_called()
+        mock_log.assert_called_once()
 
     def test_hooks_register_the_discard_and_trash_notifications(self):
         leave_events = frappe.get_hooks("doc_events")["Leave Application"]

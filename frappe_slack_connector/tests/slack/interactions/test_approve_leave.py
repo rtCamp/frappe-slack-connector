@@ -1,11 +1,41 @@
+import contextlib
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
+import frappe
+from frappe.model.workflow import WorkflowTransitionError
 from frappe.tests import IntegrationTestCase
 
 from frappe_slack_connector.slack.interactions.approve_leave import handler
 from frappe_slack_connector.tests import TEST_SLACK_USER_ID, TEST_USER
 
 APPROVE_LEAVE_MODULE = "frappe_slack_connector.slack.interactions.approve_leave"
+
+
+def _leave_row(status="Open", docstatus=0, modified_by="approver@x.com", modified="2026-06-10 10:00:00"):
+    """What frappe.db.get_value returns for the leave the button refers to."""
+    return frappe._dict(
+        status=status, docstatus=docstatus, modified_by=modified_by, modified=modified, leave_approver="approver@x.com"
+    )
+
+
+@contextlib.contextmanager
+def _patch_leave(row=None, *, get_value=None):
+    """Patch the leave lookup (``row``, or a ``get_value`` side effect) and pin the site timezone: patching
+    frappe.db.get_value globally would otherwise break the timezone lookup behind the decision-time token."""
+    with contextlib.ExitStack() as stack:
+        if get_value is not None:
+            stack.enter_context(patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.get_value", side_effect=get_value))
+        else:
+            stack.enter_context(patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.get_value", return_value=row or _leave_row()))
+        stack.enter_context(
+            patch("frappe_slack_connector.tasks.attendance_summary.get_system_timezone", return_value="Asia/Kolkata")
+        )
+        # now_datetime() also reads the site timezone through frappe.db.get_value
+        stack.enter_context(
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.utils.now_datetime", return_value=datetime(2026, 6, 10, 10, 0))
+        )
+        yield
 
 
 def _build_action_payload(*, action_id="leave_approve", leave_id="HR-LAP-0001"):
@@ -34,6 +64,7 @@ class TestApproveLeaveHandler(IntegrationTestCase):
         mock_slack = MagicMock()
         with (
             patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
+            _patch_leave(),
             patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user") as mock_set_user,
             patch(f"{APPROVE_LEAVE_MODULE}.approve_leave") as mock_approve,
             patch(f"{APPROVE_LEAVE_MODULE}.reject_leave") as mock_reject,
@@ -49,6 +80,7 @@ class TestApproveLeaveHandler(IntegrationTestCase):
         mock_slack = MagicMock()
         with (
             patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
+            _patch_leave(),
             patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
             patch(f"{APPROVE_LEAVE_MODULE}.approve_leave") as mock_approve,
             patch(f"{APPROVE_LEAVE_MODULE}.reject_leave") as mock_reject,
@@ -63,6 +95,7 @@ class TestApproveLeaveHandler(IntegrationTestCase):
         mock_slack = MagicMock()
         with (
             patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
+            _patch_leave(),
             patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
             patch(f"{APPROVE_LEAVE_MODULE}.approve_leave"),
             patch(f"{APPROVE_LEAVE_MODULE}.reject_leave"),
@@ -86,6 +119,7 @@ class TestApproveLeaveHandler(IntegrationTestCase):
         mock_slack = MagicMock()
         with (
             patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
+            _patch_leave(),
             patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
             patch(f"{APPROVE_LEAVE_MODULE}.approve_leave"),
             patch(f"{APPROVE_LEAVE_MODULE}.reject_leave"),
@@ -101,6 +135,7 @@ class TestApproveLeaveHandler(IntegrationTestCase):
         mock_slack = MagicMock()
         with (
             patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
+            _patch_leave(),
             patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
             patch(f"{APPROVE_LEAVE_MODULE}.approve_leave", side_effect=RuntimeError("boom")),
             patch(f"{APPROVE_LEAVE_MODULE}.reject_leave"),
@@ -110,4 +145,81 @@ class TestApproveLeaveHandler(IntegrationTestCase):
         kwargs = mock_slack.slack_app.client.views_open.call_args.kwargs
         self.assertEqual(kwargs["trigger_id"], "T-trigger-1")
         self.assertEqual(kwargs["view"]["title"]["text"], "Error")
+        mock_slack.slack_app.client.chat_update.assert_not_called()
+
+    def test_stale_click_on_a_decided_leave_reports_that_decision_without_acting(self):
+        """Approve clicked after the leave was auto-approved (Administrator) or decided in Desk: no workflow call, the message shows the real decision, who took it and when."""
+        payload = _build_action_payload(action_id="leave_approve")
+        mock_slack = MagicMock()
+        row = _leave_row(status="Approved", docstatus=1, modified_by="Administrator", modified="2026-06-11 03:00:00")
+        with (
+            patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
+            _patch_leave(row),
+            patch(f"{APPROVE_LEAVE_MODULE}.approve_leave") as mock_approve,
+            patch(f"{APPROVE_LEAVE_MODULE}._format_decider", return_value="Administrator") as mock_decider,
+        ):
+            handler(slack=mock_slack, payload=payload)
+        mock_approve.assert_not_called()
+        mock_slack.slack_app.client.views_open.assert_not_called()
+        mock_decider.assert_called_once_with(mock_slack, "Administrator")
+        kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
+        status_line = next(b["elements"][0]["text"] for b in kwargs["blocks"] if b.get("type") == "context")
+        self.assertIn("*Status:* :white_check_mark: *Approved* by Administrator · _<!date^", status_line)
+        self.assertTrue(status_line.endswith("|Jun 11, 2026 at 3:00 AM>_"))
+        self.assertNotIn("leave_actions_block", [b.get("block_id") for b in kwargs["blocks"]])
+
+    def test_stale_click_on_a_cancelled_leave_shows_cancelled(self):
+        """A cancelled leave (docstatus 2) reads Cancelled whatever its status column says; Reject is not attempted."""
+        payload = _build_action_payload(action_id="leave_reject")
+        mock_slack = MagicMock()
+        row = _leave_row(status="Approved", docstatus=2, modified_by="alice@x.com")
+        with (
+            patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
+            _patch_leave(row),
+            patch(f"{APPROVE_LEAVE_MODULE}.reject_leave") as mock_reject,
+            patch(f"{APPROVE_LEAVE_MODULE}._format_decider", return_value="Alice"),
+        ):
+            handler(slack=mock_slack, payload=payload)
+        mock_reject.assert_not_called()
+        kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
+        status_line = next(b["elements"][0]["text"] for b in kwargs["blocks"] if b.get("type") == "context")
+        self.assertIn("*Status:* :no_entry_sign: *Cancelled* by Alice", status_line)
+        self.assertEqual(kwargs["text"], "Leave request cancelled")
+
+    def test_race_with_another_decision_reports_it_instead_of_the_workflow_error(self):
+        """The leave is open at the read but decided before apply_workflow runs: the workflow error is swallowed and the fresh decision is shown."""
+        payload = _build_action_payload(action_id="leave_approve")
+        mock_slack = MagicMock()
+        rows = iter([_leave_row(), _leave_row(status="Rejected", docstatus=1, modified_by="bob@x.com")])
+        with (
+            patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
+            _patch_leave(get_value=lambda *a, **k: next(rows)),
+            patch(
+                f"{APPROVE_LEAVE_MODULE}.approve_leave",
+                side_effect=WorkflowTransitionError("Not a valid Workflow Action"),
+            ),
+            patch(f"{APPROVE_LEAVE_MODULE}._format_decider", return_value="<@U-bob>"),
+        ):
+            handler(slack=mock_slack, payload=payload)
+        mock_slack.slack_app.client.views_open.assert_not_called()
+        kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
+        status_line = next(b["elements"][0]["text"] for b in kwargs["blocks"] if b.get("type") == "context")
+        self.assertIn("*Status:* :x: *Rejected* by <@U-bob>", status_line)
+
+    def test_unknown_leave_opens_the_error_modal(self):
+        payload = _build_action_payload(action_id="leave_approve", leave_id="HR-LAP-GONE")
+        mock_slack = MagicMock()
+        with (
+            patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
+            _patch_leave(get_value=lambda *a, **k: None),
+            patch(f"{APPROVE_LEAVE_MODULE}.approve_leave") as mock_approve,
+        ):
+            handler(slack=mock_slack, payload=payload)
+        mock_approve.assert_not_called()
+        view = mock_slack.slack_app.client.views_open.call_args.kwargs["view"]
+        self.assertIn("Leave Application HR-LAP-GONE not found", view["blocks"][2]["text"]["text"])
         mock_slack.slack_app.client.chat_update.assert_not_called()

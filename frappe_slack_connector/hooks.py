@@ -146,10 +146,34 @@ fixtures = [
 doc_events = {
     "Leave Application": {
         "after_insert": "frappe_slack_connector.override.leave_application.after_insert",
-        "on_update": "frappe_slack_connector.override.leave_application.on_update_refresh_attendance_summary",
-        "on_cancel": "frappe_slack_connector.override.leave_application.on_update_refresh_attendance_summary",
-        "on_discard": "frappe_slack_connector.override.leave_application.on_update_refresh_attendance_summary",
-        "on_trash": "frappe_slack_connector.override.leave_application.on_trash_refresh_attendance_summary",
+        "before_validate": [
+            "frappe_slack_connector.override.leave_application.restore_attendance_reply_ts",
+        ],
+        "before_update_after_submit": [
+            "frappe_slack_connector.override.leave_application.restore_attendance_reply_ts",
+        ],
+        "before_cancel": [
+            "frappe_slack_connector.override.leave_application.restore_attendance_reply_ts",
+        ],
+        "on_update": [
+            "frappe_slack_connector.override.leave_application.on_update_refresh_attendance_summary",
+            "frappe_slack_connector.override.leave_application.on_update_withdraw_attendance_reply",
+        ],
+        "on_update_after_submit": [
+            "frappe_slack_connector.override.leave_application.on_update_withdraw_attendance_reply",
+        ],
+        "on_cancel": [
+            "frappe_slack_connector.override.leave_application.on_update_refresh_attendance_summary",
+            "frappe_slack_connector.override.leave_application.on_update_withdraw_attendance_reply",
+        ],
+        "on_discard": [
+            "frappe_slack_connector.override.leave_application.on_update_refresh_attendance_summary",
+            "frappe_slack_connector.override.leave_application.on_update_withdraw_attendance_reply",
+        ],
+        "on_trash": [
+            "frappe_slack_connector.override.leave_application.on_trash_withdraw_attendance_reply",
+            "frappe_slack_connector.override.leave_application.on_trash_refresh_attendance_summary",
+        ],
     },
 }
 

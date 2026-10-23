@@ -1,3 +1,4 @@
+import html
 import traceback
 
 import frappe
@@ -17,10 +18,14 @@ def generate_error_log(
     """
     # The traceback, not just str(exception): frappe.log_error stores the message
     # it is given, and a bare "Not permitted" names no file or line
+    # The traceback goes to Error Log only: a msgprint reaches a Desk user
+    # (the "Test channel" button, the realtime attendance error), who gets the
+    # message and the exception text as before, not server paths and frames
+    log_message = message
     if exception:
-        exc = "".join(traceback.format_exception(exception))
-        message = f"{message}\nException:\n{exc}"
-    frappe.log_error(title="Slack: " + title, message=message)
+        log_message = f"{message}\nException:\n{''.join(traceback.format_exception(exception))}"
+        message = f"{message}\nException:\n{exception}"
+    frappe.log_error(title="Slack: " + title, message=log_message)
 
     if msgprint:
         frappe.msgprint(
@@ -31,35 +36,46 @@ def generate_error_log(
         )
 
 
+# Slack section text is capped at 3000 characters; leave room for the label and fences
+MESSAGE_MAX_CHARS = 2900
+
+
 def _clean_message(text) -> str:
     """
     Plain text for a Frappe message: lists joined, ``<br>`` kept as line
-    breaks, other HTML stripped
+    breaks, other HTML stripped, entities unescaped, length capped
     """
     if isinstance(text, list | tuple):
         text = "\n".join(str(t) for t in text)
     text = str(text or "")
     for br in ("<br>", "<br/>", "<br />"):
         text = text.replace(br, "\n")
-    return strip_html_tags(text).strip()
+    text = html.unescape(strip_html_tags(text)).strip()
+    if len(text) > MESSAGE_MAX_CHARS:
+        text = text[: MESSAGE_MAX_CHARS - 1] + "…"
+    return text
 
 
-def exception_message(exception: Exception) -> str:
+def exception_message(exception: Exception, *, since: int = 0) -> str:
     """
     Text to show a user for an exception: its own message, or, for a
-    permission failure, the reason Frappe recorded (``flags.error_message``,
-    or the last message it queued for the client), or the exception type.
-    Frappe's permission checks raise a bare PermissionError and leave the
-    explanation in ``msgprint``, so ``str(exception)`` alone renders an
-    empty error box. The queued messages are consulted only for permission
-    errors: an unrelated earlier message ("Email sent to ...") must not be
-    presented as the reason for some other failure
+    permission failure, the reason Frappe recorded (the last message it
+    queued for the client, then ``flags.error_message``), or the exception
+    type. Frappe's permission checks raise a bare PermissionError and leave
+    the explanation in ``msgprint``, so ``str(exception)`` alone renders an
+    empty error box.
+
+    The queued messages are consulted only for permission errors, and only
+    those queued at index ``since`` or later (the length of
+    ``frappe.get_message_log()`` when the action started): the log spans the
+    whole request, and an unrelated earlier message such as HRMS's "Email
+    sent to ..." must not be presented as the reason for the failure
     """
     text = _clean_message(str(exception))
     if text:
         return text
     if isinstance(exception, frappe.PermissionError):
-        for entry in reversed(frappe.get_message_log()):
+        for entry in reversed(frappe.get_message_log()[since:]):
             text = _clean_message(entry.get("message"))
             if text:
                 return text

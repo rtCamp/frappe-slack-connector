@@ -18,6 +18,8 @@ def handler(slack: SlackIntegration, payload: dict):
     """
     if not payload:
         frappe.throw(_("No payload found"), frappe.ValidationError)
+    # Messages queued before this point belong to earlier work in the request
+    messages_before = len(frappe.get_message_log())
     try:
         # Extract relevant information
         user_info = payload["user"]
@@ -101,7 +103,7 @@ def handler(slack: SlackIntegration, payload: dict):
     except Exception as e:
         # Undo a partial save: a hook raising after the insert would otherwise
         # leave the row behind, since the request commits once this returns
-        with contextlib.suppress(Exception):  # a lost connection must not hide the log and the modal
+        with contextlib.suppress(Exception):  # a rollback failure must not pre-empt the log and the modal
             frappe.db.rollback()
         # Log before replying: the modal shows the message to the applicant, but
         # nothing else records why a Slack-filed leave was refused
@@ -125,7 +127,7 @@ def handler(slack: SlackIntegration, payload: dict):
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"*Error Details:*\n```{exception_message(e)}```",
+                            "text": f"*Error Details:*\n```{exception_message(e, since=messages_before)}```",
                         },
                     },
                 ],

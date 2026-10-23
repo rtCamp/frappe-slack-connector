@@ -22,6 +22,23 @@ class TestGenerateErrorLog(IntegrationTestCase):
         self.assertIn("test_error.py", kwargs["message"])
         self.assertIn("Traceback (most recent call last)", kwargs["message"])
 
+    def test_msgprint_gets_the_exception_text_but_not_the_traceback(self):
+        """A Desk user (the Test channel button) sees the message and the exception, never server frames."""
+        try:
+            raise ValueError("channel_not_found")
+        except ValueError as e:
+            with (
+                patch(f"{ERROR_MODULE}.frappe.log_error") as mock_log,
+                patch(f"{ERROR_MODULE}.frappe.msgprint") as mock_msgprint,
+            ):
+                generate_error_log(
+                    "Error sending test message", message="Please check the channel ID", exception=e, msgprint=True
+                )
+        self.assertIn("Traceback", mock_log.call_args.kwargs["message"])
+        shown = mock_msgprint.call_args.kwargs["msg"]
+        self.assertEqual(shown, "Please check the channel ID\nException:\nchannel_not_found")
+        self.assertNotIn("Traceback", shown)
+
     def test_logs_the_message_alone_without_an_exception(self):
         with patch(f"{ERROR_MODULE}.frappe.log_error") as mock_log:
             generate_error_log("Payload not found", message="no payload")
@@ -51,6 +68,23 @@ class TestExceptionMessage(IntegrationTestCase):
             exception_message(frappe.PermissionError()),
             "You need the 'write' permission on Leave Application HR-LAP-0001",
         )
+
+    def test_ignores_messages_queued_before_the_action_started(self):
+        """The log spans the request: an HRMS "Email sent to ..." queued by an earlier hook must not become the reason."""
+        frappe.msgprint("Email sent to someone@example.com")
+        mark = len(frappe.get_message_log())
+        self.assertEqual(exception_message(frappe.PermissionError(), since=mark), "PermissionError")
+        frappe.msgprint("You are not allowed to access this Leave Application")
+        self.assertEqual(
+            exception_message(frappe.PermissionError(), since=mark),
+            "You are not allowed to access this Leave Application",
+        )
+
+    def test_unescapes_entities_and_caps_the_length(self):
+        self.assertEqual(exception_message(ValueError("Tom &amp; Jerry&nbsp;Ltd")), "Tom & Jerry\xa0Ltd")
+        text = exception_message(ValueError("x" * 5000))
+        self.assertEqual(len(text), 2900)
+        self.assertTrue(text.endswith("…"))
 
     def test_keeps_line_breaks_and_joins_list_messages(self):
         """Permission logs are joined with <br>; as_list messages arrive as lists."""

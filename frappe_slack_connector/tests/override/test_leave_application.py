@@ -15,18 +15,23 @@ from frappe_slack_connector.override.leave_application import (
     ATTENDANCE_REPLY_TEXT_FIELD,
     ATTENDANCE_REPLY_TS_FIELD,
     _applicant_dm_lock,
+    _format_decider,
     after_insert,
     format_leave_application_blocks,
     format_leave_submission_blocks,
+    on_discard_notify_applicant,
+    on_trash_notify_applicant,
     on_trash_refresh_attendance_summary,
     on_trash_withdraw_attendance_reply,
     on_update_notify_applicant,
     on_update_refresh_attendance_summary,
     on_update_withdraw_attendance_reply,
     post_same_day_leave_to_attendance_thread,
+    reason_blocks,
     restore_applicant_message_ref,
     restore_attendance_reply_ts,
     send_leave_decision_to_applicant,
+    send_leave_deleted_to_applicant,
     send_leave_notification_bg,
     send_leave_notification_to_applicant,
     update_attendance_summary,
@@ -153,7 +158,17 @@ def _blocks_text(blocks):
         for element in block.get("elements", []):
             if isinstance(element.get("text"), str):
                 parts.append(element["text"])
+            # rich_text block -> rich_text_quote -> text elements
+            for inner in element.get("elements", []):
+                if isinstance(inner.get("text"), str):
+                    parts.append(inner["text"])
     return "\n".join(parts)
+
+
+def _reason_quote(blocks):
+    """The literal text element of the reason quote, with its style."""
+    rich = next(b for b in blocks if b.get("type") == "rich_text")
+    return rich["elements"][0]["elements"][0]
 
 
 def _run_leave_notification_bg(doc, *, custom_fields=False, is_lwp=0, attendance_updates=0, balance_on=10.0):
@@ -954,7 +969,6 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         text = _blocks_text(_get_approver_blocks(doc, is_lwp=1))
         self.assertIn(":moneybag: *Balance before this request*\n_Not applicable (unpaid)_", text)
         self.assertNotIn("Insufficient balance", text)
-        self.assertNotIn("Insufficient balance", text)
         self.assertIn(":bar_chart: *Requested*\n_3 day(s)_", text)
 
     def test_approver_dm_shows_half_for_future_single_day_half_day_leave(self):
@@ -1207,7 +1221,8 @@ class TestFormatLeaveApplicationBlocks(IntegrationTestCase):
         self.assertIn(":moneybag: *Balance before this request*\n_10 day(s)_", field_texts)
 
         text = _blocks_text(blocks)
-        self.assertIn(":speech_balloon: *Reason*\n> _vacation_", text)
+        self.assertIn(":speech_balloon: *Reason*", text)
+        self.assertEqual(_reason_quote(blocks), {"type": "text", "text": "vacation", "style": {"italic": True}})
         self.assertNotIn("Insufficient balance", text)
         self.assertNotIn("Half Day:", text)
 
@@ -1280,6 +1295,18 @@ class TestFormatLeaveSubmissionBlocks(IntegrationTestCase):
         )
         fields = lambda bs: [b for b in bs if b.get("type") == "section" and "fields" in b]  # noqa: E731
         self.assertEqual(fields(blocks), fields(approver))
+        field_texts = [f["text"] for section in fields(blocks) for f in section["fields"]]
+        self.assertEqual(
+            field_texts,
+            [
+                ":label: *Leave Type*\n_Casual Leave_",
+                ":hourglass_flowing_sand: *Duration*\n_Full Day_",
+                ":date: *From*\n_Jun 15, 2026 (Mon)_",
+                ":date: *To*\n_Jun 17, 2026 (Wed)_",
+                ":bar_chart: *Requested*\n_3 day(s)_",
+                ":moneybag: *Balance before this request*\n_10 day(s)_",
+            ],
+        )
         self.assertEqual(blocks[0]["text"]["text"], ":memo: Leave Request Submitted")
         self.assertIn("Hello<@U-applicant>!", blocks[1]["text"]["text"])
         self.assertEqual(blocks[2], approver[2])
@@ -1288,9 +1315,10 @@ class TestFormatLeaveSubmissionBlocks(IntegrationTestCase):
             ":id: <https://erp.example.com/app/leave-application/HR-LAP-0050|HR-LAP-0050>"
             "  ·  :clock3: Submitted Jun 09, 2026 (Tue)",
         )
-        self.assertEqual(blocks[-3]["text"]["text"], ":speech_balloon: *Reason*\n> _vacation_")
+        self.assertEqual(blocks[-4]["text"]["text"], ":speech_balloon: *Reason*")
+        self.assertEqual(_reason_quote(blocks), {"type": "text", "text": "vacation", "style": {"italic": True}})
         # The applicant message closes with a small status line; no buttons on this side
-        self.assertEqual(blocks[-1]["elements"][0]["text"], "*Status:* :timer_clock: *Open*")
+        self.assertEqual(blocks[-1]["elements"][0]["text"], "*Status:* :stopwatch: *Open*")
         self.assertNotIn("actions", [b["type"] for b in blocks])
 
     def test_omits_requested_and_balance_when_not_given_and_appends_the_decision(self):
@@ -2553,7 +2581,14 @@ class TestSendLeaveDecisionToApplicant(IntegrationTestCase):
             stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.get_applicant_message_ref", return_value=message_ref))
             stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_status", return_value=current_status))
             stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_single_value", return_value=mention_user))
-            stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value="Approver Person"))
+            # Leave Type.is_lwp -> 0 (paid), anything else (the decider's full name) -> "Approver Person"
+            stack.enter_context(
+                patch(
+                    f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value",
+                    side_effect=lambda doctype, *a, **k: 0 if doctype == "Leave Type" else "Approver Person",
+                )
+            )
+            stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_balance_on", return_value=10.0))
             mock_store = stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.store_applicant_message_ref"))
             stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.commit"))
             mock_log = stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.generate_error_log"))
@@ -2581,6 +2616,8 @@ class TestSendLeaveDecisionToApplicant(IntegrationTestCase):
         # The decision time is a Slack date token (reader's own clock), rendered in italics after the decider
         self.assertIn("by <@U-approver> · _<!date^", status_line)
         self.assertTrue(status_line.endswith("|Jun 10, 2026 at 10:00 AM>_"))
+        # The rewritten DM carries the balance before the request (an approved, submitted leave adds its days back)
+        self.assertIn(":moneybag: *Balance before this request*\n_13 day(s)_", _blocks_text(kwargs["blocks"]))
 
     def test_desk_reject_updates_applicant_dm_in_place(self):
         """Rejecting from Desk (status changed to Rejected on submit) edits the stored applicant DM and names the approver when mentions are disabled."""
@@ -2819,3 +2856,98 @@ class TestSendLeaveDecisionToApplicant(IntegrationTestCase):
             send_leave_decision_to_applicant(doc=doc, status="Approved", decided_by="approver@x.com")
         status_line = mock_slack.slack_app.client.chat_update.call_args.kwargs["blocks"][-1]["elements"][0]["text"]
         self.assertIn("*Approved* by Tom &amp; Jerry &lt;HR&gt;", status_line)
+
+
+class TestReasonBlocks(IntegrationTestCase):
+    def test_reason_is_rendered_literally_in_an_italic_quote(self):
+        """mrkdwn control characters and mentions in the applicant's reason stay text: a rich_text quote is not parsed."""
+        blocks = reason_blocks("my_friend's wedding_\n\n*urgent* <!channel> & <https://evil|Approve here>")
+        self.assertEqual(blocks[0]["text"]["text"], ":speech_balloon: *Reason*")
+        self.assertEqual(blocks[1]["type"], "rich_text")
+        self.assertEqual(blocks[1]["elements"][0]["type"], "rich_text_quote")
+        self.assertEqual(
+            _reason_quote(blocks),
+            {
+                "type": "text",
+                "text": "my_friend's wedding_\n*urgent* <!channel> & <https://evil|Approve here>",
+                "style": {"italic": True},
+            },
+        )
+
+    def test_empty_reason_reads_no_reason_provided(self):
+        self.assertEqual(_reason_quote(reason_blocks("  \n"))["text"], "No reason provided")
+
+
+class TestFormatDecider(IntegrationTestCase):
+    def test_administrator_is_named_without_a_slack_lookup(self):
+        """A scheduled auto-approval runs as Administrator, who has no Slack identity: no lookup, no Error Log, just the name."""
+        mock_slack = MagicMock()
+        with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value="Administrator"):
+            self.assertEqual(_format_decider(mock_slack, "Administrator"), "Administrator")
+        mock_slack.get_slack_user_id.assert_not_called()
+
+
+class TestDiscardAndTrashNotifyApplicant(IntegrationTestCase):
+    def test_discard_queues_a_cancelled_decision_for_the_applicant(self):
+        """Discarding a draft fires only on_discard; the applicant's DM must stop reading Open."""
+        doc = _build_leave_doc(status="Cancelled", docstatus=2)
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.session") as mock_session,
+        ):
+            mock_session.user = "alice@x.com"
+            on_discard_notify_applicant(doc, method="on_discard")
+        kwargs = mock_enqueue.call_args.kwargs
+        self.assertIs(mock_enqueue.call_args.args[0], send_leave_decision_to_applicant)
+        self.assertEqual(kwargs["status"], "Cancelled")
+        self.assertEqual(kwargs["decided_by"], "alice@x.com")
+        self.assertTrue(kwargs["enqueue_after_commit"])
+
+    def test_trash_reads_the_dm_reference_first_and_queues_the_rewrite(self):
+        """The reference must be read while the row exists; the job gets the channel and ts explicitly."""
+        doc = _build_leave_doc()
+        with (
+            patch(
+                f"{LEAVE_OVERRIDE_MODULE}.get_applicant_message_ref", return_value=("D0FSC0001", "1700000000.000001")
+            ),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue,
+        ):
+            on_trash_notify_applicant(doc, method="on_trash")
+        kwargs = mock_enqueue.call_args.kwargs
+        self.assertIs(mock_enqueue.call_args.args[0], send_leave_deleted_to_applicant)
+        self.assertEqual((kwargs["channel"], kwargs["ts"]), ("D0FSC0001", "1700000000.000001"))
+
+    def test_trash_without_a_stored_dm_queues_nothing(self):
+        doc = _build_leave_doc()
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.get_applicant_message_ref", return_value=(None, None)),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue,
+        ):
+            on_trash_notify_applicant(doc, method="on_trash")
+        mock_enqueue.assert_not_called()
+
+    def test_deleted_leave_dm_is_rewritten_as_cancelled_without_a_balance_lookup(self):
+        """The row is gone: the DM is edited into a cancellation naming the deleter, and HRMS is not asked for a balance."""
+        doc = _build_leave_doc()
+        mock_slack = MagicMock()
+        mock_slack.get_slack_user_id.side_effect = _build_slack_user_lookup()
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=0),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_single_value", return_value=1),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_balance_on") as mock_balance,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.utils.now_datetime", return_value=datetime(2026, 6, 12, 9, 30)),
+        ):
+            send_leave_deleted_to_applicant(doc, channel="D0FSC0001", ts="1700000000.000001", decided_by="hr@x.com")
+        mock_balance.assert_not_called()
+        kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
+        self.assertEqual((kwargs["channel"], kwargs["ts"]), ("D0FSC0001", "1700000000.000001"))
+        self.assertEqual(kwargs["text"], "Your leave request has been cancelled")
+        status_line = kwargs["blocks"][-1]["elements"][0]["text"]
+        self.assertIn("*Status:* :no_entry_sign: *Cancelled* by <@U-approver> · _<!date^", status_line)
+        self.assertNotIn("Balance before this request", _blocks_text(kwargs["blocks"]))
+
+    def test_hooks_register_the_discard_and_trash_notifications(self):
+        leave_events = frappe.get_hooks("doc_events")["Leave Application"]
+        self.assertIn(f"{LEAVE_OVERRIDE_MODULE}.on_discard_notify_applicant", leave_events["on_discard"])
+        self.assertIn(f"{LEAVE_OVERRIDE_MODULE}.on_trash_notify_applicant", leave_events["on_trash"])

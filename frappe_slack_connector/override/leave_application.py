@@ -229,14 +229,14 @@ APPLICANT_DECISION_HEADERS = {
     "Cancelled": ":no_entry_sign: Leave Request Cancelled",
 }
 STATUS_EMOJI = {
-    "Open": ":timer_clock:",
+    "Open": ":stopwatch:",
     "Approved": ":white_check_mark:",
     "Rejected": ":x:",
     "Cancelled": ":no_entry_sign:",
 }
 
 
-def leave_message_payload(blocks: list, *, status: str | None, text: str) -> dict:
+def leave_message_payload(blocks: list, *, text: str) -> dict:
     """
     ``chat.postMessage`` / ``chat.update`` arguments for a leave message:
     the blocks plus ``text`` as the notification fallback. Top-level blocks
@@ -326,7 +326,8 @@ def _decided_by(modified_by: str | None, leave_approver: str | None, status: str
     made as Administrator (a scheduled auto-approval, or someone logged in
     as Administrator) is reported as Administrator rather than attributed
     to the leave approver, who did not act. ``leave_approver`` is only used
-    when nothing recorded who acted; a cancellation is never attributed
+    when nothing recorded who acted, and never for a cancellation, which
+    may be anyone's
     """
     if modified_by:
         return modified_by
@@ -362,6 +363,72 @@ def on_update_notify_applicant(doc: Document, method: str | None = None):
         status=status,
         decided_by=_decided_by(doc.modified_by, doc.leave_approver, status),
     )
+
+
+def on_discard_notify_applicant(doc: Document, method: str | None = None):
+    """
+    A discarded draft is Cancelled on the row (HRMS ``on_discard`` db_sets
+    the status) but fires neither ``on_update`` nor ``on_cancel``; rewrite
+    the applicant's DM like a cancellation, or it keeps reading "Open"
+    """
+    frappe.enqueue(
+        send_leave_decision_to_applicant,
+        queue="short",
+        enqueue_after_commit=True,
+        doc=doc,
+        status="Cancelled",
+        decided_by=_decided_by(frappe.session.user, doc.leave_approver, "Cancelled"),
+    )
+
+
+def on_trash_notify_applicant(doc: Document, method: str | None = None):
+    """
+    Read the applicant DM reference while the row still exists and queue
+    its rewrite: once deleted, the leave can be neither checked nor looked
+    up, so the job gets everything it needs here
+    """
+    channel, ts = get_applicant_message_ref(doc.name)
+    if not (channel and ts):
+        return
+    frappe.enqueue(
+        send_leave_deleted_to_applicant,
+        queue="short",
+        enqueue_after_commit=True,
+        doc=doc,
+        channel=channel,
+        ts=ts,
+        decided_by=frappe.session.user,
+    )
+
+
+def send_leave_deleted_to_applicant(doc: Document, channel: str, ts: str, decided_by: str | None = None):
+    """
+    Rewrite the applicant's DM for a deleted leave as a cancellation. No
+    status check or reference lookup: the row is gone. No balance either,
+    HRMS cannot authorise the lookup for a leave that no longer exists
+    """
+    try:
+        slack = SlackIntegration()
+        user_id = slack.get_slack_user_id(employee_id=doc.employee)
+        if not user_id:
+            return
+        status = "Cancelled"
+        blocks = _applicant_blocks(
+            doc,
+            user_id,
+            status=status,
+            status_by=_format_decider(slack, _decided_by(decided_by, doc.leave_approver, status)),
+            decided_at=frappe.utils.now_datetime(),
+            unpaid=bool(frappe.db.get_value("Leave Type", doc.leave_type, "is_lwp")),
+        )
+        slack.slack_app.client.chat_update(
+            channel=channel, ts=ts, **leave_message_payload(blocks, text=_applicant_text(status))
+        )
+    except Exception as e:
+        generate_error_log(
+            title="Error updating the applicant DM for a deleted leave",
+            exception=e,
+        )
 
 
 def restore_applicant_message_ref(doc: Document, method: str | None = None):
@@ -435,7 +502,6 @@ def send_leave_notification_to_applicant(doc: Document):
                         decided_at=doc.modified if status else None,
                         **message_balance_fields(doc),
                     ),
-                    status=status,
                     text=_applicant_text(status),
                 ),
             )
@@ -474,24 +540,26 @@ def send_leave_decision_to_applicant(doc: Document, status: str, decided_by: str
             )
             return
         text = _applicant_text(status)
-        blocks = _applicant_blocks(
-            doc,
-            user_id,
-            status=status,
-            status_by=_format_decider(slack, decided_by),
-            decided_at=doc.modified,
-            **message_balance_fields(doc),
-        )
         with _applicant_dm_lock(doc.name):
             if get_leave_status(doc.name) != status:
                 return
+            # Built only for a decision that still stands: the balance lookup
+            # below is an HRMS query, and may write an Error Log when it fails
+            blocks = _applicant_blocks(
+                doc,
+                user_id,
+                status=status,
+                status_by=_format_decider(slack, decided_by),
+                decided_at=doc.modified,
+                **message_balance_fields(doc),
+            )
             # Read the reference from the database rather than from ``doc``: the
             # job receives a snapshot taken before the submission DM was stored
             channel, ts = get_applicant_message_ref(doc.name)
             if channel and ts and _is_applicant_dm(doc, channel, ts):
                 try:
                     slack.slack_app.client.chat_update(
-                        channel=channel, ts=ts, **leave_message_payload(blocks, status=status, text=text)
+                        channel=channel, ts=ts, **leave_message_payload(blocks, text=text)
                     )
                     return
                 except SlackApiError as e:
@@ -502,7 +570,7 @@ def send_leave_decision_to_applicant(doc: Document, status: str, decided_by: str
                         message=f"Leave Application {doc.name}: {e.response.get('error')} for {channel}/{ts}",
                     )
             response = slack.slack_app.client.chat_postMessage(
-                channel=user_id, **leave_message_payload(blocks, status=status, text=text)
+                channel=user_id, **leave_message_payload(blocks, text=text)
             )
             store_applicant_message_ref(doc.name, channel=response.get("channel"), ts=response.get("ts"))
             # Commit before the lock is released: the job's own commit only comes
@@ -544,6 +612,10 @@ def _format_decider(slack: SlackIntegration, user_email: str | None) -> str | No
     """
     if not user_email:
         return None
+    if user_email == "Administrator":
+        # A scheduled job or the admin account: no Slack identity to look up,
+        # and the lookup would write an Error Log on every auto-approval
+        return escape_slack_text(frappe.db.get_value("User", user_email, "full_name") or user_email)
     try:
         slack_id = slack.get_slack_user_id(user_email=user_email)
     except Exception as e:
@@ -678,13 +750,26 @@ def leave_detail_blocks(
     return blocks
 
 
-def reason_block(reason: str | None) -> dict:
+def reason_blocks(reason: str | None) -> list:
     """
-    The reason as an italic quote, shared by the approver and applicant DMs
+    The reason as an italic quote, shared by the approver and applicant DMs.
+    A ``rich_text`` block renders the applicant's text literally: mrkdwn in
+    a section would let ``_``, ``*``, ``<!channel>`` or a disguised link in
+    the reason format or ping its way into the approver's DM
     """
     lines = [line.strip() for line in (reason or "").splitlines() if line.strip()] or ["No reason provided"]
-    quoted = "\n".join(f"> _{line}_" for line in lines)
-    return {"type": "section", "text": {"type": "mrkdwn", "text": f":speech_balloon: *Reason*\n{quoted}"}}
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": ":speech_balloon: *Reason*"}},
+        {
+            "type": "rich_text",
+            "elements": [
+                {
+                    "type": "rich_text_quote",
+                    "elements": [{"type": "text", "text": "\n".join(lines), "style": {"italic": True}}],
+                }
+            ],
+        },
+    ]
 
 
 def format_leave_submission_blocks(
@@ -750,7 +835,7 @@ def format_leave_submission_blocks(
             leave_balance=leave_balance,
             unpaid=unpaid,
         ),
-        reason_block(reason),
+        *reason_blocks(reason),
     ]
     # A pending request shows "Open" so the applicant can see a decision is still
     # due. No ERP button here: the Leave ID in the context line is the link
@@ -935,7 +1020,6 @@ def send_leave_notification_bg(doc: Document, announce_in_thread: bool = True):
                 # Fallback for notification previews; the blocks carry the details
                 **leave_message_payload(
                     approver_blocks,
-                    status="Open",
                     text=f"New leave application from {escape_slack_text(doc.employee_name)}",
                 ),
             )
@@ -1347,7 +1431,7 @@ def format_leave_application_blocks(
             }
         )
 
-    blocks.append(reason_block(reason))
+    blocks.extend(reason_blocks(reason))
 
     blocks.extend(
         [

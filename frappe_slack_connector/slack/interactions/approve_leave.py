@@ -67,9 +67,14 @@ def handler(slack: SlackIntegration, payload: dict):
                     approve_leave(leave_id)
                 else:
                     reject_leave(leave_id)
-            except WorkflowTransitionError:
+            except WorkflowTransitionError, frappe.TimestampMismatchError:
                 # Decided between the read above and the action (a race with
-                # another approver or a double click): report that decision
+                # another approver or a double click). The workflow raises the
+                # first when it loads the new state, the save the second when
+                # it finds the row changed. Under REPEATABLE READ the re-read
+                # would see the same snapshot as the first read, so end the
+                # transaction first, then report the decision that landed
+                frappe.db.rollback()
                 decision = _current_decision(leave_id)
                 if decision is None:
                     raise
@@ -95,7 +100,7 @@ def handler(slack: SlackIntegration, payload: dict):
         slack.slack_app.client.chat_update(
             channel=payload["channel"]["id"],
             ts=payload["container"]["message_ts"],
-            **leave_message_payload(blocks, status=status, text=f"Leave request {status.lower()}"),
+            **leave_message_payload(blocks, text=f"Leave request {status.lower()}"),
         )
     except Exception as e:
         # show an error modal with the exception message

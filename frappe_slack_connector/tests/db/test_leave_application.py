@@ -174,7 +174,10 @@ class TestGetEmployeesOnLeave(IntegrationTestCase):
 
     def test_includes_open_and_approved_leave(self):
         """Leave is approved by default, so both Open (draft) and Approved (submitted) leave covering today is reported."""
-        on_leave = {row.employee for row in get_employees_on_leave()}
+        # The fixture employees have no holiday list, so the lookup falls back to the
+        # company's; patched like the other cases, or the test fails on a weekend
+        with patch(f"{LEAVE_DB_MODULE}.get_employees_on_holiday", return_value=set()):
+            on_leave = {row.employee for row in get_employees_on_leave()}
         self.assertIn(self.OPEN_EMPLOYEE, on_leave)
         self.assertIn(self.ACTIVE_EMPLOYEE, on_leave)
 

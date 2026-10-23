@@ -655,6 +655,9 @@ def post_same_day_leave_to_attendance_thread(doc: Document, slack: SlackIntegrat
         return None
 
     slack = slack or SlackIntegration()
+    # A celebrations-only install may have no attendance channel configured
+    if not slack.SLACK_CHANNEL_ID:
+        return None
 
     with _attendance_reply_lock(doc.name):
         # ``doc`` is the row as it was inserted and may be stale by now: the

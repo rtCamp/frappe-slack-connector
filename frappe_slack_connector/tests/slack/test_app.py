@@ -79,15 +79,15 @@ class TestCheckSlackConfig(IntegrationTestCase):
         )
         self.assertFalse(slack._SlackIntegration__check_slack_config())
 
-    def test_returns_false_when_channel_id_missing(self):
-        """__check_slack_config returns False when SLACK_CHANNEL_ID is None."""
+    def test_returns_true_when_channel_id_missing(self):
+        """__check_slack_config returns True when SLACK_CHANNEL_ID is None: the attendance channel is optional."""
         slack = self._bare(
             SLACK_BOT_TOKEN="b",
             SLACK_APP_TOKEN="a",
             SLACK_CHANNEL_ID=None,
             SLACK_SIGNATURE="s",
         )
-        self.assertFalse(slack._SlackIntegration__check_slack_config())
+        self.assertTrue(slack._SlackIntegration__check_slack_config())
 
     def test_returns_false_when_signing_token_missing(self):
         """__check_slack_config returns False when SLACK_SIGNATURE is None."""
@@ -98,6 +98,20 @@ class TestCheckSlackConfig(IntegrationTestCase):
             SLACK_SIGNATURE=None,
         )
         self.assertFalse(slack._SlackIntegration__check_slack_config())
+
+
+class TestInitWithoutAttendanceChannel(IntegrationTestCase):
+    def test_constructs_without_error_log_when_attendance_channel_empty(self):
+        """SlackIntegration() with tokens set but no attendance channel neither raises nor logs an error, and exposes SLACK_CHANNEL_ID as None."""
+        _seed_slack_settings()
+        set_password_field("Slack Settings", "Slack Settings", "attendance_channel_id", "")
+        with (
+            patch(f"{SLACK_APP_MODULE}.App"),
+            patch(f"{SLACK_APP_MODULE}.generate_error_log") as mock_log,
+        ):
+            slack = SlackIntegration()
+        mock_log.assert_not_called()
+        self.assertIsNone(slack.SLACK_CHANNEL_ID)
 
 
 class TestGetSlackUsers(IntegrationTestCase):

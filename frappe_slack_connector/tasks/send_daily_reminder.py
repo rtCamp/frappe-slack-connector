@@ -31,8 +31,10 @@ def send_reminder():
 
     send_slack_notification(slack_settings.reminder_template, slack_settings.allowed_departments)
 
-    slack_settings.last_timesheet_notification_date = frappe.utils.nowdate()
-    slack_settings.save(ignore_permissions=True)
+    # Stamp the column directly: this job runs long, and a full save() would
+    # write back every column of the document loaded before it started,
+    # overwriting what another job stamped on Slack Settings meanwhile
+    frappe.db.set_single_value("Slack Settings", "last_timesheet_notification_date", frappe.utils.nowdate())
 
 
 def send_slack_notification(reminder_template: str, allowed_departments: list):

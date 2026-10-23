@@ -147,6 +147,7 @@ class TestSendReminder(IntegrationTestCase):
         """When guards pass, send_reminder calls send_slack_notification and writes today's date back onto Slack Settings."""
         settings = _build_settings_mock()
         with (
+            patch(f"{REMINDER_MODULE}.frappe.db.set_single_value") as mock_set_single_value,
             patch(f"{REMINDER_MODULE}.frappe.get_single", return_value=settings),
             patch(f"{REMINDER_MODULE}.frappe.utils.nowdate", return_value="2026-06-15"),
             patch(
@@ -158,8 +159,10 @@ class TestSendReminder(IntegrationTestCase):
         ):
             send_reminder()
         mock_send.assert_called_once()
-        self.assertEqual(settings.last_timesheet_notification_date, "2026-06-15")
-        settings.save.assert_called_once_with(ignore_permissions=True)
+        settings.save.assert_not_called()
+        mock_set_single_value.assert_called_once_with(
+            "Slack Settings", "last_timesheet_notification_date", "2026-06-15"
+        )
 
 
 class TestSendSlackNotification(IntegrationTestCase):

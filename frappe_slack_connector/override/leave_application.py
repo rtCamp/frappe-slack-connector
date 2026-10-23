@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 import frappe
 from frappe.model.document import Document
-from frappe.utils import cint, convert_utc_to_system_timezone, flt, get_url_to_form, getdate
+from frappe.utils import cint, convert_utc_to_system_timezone, flt, get_url_to_form, getdate, today
 from frappe.utils.synchronization import filelock
 from hrms.hr.doctype.leave_application.leave_application import get_leave_balance_on
 from slack_sdk.errors import SlackApiError
@@ -91,6 +91,11 @@ def _load_leave(leave_name: str):
 # (rejected, cancelled, discarded, deleted): the channel only needs to know
 # the leave is off, not who called it off
 WITHDRAWN_LABEL = "Cancelled"
+from frappe_slack_connector.tasks.attendance_summary import update_attendance_summary
+
+# Statuses counted in the attendance summary, and those that take a leave out of it
+SUMMARY_INCLUDED_STATUSES = ("Open", "Approved")
+SUMMARY_EXCLUDED_STATUSES = ("Rejected", "Cancelled")
 
 
 def after_insert(doc, method):
@@ -119,6 +124,92 @@ def after_insert(doc, method):
         queue="short",
         enqueue_after_commit=True,
         doc=doc,
+    )
+    # A leave applied for after the morning post changes today's count
+    enqueue_attendance_summary_refresh(doc)
+
+
+def on_update_refresh_attendance_summary(doc, method=None):
+    """
+    Refresh today's attendance summary when a leave covering today is
+    rejected or cancelled after the summary has been posted
+
+    Wired to ``on_update`` (Desk and Slack rejection, with or without a
+    workflow), ``on_cancel`` (submitted leave cancelled) and ``on_discard``
+    (draft leave discarded). Only fires when the leave actually leaves the
+    summary, so edits to an already-rejected leave and Rejected -> Cancelled
+    transitions do not rebuild it.
+    """
+    if not _leaves_attendance_summary(doc):
+        return
+    enqueue_attendance_summary_refresh(doc)
+
+
+def on_trash_refresh_attendance_summary(doc, method=None):
+    """
+    Refresh today's attendance summary when a leave that is counted in it
+    is deleted (deleting a draft runs neither ``on_update`` nor
+    ``on_cancel``). The job runs after commit, when the row is gone
+    """
+    if cint(doc.docstatus) == 2 or doc.status not in SUMMARY_INCLUDED_STATUSES:
+        return
+    enqueue_attendance_summary_refresh(doc)
+
+
+def _leaves_attendance_summary(doc) -> bool:
+    """
+    Whether this save takes the leave out of the summary: its status moved
+    from a counted one to Rejected or Cancelled, or the document itself was
+    cancelled. A cancel normally sets Cancelled too (HRMS ``before_cancel``),
+    but ``ignore_validate`` skips that and leaves the status Approved; the
+    summary query drops such a row on docstatus alone, so the hook must too.
+    """
+    cancelled = cint(doc.docstatus) == 2 and doc.has_value_changed("docstatus")
+    withdrawn = doc.status in SUMMARY_EXCLUDED_STATUSES and doc.has_value_changed("status")
+    if not (cancelled or withdrawn):
+        return False
+    previous_status = doc.get_value_before_save("status")
+    # No before-save copy means we cannot tell; refresh rather than go stale
+    return previous_status is None or previous_status in SUMMARY_INCLUDED_STATUSES
+
+
+def should_refresh_attendance_summary(doc) -> bool:
+    """
+    Whether a change to this leave affects today's posted attendance summary
+    True only when attendance updates are enabled, today's summary has
+    already been posted and the leave covers today. If the summary has not
+    been posted yet it will reflect the current state on its own.
+    """
+    slack_settings = frappe.get_single("Slack Settings")
+    if (
+        slack_settings.send_attendance_updates != 1
+        or not slack_settings.last_attendance_msg_ts
+        or not slack_settings.last_attendance_date
+    ):
+        return False
+
+    current_date = getdate(today())
+    if getdate(slack_settings.last_attendance_date) != current_date:
+        return False
+
+    return getdate(doc.from_date) <= current_date <= getdate(doc.to_date)
+
+
+def enqueue_attendance_summary_refresh(doc) -> None:
+    """
+    Enqueue the in-place rebuild of today's attendance summary if the
+    leave affects it
+
+    The job reads the Leave Application table, so it is queued after the
+    current transaction commits; otherwise the worker could rebuild the
+    summary from the state before this change.
+    """
+    if not should_refresh_attendance_summary(doc):
+        return
+    frappe.enqueue(
+        update_attendance_summary,
+        queue="short",
+        enqueue_after_commit=True,
     )
 
 

@@ -30,7 +30,7 @@ jobs:
         # Scheduled runs cover both long-lived branches; pushes, pull requests
         # and manual runs test the ref that triggered them (an empty ref keeps
         # actions/checkout's default)
-        ref: ${{ github.event_name == 'schedule' && fromJSON('["develop", "version-16"]') || fromJSON('[""]') }}
+        ref: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('["develop", "version-16"]') || fromJSON('[""]') }}
 
     services:
       redis-cache:
@@ -102,4 +102,4 @@ jobs:
             exit 0
           fi
           payload=$(jq -nc --arg text ":red_circle: frappe_slack_connector tests failed against upstream version-16 on \`$BRANCH\`: $RUN_URL" '{text: $text}')
-          curl -sf -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"
+          curl -sSf -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"

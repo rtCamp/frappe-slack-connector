@@ -9,23 +9,26 @@ import frappe_slack_connector
 from frappe_slack_connector import hooks
 
 APP = "frappe_slack_connector"
-# A dotted path into this app, as hooks.py writes them
+# A dotted path into this app, as hooks.py writes them. Bundle names such as
+# "frappe_slack_connector.bundle.js" (app_include_js) look the same but are
+# assets, not Python
 DOTTED_PATH = re.compile(rf"^{APP}\.[\w.]+$")
+ASSET_SUFFIXES = (".js", ".css", ".html")
 # Top-level directories that hold no app code
 SKIPPED_DIRS = {"tests", "public", "node_modules", "__pycache__"}
 
 
-def _app_modules() -> list[str]:
+def app_modules() -> list[str]:
     """
     Every module in the app, found on disk: several directories (tasks/,
     slack/interactions/) have no __init__.py and pkgutil skips those. The
-    tests themselves are left out
+    tests directory and the per-doctype ``test_*.py`` files are left out
     """
     root = Path(frappe_slack_connector.__file__).parent
     names = []
     for path in sorted(root.rglob("*.py")):
         parts = path.relative_to(root).with_suffix("").parts
-        if parts[0] in SKIPPED_DIRS:
+        if parts[0] in SKIPPED_DIRS or parts[-1].startswith("test_"):
             continue
         if parts[-1] == "__init__":
             parts = parts[:-1]
@@ -37,7 +40,7 @@ def _app_modules() -> list[str]:
 def _dotted_paths(value) -> set[str]:
     """Collect every app dotted path found in a hooks.py value (str, list, dict, nested)."""
     if isinstance(value, str):
-        return {value} if DOTTED_PATH.match(value) else set()
+        return {value} if DOTTED_PATH.match(value) and not value.endswith(ASSET_SUFFIXES) else set()
     if isinstance(value, dict):
         return set().union(*(_dotted_paths(v) for v in value.values())) if value else set()
     if isinstance(value, (list, tuple, set)):
@@ -63,7 +66,7 @@ class TestImports(IntegrationTestCase):
 
     def test_every_module_imports(self):
         failures = {}
-        for name in _app_modules():
+        for name in app_modules():
             try:
                 importlib.import_module(name)
             except Exception as e:
@@ -86,9 +89,18 @@ class TestImports(IntegrationTestCase):
         paths = _hook_paths()
         self.assertIn(f"{APP}.tasks.send_daily_reminder.send_reminder", paths)
         self.assertIn(f"{APP}.override.leave_application.after_insert", paths)
-        modules = _app_modules()
+        modules = app_modules()
         self.assertIn(f"{APP}.api.slack_interactions", modules)
         # Directories without __init__.py must still be walked
         self.assertIn(f"{APP}.slack.interactions.submit_leave", modules)
         self.assertIn(f"{APP}.tasks.send_daily_reminder", modules)
-        self.assertFalse([m for m in modules if m.startswith(f"{APP}.tests")])
+        self.assertFalse(
+            [m for m in modules if m.startswith(f"{APP}.tests") or m.rsplit(".", 1)[-1].startswith("test_")]
+        )
+
+    def test_asset_names_are_not_taken_for_entry_points(self):
+        """app_include_js = "frappe_slack_connector.bundle.js" must not be resolved with get_attr."""
+        self.assertEqual(
+            _dotted_paths([f"{APP}.bundle.js", f"{APP}.bundle.css", f"{APP}.api.health.slack_endpoints"]),
+            {f"{APP}.api.health.slack_endpoints"},
+        )

@@ -1,9 +1,17 @@
+import importlib
 from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
 
-from frappe_slack_connector.api.health import LOG_THROTTLE_KEY, SLACK_ENTRY_POINTS, check_entry_points, slack_endpoints
+from frappe_slack_connector.api.health import (
+    LOG_THROTTLE_KEY,
+    SLACK_ENTRY_POINTS,
+    check_entry_points,
+    hook_entry_points,
+    slack_endpoints,
+)
+from frappe_slack_connector.tests.test_imports import app_modules
 
 APP = "frappe_slack_connector"
 HEALTH_MODULE = f"{APP}.api.health"
@@ -71,10 +79,40 @@ class TestSlackEndpointsHealth(IntegrationTestCase):
         self.assertTrue(all(error == "not whitelisted for guests" for error in failures.values()))
 
     def test_entry_points_are_every_guest_method_slack_calls(self):
-        """Derived from what the app actually whitelists for guests, so a new Slack endpoint missing from the list fails here."""
-        for path in SLACK_ENTRY_POINTS:
-            frappe.get_attr(path)
+        """Derived from what the app actually whitelists for guests, so a new Slack endpoint missing from the list fails here.
+
+        frappe.guest_methods only fills when a module is imported, so every app module is imported first;
+        otherwise an endpoint in a module nothing has touched yet would go unseen."""
+        for name in app_modules():
+            importlib.import_module(name)
         guest_paths = {
             f"{fn.__module__}.{fn.__name__}" for fn in frappe.guest_methods if fn.__module__.startswith(f"{APP}.")
         }
         self.assertEqual(guest_paths - {f"{HEALTH_MODULE}.slack_endpoints"}, set(SLACK_ENTRY_POINTS))
+
+    def test_hook_functions_are_checked_too(self):
+        """A broken import under a Leave Application hook fails every save, not a Slack request: the check covers it."""
+        paths = hook_entry_points()
+        self.assertIn(f"{APP}.override.leave_application.after_insert", paths)
+        self.assertIn(f"{APP}.tasks.send_daily_reminder.send_reminder", paths)
+        broken = f"{APP}.override.leave_application.after_insert"
+        real_get_attr = frappe.get_attr
+
+        def fake_get_attr(path):
+            if path == broken:
+                raise ImportError("cannot import name 'get_leave_balance_on'")
+            return real_get_attr(path)
+
+        with patch(f"{HEALTH_MODULE}.frappe.get_attr", side_effect=fake_get_attr):
+            failures = check_entry_points()
+        self.assertEqual(set(failures), {broken})
+
+    def test_releases_the_hour_when_logging_fails(self):
+        """If the Error Log write raises, the next probe must get another chance to log."""
+        with (
+            patch(f"{HEALTH_MODULE}.check_entry_points", return_value={SLACK_ENTRY_POINTS[0]: "ImportError: x"}),
+            patch(f"{HEALTH_MODULE}.frappe.log_error", side_effect=RuntimeError("db down")),
+        ):
+            with self.assertRaises(RuntimeError):
+                slack_endpoints()
+        self.assertIsNone(frappe.cache.get(frappe.cache.make_key(LOG_THROTTLE_KEY)))

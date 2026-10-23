@@ -1,10 +1,11 @@
+import contextlib
+
 import frappe
 from frappe import _
 
 from frappe_slack_connector.db.leave_application import approve_leave, reject_leave
 from frappe_slack_connector.db.user_meta import get_userid_from_slackid
-from frappe_slack_connector.helpers.error import generate_error_log
-from frappe_slack_connector.helpers.str_utils import strip_html_tags
+from frappe_slack_connector.helpers.error import exception_message, generate_error_log
 from frappe_slack_connector.slack.app import SlackIntegration
 
 
@@ -14,6 +15,9 @@ def handler(slack: SlackIntegration, payload: dict):
     Update the message in Slack with the status of the leave application
     Update the leave application in ERP accordingly
     """
+    # Messages queued before this point belong to earlier work in the request
+    messages_before = len(frappe.get_message_log())
+    decided = None
     try:
         # Check the user who sent the request
         user_id = payload.get("user", {}).get("id")
@@ -31,6 +35,10 @@ def handler(slack: SlackIntegration, payload: dict):
             reject_leave(leave_id)
         else:
             frappe.throw(_("Unknown action"))
+        # The decision is final once it is written: a Slack failure while
+        # updating the message below must not roll it back
+        frappe.db.commit()
+        decided = "approved" if action_id == "leave_approve" else "rejected"
 
         blocks = payload["message"]["blocks"]
 
@@ -57,6 +65,21 @@ def handler(slack: SlackIntegration, payload: dict):
             blocks=blocks,
         )
     except Exception as e:
+        # Undo whatever the action wrote before it failed: a hook raising after
+        # the submit (another app's on_update) would otherwise leave the leave
+        # approved in the database while the approver is shown an error, since
+        # the request still commits once this handler returns
+        with contextlib.suppress(Exception):  # a rollback failure must not pre-empt the log and the modal
+            frappe.db.rollback()
+        # Log first: the error modal below needs a live trigger_id, and when it
+        # fails too the only trace of the original error would be lost
+        generate_error_log(title="Error taking action on leave request", exception=e)
+        # A decision that was committed stands; say so, or the approver clicks again
+        header = (
+            f":warning: Leave {decided}, but the Slack message could not be updated"
+            if decided
+            else ":warning: Error taking action on leave request"
+        )
         # show an error modal with the exception message
         slack.slack_app.client.views_open(
             trigger_id=payload["trigger_id"],
@@ -68,7 +91,7 @@ def handler(slack: SlackIntegration, payload: dict):
                         "type": "header",
                         "text": {
                             "type": "plain_text",
-                            "text": ":warning: Error taking action on leave request",
+                            "text": header,
                             "emoji": True,
                         },
                     },
@@ -77,7 +100,7 @@ def handler(slack: SlackIntegration, payload: dict):
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"*Error Details:*\n```{strip_html_tags(str(e))}```",
+                            "text": f"*Error Details:*\n```{exception_message(e, since=messages_before)}```",
                         },
                     },
                 ],

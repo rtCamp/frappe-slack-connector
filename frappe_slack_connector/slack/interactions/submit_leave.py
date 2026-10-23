@@ -1,12 +1,13 @@
+import contextlib
+
 import frappe
 from frappe import _, clear_messages
 from hrms.hr.doctype.leave_application.leave_application import get_leave_approver, get_leave_balance_on
 
 from frappe_slack_connector.db.leave_application import custom_fields_exist
 from frappe_slack_connector.db.user_meta import get_employeeid_from_slackid, get_userid_from_slackid
-from frappe_slack_connector.helpers.error import generate_error_log
+from frappe_slack_connector.helpers.error import exception_message, generate_error_log
 from frappe_slack_connector.helpers.http_response import send_http_response
-from frappe_slack_connector.helpers.str_utils import strip_html_tags
 from frappe_slack_connector.slack.app import SlackIntegration
 
 
@@ -17,6 +18,8 @@ def handler(slack: SlackIntegration, payload: dict):
     """
     if not payload:
         frappe.throw(_("No payload found"), frappe.ValidationError)
+    # Messages queued before this point belong to earlier work in the request
+    messages_before = len(frappe.get_message_log())
     try:
         # Extract relevant information
         user_info = payload["user"]
@@ -98,6 +101,13 @@ def handler(slack: SlackIntegration, payload: dict):
         clear_messages()
 
     except Exception as e:
+        # Undo a partial save: a hook raising after the insert would otherwise
+        # leave the row behind, since the request commits once this returns
+        with contextlib.suppress(Exception):  # a rollback failure must not pre-empt the log and the modal
+            frappe.db.rollback()
+        # Log before replying: the modal shows the message to the applicant, but
+        # nothing else records why a Slack-filed leave was refused
+        generate_error_log(title="Error submitting leave request", exception=e)
         response = {
             "response_action": "push",
             "view": {
@@ -117,7 +127,7 @@ def handler(slack: SlackIntegration, payload: dict):
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"*Error Details:*\n```{strip_html_tags(str(e))}```",
+                            "text": f"*Error Details:*\n```{exception_message(e, since=messages_before)}```",
                         },
                     },
                 ],

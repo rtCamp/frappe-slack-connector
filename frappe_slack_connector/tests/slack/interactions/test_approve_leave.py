@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock, patch
 
+import frappe
 from frappe.tests import IntegrationTestCase
 
 from frappe_slack_connector.slack.interactions.approve_leave import handler
@@ -35,6 +36,7 @@ class TestApproveLeaveHandler(IntegrationTestCase):
         with (
             patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
             patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user") as mock_set_user,
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.commit"),
             patch(f"{APPROVE_LEAVE_MODULE}.approve_leave") as mock_approve,
             patch(f"{APPROVE_LEAVE_MODULE}.reject_leave") as mock_reject,
         ):
@@ -50,6 +52,7 @@ class TestApproveLeaveHandler(IntegrationTestCase):
         with (
             patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
             patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.commit"),
             patch(f"{APPROVE_LEAVE_MODULE}.approve_leave") as mock_approve,
             patch(f"{APPROVE_LEAVE_MODULE}.reject_leave") as mock_reject,
         ):
@@ -64,6 +67,7 @@ class TestApproveLeaveHandler(IntegrationTestCase):
         with (
             patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
             patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.commit"),
             patch(f"{APPROVE_LEAVE_MODULE}.approve_leave"),
             patch(f"{APPROVE_LEAVE_MODULE}.reject_leave"),
         ):
@@ -86,6 +90,7 @@ class TestApproveLeaveHandler(IntegrationTestCase):
         with (
             patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
             patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.commit"),
             patch(f"{APPROVE_LEAVE_MODULE}.approve_leave"),
             patch(f"{APPROVE_LEAVE_MODULE}.reject_leave"),
         ):
@@ -97,18 +102,98 @@ class TestApproveLeaveHandler(IntegrationTestCase):
         self.assertIn("Rejected", section_text)
 
     def test_opens_error_modal_when_db_update_raises(self):
-        """handler opens an error modal via views_open when the approve/reject DB call raises."""
+        """handler logs the error and opens an error modal via views_open when the approve/reject DB call raises."""
         payload = _build_action_payload(action_id="leave_approve")
         mock_slack = MagicMock()
         with (
             patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
             patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.commit"),
             patch(f"{APPROVE_LEAVE_MODULE}.approve_leave", side_effect=RuntimeError("boom")),
             patch(f"{APPROVE_LEAVE_MODULE}.reject_leave"),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.rollback") as mock_rollback,
+            patch(f"{APPROVE_LEAVE_MODULE}.generate_error_log") as mock_log,
         ):
             handler(slack=mock_slack, payload=payload)
+        # Rolled back so the database matches the error the approver sees, then logged
+        # before the modal: an expired trigger_id must not lose the original error
+        mock_rollback.assert_called_once()
+        mock_log.assert_called_once()
+        self.assertEqual(str(mock_log.call_args.kwargs["exception"]), "boom")
         mock_slack.slack_app.client.views_open.assert_called_once()
         kwargs = mock_slack.slack_app.client.views_open.call_args.kwargs
         self.assertEqual(kwargs["trigger_id"], "T-trigger-1")
         self.assertEqual(kwargs["view"]["title"]["text"], "Error")
         mock_slack.slack_app.client.chat_update.assert_not_called()
+
+    def test_error_modal_shows_the_frappe_message_when_the_exception_has_none(self):
+        """A failed permission check raises a bare PermissionError; the modal must show Frappe's reason, not an empty box."""
+        payload = _build_action_payload(action_id="leave_approve")
+        mock_slack = MagicMock()
+
+        def deny(leave_id):
+            frappe.msgprint("You are not allowed to access this Leave Application record")
+            raise frappe.PermissionError
+
+        frappe.clear_messages()
+        try:
+            with (
+                patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
+                patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
+                patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.commit"),
+                patch(f"{APPROVE_LEAVE_MODULE}.approve_leave", side_effect=deny),
+                patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.rollback") as mock_rollback,
+                patch(f"{APPROVE_LEAVE_MODULE}.generate_error_log"),
+            ):
+                handler(slack=mock_slack, payload=payload)
+        finally:
+            frappe.clear_messages()
+        mock_rollback.assert_called_once()
+        view = mock_slack.slack_app.client.views_open.call_args.kwargs["view"]
+        self.assertIn("You are not allowed to access this Leave Application record", view["blocks"][2]["text"]["text"])
+
+    def test_approval_is_committed_after_the_action_and_before_the_slack_update(self):
+        """A Slack failure while editing the message must not roll back a decision already taken; the order is what matters."""
+        payload = _build_action_payload(action_id="leave_approve")
+        mock_slack = MagicMock()
+        calls = MagicMock()
+        mock_slack.slack_app.client.chat_update.side_effect = RuntimeError("ratelimited")
+        calls.attach_mock(mock_slack.slack_app.client.chat_update, "chat_update")
+        with (
+            patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.commit") as mock_commit,
+            patch(f"{APPROVE_LEAVE_MODULE}.approve_leave") as mock_approve,
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.rollback") as mock_rollback,
+            patch(f"{APPROVE_LEAVE_MODULE}.generate_error_log") as mock_log,
+        ):
+            calls.attach_mock(mock_approve, "approve_leave")
+            calls.attach_mock(mock_commit, "commit")
+            calls.attach_mock(mock_rollback, "rollback")
+            handler(slack=mock_slack, payload=payload)
+        self.assertEqual(
+            [name for name, _args, _kwargs in calls.mock_calls], ["approve_leave", "commit", "chat_update", "rollback"]
+        )
+        mock_log.assert_called_once()
+        # The approver is told the decision stands and only the message update failed
+        view = mock_slack.slack_app.client.views_open.call_args.kwargs["view"]
+        self.assertEqual(
+            view["blocks"][0]["text"]["text"], ":warning: Leave approved, but the Slack message could not be updated"
+        )
+        self.assertIn("ratelimited", view["blocks"][2]["text"]["text"])
+
+    def test_a_failure_before_the_decision_keeps_the_plain_error_header(self):
+        payload = _build_action_payload(action_id="leave_reject")
+        mock_slack = MagicMock()
+        with (
+            patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.commit") as mock_commit,
+            patch(f"{APPROVE_LEAVE_MODULE}.reject_leave", side_effect=RuntimeError("boom")),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.rollback"),
+            patch(f"{APPROVE_LEAVE_MODULE}.generate_error_log"),
+        ):
+            handler(slack=mock_slack, payload=payload)
+        mock_commit.assert_not_called()
+        view = mock_slack.slack_app.client.views_open.call_args.kwargs["view"]
+        self.assertEqual(view["blocks"][0]["text"]["text"], ":warning: Error taking action on leave request")

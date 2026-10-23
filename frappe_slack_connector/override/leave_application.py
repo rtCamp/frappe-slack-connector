@@ -379,7 +379,7 @@ def send_leave_notification_to_applicant(doc: Document):
                 channel=user_id,
                 text=_applicant_text(status),
                 blocks=_applicant_blocks(
-                    doc, user_id, status=status, status_by=status_by, leave_balance=message_leave_balance(doc)
+                    doc, user_id, status=status, status_by=status_by, **message_balance_fields(doc)
                 ),
             )
             store_applicant_message_ref(doc.name, channel=response.get("channel"), ts=response.get("ts"))
@@ -422,7 +422,7 @@ def send_leave_decision_to_applicant(doc: Document, status: str, decided_by: str
             user_id,
             status=status,
             status_by=_format_decider(slack, decided_by),
-            leave_balance=message_leave_balance(doc),
+            **message_balance_fields(doc),
         )
         with _applicant_dm_lock(doc.name):
             if get_leave_status(doc.name) != status:
@@ -511,6 +511,7 @@ def _applicant_blocks(
     status: str | None = None,
     status_by: str | None = None,
     leave_balance: float | None = None,
+    unpaid: bool = False,
 ):
     """
     Build the applicant DM blocks for the given leave, optionally with a decision
@@ -527,20 +528,21 @@ def _applicant_blocks(
         duration=format_leave_duration(doc),
         total_days=flt(doc.total_leave_days),
         leave_balance=leave_balance,
+        unpaid=unpaid,
         reason=doc.description,
         status=status,
         status_by=status_by,
     )
 
 
-def message_leave_balance(doc: Document) -> float | None:
+def message_balance_fields(doc: Document) -> dict:
     """
-    Balance before this request for the approver and applicant messages, or
-    None for a Leave Without Pay type: it has no allocation, so no balance
+    ``unpaid`` and ``leave_balance`` for the DM builders. A Leave Without
+    Pay type has no allocation, so no balance is looked up and the message
+    says so instead of showing a number
     """
-    if frappe.db.get_value("Leave Type", doc.leave_type, "is_lwp"):
-        return None
-    return get_leave_balance(doc)
+    unpaid = bool(frappe.db.get_value("Leave Type", doc.leave_type, "is_lwp"))
+    return {"unpaid": unpaid, "leave_balance": None if unpaid else get_leave_balance(doc)}
 
 
 def leave_id_context_block(*, leave_id: str, leave_link: str, leave_submission_date: str) -> dict:
@@ -567,12 +569,15 @@ def leave_detail_blocks(
     duration: str,
     total_days: float | None = None,
     leave_balance: float | None = None,
+    unpaid: bool = False,
 ) -> list:
     """
     The leave detail field sections shared by the approver DM and the
     applicant DM: type and duration, the date range, then the requested
-    days and the balance before the request when given. Dates and the
-    duration arrive formatted
+    days and the balance before the request. The balance reads "Not
+    applicable" for an unpaid leave type (no allocation to draw on) and is
+    left out when it could not be looked up. Dates and the duration arrive
+    formatted
     """
     blocks = [
         {
@@ -600,6 +605,8 @@ def leave_detail_blocks(
                 "text": f"*Balance before this request:*\n{flt(leave_balance, 2):g} day(s)",
             }
         )
+    elif unpaid:
+        details.append({"type": "mrkdwn", "text": "*Balance before this request:*\nNot applicable (unpaid)"})
     if details:
         blocks.append({"type": "section", "fields": details})
     return blocks
@@ -632,6 +639,7 @@ def format_leave_submission_blocks(
     leave_link: str = "#",
     total_days: float | None = None,
     leave_balance: float | None = None,
+    unpaid: bool = False,
     status: str | None = None,
     status_by: str | None = None,
 ) -> list:
@@ -676,6 +684,7 @@ def format_leave_submission_blocks(
             duration=duration,
             total_days=total_days,
             leave_balance=leave_balance,
+            unpaid=unpaid,
         ),
         reason_block(reason),
     ]
@@ -867,7 +876,7 @@ def send_leave_notification_bg(doc: Document, announce_in_thread: bool = True):
                     to_date=standard_date_fmt(doc.to_date),
                     reason=doc.description,
                     total_days=flt(doc.total_leave_days),
-                    leave_balance=message_leave_balance(doc),
+                    **message_balance_fields(doc),
                 ),
             )
 
@@ -1223,6 +1232,7 @@ def format_leave_application_blocks(
     leave_link: str = "#",
     total_days: float | None = None,
     leave_balance: float | None = None,
+    unpaid: bool = False,
 ) -> list:
     """
     Format the blocks for the leave application message
@@ -1258,6 +1268,7 @@ def format_leave_application_blocks(
             duration=duration,
             total_days=total_days,
             leave_balance=leave_balance,
+            unpaid=unpaid,
         ),
     ]
 

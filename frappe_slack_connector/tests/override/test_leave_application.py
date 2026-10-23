@@ -950,7 +950,8 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
             leave_balance=0.0,
         )
         text = _blocks_text(_get_approver_blocks(doc, is_lwp=1))
-        self.assertNotIn("Balance before this request", text)
+        self.assertIn("*Balance before this request:*\nNot applicable (unpaid)", text)
+        self.assertNotIn("Insufficient balance", text)
         self.assertNotIn("Insufficient balance", text)
         self.assertIn("*Requested:*\n3 day(s)", text)
 
@@ -2132,7 +2133,7 @@ class TestSendLeaveNotificationToApplicant(IntegrationTestCase):
         self.assertIn("• *Submitted On:* Jun 09, 2026 (Tue)", text)
 
     def test_applicant_dm_shows_the_half_day_period_and_no_balance_for_leave_without_pay(self):
-        """A single-day second-half leave reads "Second Half"; a Leave Without Pay type has no allocation, so no balance line."""
+        """A single-day second-half leave reads "Second Half"; a Leave Without Pay type has no allocation, so the balance reads "Not applicable"."""
         doc = _build_leave_doc(
             from_date="2026-06-10",
             to_date="2026-06-10",
@@ -2154,7 +2155,7 @@ class TestSendLeaveNotificationToApplicant(IntegrationTestCase):
         text = _blocks_text(mock_slack.slack_app.client.chat_postMessage.call_args.kwargs["blocks"])
         self.assertIn("*Duration:*\n:hourglass_flowing_sand: Second Half", text)
         self.assertIn("*Requested:*\n0.5 day(s)", text)
-        self.assertNotIn("Balance before this request", text)
+        self.assertIn("*Balance before this request:*\nNot applicable (unpaid)", text)
         mock_balance.assert_not_called()
 
     def test_stores_dm_channel_and_ts_after_posting(self):

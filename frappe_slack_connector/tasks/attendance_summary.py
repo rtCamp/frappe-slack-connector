@@ -151,14 +151,6 @@ def build_attendance_blocks(
     ``users_on_leave`` is the result of ``get_employees_on_leave``; it is
     fetched here when the caller has not already done so
     """
-    slack = SlackIntegration()
-    if not slack.SLACK_CHANNEL_ID:
-        generate_error_log(
-            title=_("Attendance channel not set"),
-            message=_("Set the Attendance Channel ID in Slack Settings."),
-        )
-        return None
-
     mention_users = frappe.db.get_single_value("Slack Settings", "mention_user")
     leave_groups = {"Full Day": [], "Half Day": []}
     if custom_fields_exist():

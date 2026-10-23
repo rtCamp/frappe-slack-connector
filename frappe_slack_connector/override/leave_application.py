@@ -378,7 +378,9 @@ def send_leave_notification_to_applicant(doc: Document):
             response = slack.slack_app.client.chat_postMessage(
                 channel=user_id,
                 text=_applicant_text(status),
-                blocks=_applicant_blocks(doc, user_id, status=status, status_by=status_by),
+                blocks=_applicant_blocks(
+                    doc, user_id, status=status, status_by=status_by, leave_balance=message_leave_balance(doc)
+                ),
             )
             store_applicant_message_ref(doc.name, channel=response.get("channel"), ts=response.get("ts"))
             # Commit before the lock is released: the job's own commit only comes
@@ -420,6 +422,7 @@ def send_leave_decision_to_applicant(doc: Document, status: str, decided_by: str
             user_id,
             status=status,
             status_by=_format_decider(slack, decided_by),
+            leave_balance=message_leave_balance(doc),
         )
         with _applicant_dm_lock(doc.name):
             if get_leave_status(doc.name) != status:
@@ -501,7 +504,14 @@ def _applicant_text(status: str | None) -> str:
     return "Leave request submitted"
 
 
-def _applicant_blocks(doc: Document, user_slack: str, *, status: str | None = None, status_by: str | None = None):
+def _applicant_blocks(
+    doc: Document,
+    user_slack: str,
+    *,
+    status: str | None = None,
+    status_by: str | None = None,
+    leave_balance: float | None = None,
+):
     """
     Build the applicant DM blocks for the given leave, optionally with a decision
     """
@@ -514,10 +524,84 @@ def _applicant_blocks(doc: Document, user_slack: str, *, status: str | None = No
         from_date=doc.from_date,
         user_slack=user_slack,
         to_date=doc.to_date,
+        duration=format_leave_duration(doc),
+        total_days=flt(doc.total_leave_days),
+        leave_balance=leave_balance,
         reason=doc.description,
         status=status,
         status_by=status_by,
     )
+
+
+def message_leave_balance(doc: Document) -> float | None:
+    """
+    Balance before this request for the approver and applicant messages, or
+    None for a Leave Without Pay type: it has no allocation, so no balance
+    """
+    if frappe.db.get_value("Leave Type", doc.leave_type, "is_lwp"):
+        return None
+    return get_leave_balance(doc)
+
+
+def leave_detail_blocks(
+    *,
+    leave_type: str,
+    leave_submission_date: str,
+    from_date: str,
+    to_date: str,
+    duration: str,
+    total_days: float | None = None,
+    leave_balance: float | None = None,
+) -> list:
+    """
+    The leave detail field sections shared by the approver DM and the
+    applicant DM: type and submission date, the date range, then the
+    duration with the requested days and the balance before the request
+    when given. Dates and the duration arrive formatted
+    """
+    details = [{"type": "mrkdwn", "text": f"*Duration:*\n:hourglass_flowing_sand: {duration}"}]
+    if total_days is not None:
+        details.append({"type": "mrkdwn", "text": f"*Requested:*\n{flt(total_days, 2):g} day(s)"})
+    if leave_balance is not None:
+        details.append(
+            {
+                "type": "mrkdwn",
+                "text": f"*Balance before this request:*\n{flt(leave_balance, 2):g} day(s)",
+            }
+        )
+    return [
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*Leave Type:*\n:rocket: {leave_type}"},
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Submitted On:*\n:clock3: {leave_submission_date}",
+                },
+            ],
+        },
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*From:*\n:date: {from_date}"},
+                {"type": "mrkdwn", "text": f"*To:*\n:date: {to_date}"},
+            ],
+        },
+        {"type": "section", "fields": details},
+    ]
+
+
+def reason_block(reason: str | None) -> dict:
+    """
+    The quoted reason section, shared by the approver and applicant DMs
+    """
+    return {
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": f"*Reason:*\n>{reason if reason else 'No reason provided'}",
+        },
+    }
 
 
 def format_leave_submission_blocks(
@@ -530,12 +614,17 @@ def format_leave_submission_blocks(
     from_date: str,
     to_date: str,
     reason: str,
+    duration: str,
     leave_link: str = "#",
+    total_days: float | None = None,
+    leave_balance: float | None = None,
     status: str | None = None,
     status_by: str | None = None,
 ) -> list:
     """
-    Format the blocks for the leave application message.
+    Format the blocks for the applicant's leave confirmation message, with
+    the same detail fields the approver sees (duration, requested days and
+    the balance before the request when given).
 
     With ``status`` (Approved, Rejected or Cancelled) the header reflects the
     decision and a status line, naming ``status_by`` when given, is appended.
@@ -567,34 +656,21 @@ def format_leave_submission_blocks(
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": f"*Leave ID:* <{leave_link}|{leave_id}> • *Submitted On:* {standard_date_fmt(leave_submission_date)}",
+                    "text": f"*Leave ID:* <{leave_link}|{leave_id}>",
                 }
             ],
         },
         {"type": "divider"},
-        {
-            "type": "section",
-            "fields": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"*From:*\n:calendar: {standard_date_fmt(from_date)}",
-                },
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Leave Type:*\n:rocket: {leave_type}",
-                },
-            ],
-        },
-        {
-            "type": "section",
-            "fields": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"*To:*\n:calendar: {standard_date_fmt(to_date)}",
-                },
-                {"type": "mrkdwn", "text": f"*Reason:*\n>{reason}"},
-            ],
-        },
+        *leave_detail_blocks(
+            leave_type=leave_type,
+            leave_submission_date=standard_date_fmt(leave_submission_date),
+            from_date=standard_date_fmt(from_date),
+            to_date=standard_date_fmt(to_date),
+            duration=duration,
+            total_days=total_days,
+            leave_balance=leave_balance,
+        ),
+        reason_block(reason),
     ]
     if status:
         status_text = f"{status} by {status_by}" if status_by else status
@@ -769,11 +845,6 @@ def send_leave_notification_bg(doc: Document, announce_in_thread: bool = True):
 
         # Send message to approver
         if approver_slack is not None:
-            # Leave Without Pay types have no allocation, so the balance is meaningless
-            leave_balance = None
-            if not frappe.db.get_value("Leave Type", doc.leave_type, "is_lwp"):
-                leave_balance = get_leave_balance(doc)
-
             slack.slack_app.client.chat_postMessage(
                 channel=approver_slack,
                 # Fallback for notification previews; the blocks carry the details
@@ -789,7 +860,7 @@ def send_leave_notification_bg(doc: Document, announce_in_thread: bool = True):
                     to_date=standard_date_fmt(doc.to_date),
                     reason=doc.description,
                     total_days=flt(doc.total_leave_days),
-                    leave_balance=leave_balance,
+                    leave_balance=message_leave_balance(doc),
                 ),
             )
 
@@ -1155,17 +1226,6 @@ def format_leave_application_blocks(
     requested = flt(total_days, 2) if total_days is not None else None
     balance = flt(leave_balance, 2) if leave_balance is not None else None
 
-    details = [{"type": "mrkdwn", "text": f"*Duration:*\n:hourglass_flowing_sand: {duration}"}]
-    if requested is not None:
-        details.append({"type": "mrkdwn", "text": f"*Requested:*\n{requested:g} day(s)"})
-    if balance is not None:
-        details.append(
-            {
-                "type": "mrkdwn",
-                "text": f"*Balance before this request:*\n{balance:g} day(s)",
-            }
-        )
-
     blocks = [
         {
             "type": "header",
@@ -1192,24 +1252,15 @@ def format_leave_application_blocks(
             ],
         },
         {"type": "divider"},
-        {
-            "type": "section",
-            "fields": [
-                {"type": "mrkdwn", "text": f"*Leave Type:*\n:rocket: {leave_type}"},
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Submitted On:*\n:clock3: {leave_submission_date}",
-                },
-            ],
-        },
-        {
-            "type": "section",
-            "fields": [
-                {"type": "mrkdwn", "text": f"*From:*\n:date: {from_date}"},
-                {"type": "mrkdwn", "text": f"*To:*\n:date: {to_date}"},
-            ],
-        },
-        {"type": "section", "fields": details},
+        *leave_detail_blocks(
+            leave_type=leave_type,
+            leave_submission_date=leave_submission_date,
+            from_date=from_date,
+            to_date=to_date,
+            duration=duration,
+            total_days=total_days,
+            leave_balance=leave_balance,
+        ),
     ]
 
     # Warn the approver when the request cannot be covered by the recorded balance
@@ -1227,15 +1278,7 @@ def format_leave_application_blocks(
             }
         )
 
-    blocks.append(
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*Reason:*\n>{reason if reason else 'No reason provided'}",
-            },
-        }
-    )
+    blocks.append(reason_block(reason))
 
     blocks.extend(
         [

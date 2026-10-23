@@ -1,10 +1,11 @@
 import hashlib
 import json
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import frappe
 from frappe import _
-from frappe.utils import get_time, getdate, today
+from frappe.utils import get_system_timezone, get_time, getdate, today
 from frappe.utils.synchronization import filelock
 
 from frappe_slack_connector.db.employee import is_company_holiday
@@ -86,14 +87,26 @@ def get_attendance_title(slack_settings) -> str:
     return slack_settings.leave_notification_subject or "Employees on Leave"
 
 
-def updated_at_context_block(updated_at: str) -> dict:
+def slack_time_token(moment: datetime) -> str:
+    """
+    Slack date token for ``moment`` (a naive datetime in the site timezone,
+    as ``frappe.utils.now_datetime`` returns). Slack renders it in each
+    reader's own timezone and clock format; the fallback text, used where
+    tokens are not rendered, is the site time in 12-hour form
+    """
+    aware = moment.replace(tzinfo=ZoneInfo(get_system_timezone()))
+    fallback = moment.strftime("%I:%M %p").lstrip("0")
+    return f"<!date^{int(aware.timestamp())}^{{time}}|{fallback}>"
+
+
+def updated_at_context_block(updated_at: datetime) -> dict:
     """
     Trailing context block that marks an in-place edit; editing a message
     does not notify anyone, so this is how readers can tell it changed
     """
     return {
         "type": "context",
-        "elements": [{"type": "mrkdwn", "text": f"_Updated at {updated_at}_"}],
+        "elements": [{"type": "mrkdwn", "text": f"_Updated at {slack_time_token(updated_at)}_"}],
     }
 
 
@@ -139,7 +152,7 @@ def remember_attendance_hash(message_ts: str, content_hash: str) -> None:
 
 
 def build_attendance_blocks(
-    attendance_title: str, *, updated_at: str | None = None, users_on_leave: list | None = None
+    attendance_title: str, *, updated_at: datetime | None = None, users_on_leave: list | None = None
 ) -> list:
     """
     Build the Slack blocks for today's attendance summary
@@ -306,7 +319,7 @@ def update_attendance_summary() -> None:
         if content_hash == get_attendance_hash(message_ts):
             return
 
-        blocks.append(updated_at_context_block(frappe.utils.now_datetime().strftime("%H:%M")))
+        blocks.append(updated_at_context_block(frappe.utils.now_datetime()))
 
         try:
             slack.slack_app.client.chat_update(

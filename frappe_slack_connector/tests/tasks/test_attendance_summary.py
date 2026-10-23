@@ -1,10 +1,11 @@
 import contextlib
-from datetime import datetime, time
+from datetime import UTC, datetime, time
 from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import frappe
 from frappe.tests import IntegrationTestCase
-from frappe.utils import getdate
+from frappe.utils import get_system_timezone, getdate
 
 from frappe_slack_connector.tasks.attendance_summary import (
     ATTENDANCE_HASH_CACHE_PREFIX,
@@ -14,6 +15,7 @@ from frappe_slack_connector.tasks.attendance_summary import (
     build_attendance_blocks,
     get_leave_type,
     send_notification,
+    slack_time_token,
     update_attendance_summary,
 )
 from frappe_slack_connector.tests import TEST_SLACK_CHANNEL_ID
@@ -101,9 +103,12 @@ def _patch_block_inputs(users_on_leave, *, cache=None):
         yield cache
 
 
+UPDATED_AT = datetime(2026, 6, 15, 14, 32)
+# The edit time is a Slack date token: readers see it in their own timezone and clock format
+UPDATED_AT_EPOCH = int(UPDATED_AT.replace(tzinfo=ZoneInfo(get_system_timezone())).timestamp())
 UPDATED_AT_BLOCK = {
     "type": "context",
-    "elements": [{"type": "mrkdwn", "text": "_Updated at 14:32_"}],
+    "elements": [{"type": "mrkdwn", "text": f"_Updated at <!date^{UPDATED_AT_EPOCH}^{{time}}|2:32 PM>_"}],
 }
 
 
@@ -481,7 +486,7 @@ class TestBuildAttendanceBlocks(IntegrationTestCase):
         """build_attendance_blocks only appends the context block when updated_at is given."""
         with _patch_block_inputs([_build_leave_row()]):
             morning = build_attendance_blocks("Employees on Leave")
-            updated = build_attendance_blocks("Employees on Leave", updated_at="14:32")
+            updated = build_attendance_blocks("Employees on Leave", updated_at=UPDATED_AT)
         self.assertNotIn("context", [b["type"] for b in morning])
         self.assertEqual(updated[-1], UPDATED_AT_BLOCK)
 
@@ -877,3 +882,17 @@ class TestGetLeaveType(IntegrationTestCase):
         ):
             result = get_leave_type(application)
         self.assertEqual(result, "Half Day")
+
+
+class TestSlackTimeToken(IntegrationTestCase):
+    def test_renders_site_time_as_a_slack_date_token_with_a_12_hour_fallback(self):
+        """A naive site-timezone datetime becomes <!date^epoch^{time}|h:mm AM/PM>, so Slack shows each reader their own local time."""
+        with patch(f"{ATTENDANCE_MODULE}.get_system_timezone", return_value="Asia/Kolkata"):
+            token = slack_time_token(datetime(2026, 6, 15, 14, 32))
+        epoch = int(datetime(2026, 6, 15, 9, 2, tzinfo=UTC).timestamp())
+        self.assertEqual(token, f"<!date^{epoch}^{{time}}|2:32 PM>")
+
+    def test_fallback_drops_the_leading_zero_and_keeps_am(self):
+        with patch(f"{ATTENDANCE_MODULE}.get_system_timezone", return_value="UTC"):
+            token = slack_time_token(datetime(2026, 6, 15, 8, 5))
+        self.assertTrue(token.endswith("|8:05 AM>"))

@@ -107,12 +107,40 @@ class TestSlackEndpointsHealth(IntegrationTestCase):
             failures = check_entry_points()
         self.assertEqual(set(failures), {broken})
 
-    def test_releases_the_hour_when_logging_fails(self):
-        """If the Error Log write raises, the next probe must get another chance to log."""
+    def test_releases_the_hour_and_still_answers_503_when_logging_fails(self):
+        """If the Error Log write raises, the monitor still gets the 503 with the list, and the next probe may log again."""
         with (
             patch(f"{HEALTH_MODULE}.check_entry_points", return_value={SLACK_ENTRY_POINTS[0]: "ImportError: x"}),
             patch(f"{HEALTH_MODULE}.frappe.log_error", side_effect=RuntimeError("db down")),
         ):
-            with self.assertRaises(RuntimeError):
-                slack_endpoints()
+            result = slack_endpoints()
+        self.assertEqual(result, {"ok": False, "failed": [SLACK_ENTRY_POINTS[0]]})
+        self.assertEqual(frappe.response["http_status_code"], 503)
         self.assertIsNone(frappe.cache.get(frappe.cache.make_key(LOG_THROTTLE_KEY)))
+
+    def test_health_endpoint_itself_is_guest_get_and_head(self):
+        """Dropping allow_guest or the methods would turn the monitor into a 403; pin them."""
+        self.assertIn(slack_endpoints, frappe.guest_methods)
+        self.assertEqual(frappe.allowed_http_methods_for_whitelisted_func[slack_endpoints], ["GET", "HEAD"])
+
+    def test_reports_an_entry_point_that_no_longer_accepts_post(self):
+        """Slack posts; a methods=["GET"] change would give Slack 403 while the method still imports and is guest-whitelisted."""
+        method = frappe.get_attr(SLACK_ENTRY_POINTS[1])
+        with patch.dict(frappe.allowed_http_methods_for_whitelisted_func, {method: ["GET"]}):
+            failures = check_entry_points()
+        self.assertEqual(failures, {SLACK_ENTRY_POINTS[1]: "POST not allowed"})
+
+    def test_reports_the_next_pms_helper_when_next_pms_is_installed_but_the_import_failed(self):
+        """The workload reminder imports next_pms under try/except; with next_pms present that failure is an upstream rename."""
+        with (
+            patch(f"{HEALTH_MODULE}.is_next_pms_installed", return_value=True, create=True),
+            patch("frappe_slack_connector.tasks.workload_reminder.IMPORT_SUCCESS", False),
+            patch("frappe_slack_connector.db.timesheet.is_next_pms_installed", return_value=True),
+        ):
+            failures = check_entry_points()
+        self.assertEqual(set(failures), {f"{APP}.tasks.workload_reminder"})
+        with (
+            patch("frappe_slack_connector.tasks.workload_reminder.IMPORT_SUCCESS", False),
+            patch("frappe_slack_connector.db.timesheet.is_next_pms_installed", return_value=False),
+        ):
+            self.assertEqual(check_entry_points(), {})

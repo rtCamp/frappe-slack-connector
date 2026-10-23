@@ -28,7 +28,8 @@ def app_modules() -> list[str]:
     names = []
     for path in sorted(root.rglob("*.py")):
         parts = path.relative_to(root).with_suffix("").parts
-        if parts[0] in SKIPPED_DIRS or parts[-1].startswith("test_"):
+        # Per-doctype test files live beside their doctype; api/test_slack_channel.py is production code
+        if parts[0] in SKIPPED_DIRS or ("doctype" in parts and parts[-1].startswith("test_")):
             continue
         if parts[-1] == "__init__":
             parts = parts[:-1]
@@ -94,9 +95,9 @@ class TestImports(IntegrationTestCase):
         # Directories without __init__.py must still be walked
         self.assertIn(f"{APP}.slack.interactions.submit_leave", modules)
         self.assertIn(f"{APP}.tasks.send_daily_reminder", modules)
-        self.assertFalse(
-            [m for m in modules if m.startswith(f"{APP}.tests") or m.rsplit(".", 1)[-1].startswith("test_")]
-        )
+        self.assertFalse([m for m in modules if m.startswith(f"{APP}.tests") or (".doctype." in m and ".test_" in m)])
+        # Not every test_* file is a test: this one is the "Test Slack Channel" button's endpoint
+        self.assertIn(f"{APP}.api.test_slack_channel", modules)
 
     def test_asset_names_are_not_taken_for_entry_points(self):
         """app_include_js = "frappe_slack_connector.bundle.js" must not be resolved with get_attr."""

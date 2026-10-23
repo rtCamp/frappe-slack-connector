@@ -27,10 +27,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Scheduled runs cover both long-lived branches; pushes, pull requests
-        # and manual runs test the ref that triggered them (an empty ref keeps
+        # Scheduled runs, and a manual run started from develop, cover both
+        # long-lived branches; pushes, pull requests and a manual run on any
+        # other branch test the ref that triggered them (an empty ref keeps
         # actions/checkout's default)
-        ref: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('["develop", "version-16"]') || fromJSON('[""]') }}
+        ref: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref_name == 'develop')) && fromJSON('["develop", "version-16"]') || fromJSON('[""]') }}
 
     services:
       redis-cache:
@@ -101,5 +102,5 @@ jobs:
             echo "SLACK_ALERT_WEBHOOK_URL is not set; only GitHub's failure email goes out"
             exit 0
           fi
-          payload=$(jq -nc --arg text ":red_circle: frappe_slack_connector tests failed against upstream version-16 on \`$BRANCH\`: $RUN_URL" '{text: $text}')
+          payload=$(jq -nc --arg text ":red_circle: frappe_slack_connector Unit Tests run failed (tests or setup) against upstream version-16 on \`$BRANCH\`: $RUN_URL" '{text: $text}')
           curl -sSf -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"

@@ -1,5 +1,5 @@
 import time
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
@@ -386,3 +386,28 @@ class TestVerifySlackRequest(IntegrationTestCase):
                 req_data=body,
             )
         mock_cmp.assert_called_once()
+
+
+class TestResolveChannelId(IntegrationTestCase):
+    def _slack(self, channels):
+        slack = SlackIntegration.__new__(SlackIntegration)
+        slack.get_slack_channels = lambda: channels
+        return slack
+
+    def test_returns_an_id_as_is_without_looking_up_channels(self):
+        slack = SlackIntegration.__new__(SlackIntegration)
+        slack.get_slack_channels = MagicMock()
+        self.assertEqual(slack.resolve_channel_id("C07J4LQNEN9"), "C07J4LQNEN9")
+        self.assertEqual(slack.resolve_channel_id("G0ABCDEFG"), "G0ABCDEFG")
+        slack.get_slack_channels.assert_not_called()
+
+    def test_resolves_a_name_with_or_without_hash_case_insensitively(self):
+        slack = self._slack([{"id": "C0ATT", "name": "attendance"}, {"id": "C0GEN", "name": "general"}])
+        self.assertEqual(slack.resolve_channel_id("attendance"), "C0ATT")
+        self.assertEqual(slack.resolve_channel_id("#Attendance"), "C0ATT")
+
+    def test_returns_none_for_an_unknown_name_or_an_empty_value(self):
+        slack = self._slack([{"id": "C0GEN", "name": "general"}])
+        self.assertIsNone(slack.resolve_channel_id("attendance"))
+        self.assertIsNone(slack.resolve_channel_id(""))
+        self.assertIsNone(slack.resolve_channel_id(None))

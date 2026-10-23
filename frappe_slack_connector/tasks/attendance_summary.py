@@ -1,10 +1,13 @@
+import hashlib
+import json
 from datetime import datetime
 
 import frappe
-from erpnext.setup.doctype.holiday_list.holiday_list import is_holiday
 from frappe import _
 from frappe.utils import get_time, getdate, today
+from frappe.utils.synchronization import filelock
 
+from frappe_slack_connector.db.employee import is_company_holiday
 from frappe_slack_connector.db.leave_application import (
     custom_fields_exist,
     get_employees_on_leave,
@@ -13,6 +16,15 @@ from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
 from frappe_slack_connector.slack.app import SlackIntegration
 
+# Name of the site-level lock that serialises in-place summary updates
+ATTENDANCE_UPDATE_LOCK = "fsc_attendance_summary_update"
+
+# Cache key prefix for the fingerprint of what a summary message currently
+# shows, keyed by the message ts; kept for two days so the entry outlives the
+# message it describes without piling up
+ATTENDANCE_HASH_CACHE_PREFIX = "fsc_attendance_summary_hash"
+ATTENDANCE_HASH_TTL_SECONDS = 2 * 24 * 60 * 60
+
 
 def attendance_channel() -> None:
     """
@@ -20,8 +32,10 @@ def attendance_channel() -> None:
     Enqueues the background job to post the message
     Conditions:
      - Check send attendance updates is enabled
-     - Check if the current date is a working day (weekends, holidays)
+     - Check if the current date is a weekday
      - Check if current date notification is sent
+     - On a company holiday, post only if someone on another holiday
+       list (support, US) is on leave; otherwise there is nothing to report
      - If not, send the notification, set the updated date in Slack Settings
     """
     slack_settings = frappe.get_single("Slack Settings")
@@ -31,7 +45,6 @@ def attendance_channel() -> None:
     if (
         slack_settings.send_attendance_updates != 1
         or current_day > 4  # sat = 5, sun = 6
-        or is_holiday(current_date)
         or (
             slack_settings.last_attendance_date is not None
             and slack_settings.last_attendance_date == frappe.utils.nowdate()
@@ -40,32 +53,112 @@ def attendance_channel() -> None:
     ):
         return
 
+    # get_employees_on_leave already drops employees whose own holiday list
+    # marks today a holiday, so on a company holiday only employees on
+    # another calendar remain. Nobody left means a day off for everyone.
+    users_on_leave = get_employees_on_leave()
+    if not users_on_leave and is_company_holiday(current_date):
+        return
+
     # Send the attendance summary to the Slack channel
-    message_ts = send_notification(
-        slack_settings.leave_notification_subject
-        if slack_settings.leave_notification_subject
-        else "Employees on Leave"  # Default title
+    message_ts, channel_id = send_notification(get_attendance_title(slack_settings), users_on_leave) or (None, None)
+
+    # Stamp the day with a direct write: a full save() would write back every
+    # column of the in-memory doc loaded before the post, overwriting whatever
+    # another process changed in Slack Settings meanwhile.
+    # The channel ID comes from Slack's response: chat.postMessage accepts a
+    # channel name, but chat.update (the in-place refresh) only accepts an ID
+    frappe.db.set_single_value(
+        "Slack Settings",
+        {
+            "last_attendance_date": frappe.utils.nowdate(),
+            "last_attendance_msg_ts": message_ts,
+            "last_attendance_channel_id": channel_id,
+        },
     )
 
-    # Update the last attendance date
-    slack_settings.last_attendance_date = frappe.utils.nowdate()
-    slack_settings.last_attendance_msg_ts = message_ts
-    slack_settings.save(ignore_permissions=True)
+
+def get_attendance_title(slack_settings) -> str:
+    """
+    Title used for the attendance summary header, falling back to a default
+    when Slack Settings has no leave notification subject
+    """
+    return slack_settings.leave_notification_subject or "Employees on Leave"
 
 
-def send_notification(attendance_title: str) -> str | None:
+def updated_at_context_block(updated_at: str) -> dict:
     """
-    Background job to post the attendance summary to the Slack channel
-    Returns the message timestamp if successful
+    Trailing context block that marks an in-place edit; editing a message
+    does not notify anyone, so this is how readers can tell it changed
     """
-    slack = SlackIntegration()
+    return {
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": f"_Updated at {updated_at}_"}],
+    }
+
+
+def attendance_blocks_hash(blocks: list) -> str:
+    """
+    Fingerprint of the summary content, used to skip a Slack edit that
+    would change nothing (for example the later jobs of a bulk reject, each
+    of which rebuilds the same list). Callers hash the content blocks before
+    appending the "Updated at" block, so the time of an edit is not a change
+    """
+    return hashlib.sha256(json.dumps(blocks, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _attendance_hash_key(message_ts: str) -> str:
+    return f"{ATTENDANCE_HASH_CACHE_PREFIX}:{message_ts}"
+
+
+def get_attendance_hash(message_ts: str) -> str | None:
+    """
+    Fingerprint of what the summary message ``message_ts`` currently shows,
+    or None when unknown (never recorded, expired, or the cache was flushed)
+    """
+    return frappe.cache.get_value(_attendance_hash_key(message_ts))
+
+
+def remember_attendance_hash(message_ts: str, content_hash: str) -> None:
+    """
+    Record what Slack now shows for ``message_ts``, right after Slack
+    accepted the post or edit. Lives in the cache, not in Slack Settings:
+    a document write would bump its ``modified`` on every refresh and make
+    any long-running job that later saves Slack Settings fail its timestamp
+    check. Never raises: losing the fingerprint only costs one redundant edit
+    """
+    try:
+        frappe.cache.set_value(
+            _attendance_hash_key(message_ts), content_hash, expires_in_sec=ATTENDANCE_HASH_TTL_SECONDS
+        )
+    except Exception as e:
+        generate_error_log(
+            title=_("Error remembering the attendance summary fingerprint"),
+            exception=e,
+        )
+
+
+def build_attendance_blocks(
+    attendance_title: str, *, updated_at: str | None = None, users_on_leave: list | None = None
+) -> list:
+    """
+    Build the Slack blocks for today's attendance summary
+    Runs the leave query, groups the employees by leave type and formats
+    the result. When ``updated_at`` is given a trailing context block is
+    appended so readers can tell the message was edited in place; this is
+    the only difference between the morning post and an in-place update.
+
+    ``users_on_leave`` is the result of ``get_employees_on_leave``; it is
+    fetched here when the caller has not already done so
+    """
     mention_users = frappe.db.get_single_value("Slack Settings", "mention_user")
     leave_groups = {"Full Day": [], "Half Day": []}
     if custom_fields_exist():
         leave_groups["First-Half"] = []
         leave_groups["Second-Half"] = []
 
-    users_on_leave = get_employees_on_leave()
+    if users_on_leave is None:
+        users_on_leave = get_employees_on_leave()
 
     if users_on_leave:
         # Batch fetch employee user_ids
@@ -109,19 +202,41 @@ def send_notification(attendance_title: str) -> str | None:
         }
         leave_groups[leave_type].append(leave_info)
 
-    leave_details_mrkdwn = format_leave_groups(leave_groups)
+    blocks = format_attendance_blocks(
+        date_string=standard_date_fmt(frappe.utils.nowdate()),
+        attendance_title=attendance_title,
+        employee_count=len(users_on_leave),
+        leave_details_mrkdwn=format_leave_groups(leave_groups),
+    )
+
+    if updated_at:
+        blocks.append(updated_at_context_block(updated_at))
+
+    return blocks
+
+
+def send_notification(attendance_title: str, users_on_leave: list | None = None) -> tuple[str, str] | None:
+    """
+    Background job to post the attendance summary to the Slack channel
+    Returns the message timestamp and the ID of the channel it landed in
+    (as reported by Slack, even when the setting holds a channel name) if
+    successful
+    """
+    slack = SlackIntegration()
+    if not slack.SLACK_CHANNEL_ID:
+        generate_error_log(
+            title=_("Attendance channel not set"),
+            message=_("Set the Attendance Channel ID in Slack Settings."),
+        )
+        return None
+
+    blocks = build_attendance_blocks(attendance_title, users_on_leave=users_on_leave)
 
     try:
         message = slack.slack_app.client.chat_postMessage(
             channel=slack.SLACK_CHANNEL_ID,
-            blocks=format_attendance_blocks(
-                date_string=standard_date_fmt(frappe.utils.nowdate()),
-                attendance_title=attendance_title,
-                employee_count=len(users_on_leave),
-                leave_details_mrkdwn=leave_details_mrkdwn,
-            ),
+            blocks=blocks,
         )
-        return message["ts"]
     except Exception as e:
         generate_error_log(
             title=_("Error posting message to Slack"),
@@ -130,16 +245,102 @@ def send_notification(attendance_title: str) -> str | None:
             msgprint=True,
             realtime=True,
         )
+        return None
+
+    # Remember what was posted so a later refresh with the same content can
+    # skip the edit
+    remember_attendance_hash(message["ts"], attendance_blocks_hash(blocks))
+    return message["ts"], message.get("channel")
 
 
-def get_leave_type(user_application: dict) -> str:
+def update_attendance_summary() -> None:
+    """
+    Background job to rebuild today's attendance summary and edit the
+    already-posted Slack message in place
+    Runs when a leave covering today changes after the morning post (for
+    example it is rejected or cancelled, or a new one is applied for), so
+    the list and the header count stay accurate for the rest of the day.
+    Does nothing when today's summary has not been posted yet: the morning
+    post will pick up the current state on its own.
+
+    The whole job (read, build, compare, edit) runs under a site-level file
+    lock so that concurrent refreshes (for example a bulk reject queues one
+    job per leave) cannot interleave and let an older read overwrite a newer
+    edit. Within the lock the rebuilt content is compared with the cached
+    fingerprint of what the message currently shows; when they match (the
+    earlier job of that burst already caught up with every change) the Slack
+    call is skipped. The fingerprint is recorded right after Slack accepts
+    the edit, still inside the lock, so the next job compares against what
+    Slack really shows.
+    """
+    with filelock(ATTENDANCE_UPDATE_LOCK, timeout=60):
+        slack_settings = frappe.get_single("Slack Settings")
+        if (
+            slack_settings.send_attendance_updates != 1
+            or not slack_settings.last_attendance_msg_ts
+            or not slack_settings.last_attendance_date
+            or getdate(slack_settings.last_attendance_date) != getdate(today())
+        ):
+            return
+
+        slack = SlackIntegration()
+        if not slack.SLACK_CHANNEL_ID:
+            return
+
+        # chat.update needs a channel ID (a name gives channel_not_found), so
+        # edit in the channel Slack reported when the summary was posted; the
+        # setting is only a fallback for a summary posted before that was
+        # stored, and may hold a name, so resolve it
+        channel_id = slack_settings.get("last_attendance_channel_id") or slack.resolve_channel_id(
+            slack.SLACK_CHANNEL_ID
+        )
+        if not channel_id:
+            generate_error_log(
+                title=_("Error updating attendance summary in Slack"),
+                message=_("The attendance channel could not be resolved to a channel ID."),
+            )
+            return
+        message_ts = slack_settings.last_attendance_msg_ts
+        blocks = build_attendance_blocks(get_attendance_title(slack_settings))
+        content_hash = attendance_blocks_hash(blocks)
+        if content_hash == get_attendance_hash(message_ts):
+            return
+
+        blocks.append(updated_at_context_block(frappe.utils.now_datetime().strftime("%H:%M")))
+
+        try:
+            slack.slack_app.client.chat_update(
+                channel=channel_id,
+                ts=message_ts,
+                blocks=blocks,
+            )
+        except Exception as e:
+            generate_error_log(
+                title=_("Error updating attendance summary in Slack"),
+                message=_("Please check the channel ID and try again."),
+                exception=e,
+            )
+            return
+
+        remember_attendance_hash(message_ts, content_hash)
+
+
+def get_leave_type(user_application: dict, on_date=None) -> str:
     """
     Get the leave type based on the user's leave application
     For standalone installations, the custom fields are not available,
     so only use Full Day, and Half Day
     For rtCamp installation, use Full Day, First-Half, and Second-Half
+
+    The half day only counts when ``half_day_date`` falls on ``on_date``
+    (today by default). ``half_day_date`` may be a date or a string.
     """
-    if not user_application.half_day or user_application.half_day_date != getdate(today()):
+    on_date = getdate(on_date) if on_date else getdate(today())
+    if (
+        not user_application.half_day
+        or not user_application.half_day_date
+        or getdate(user_application.half_day_date) != on_date
+    ):
         return "Full Day"
     elif not custom_fields_exist():
         return "Half Day"

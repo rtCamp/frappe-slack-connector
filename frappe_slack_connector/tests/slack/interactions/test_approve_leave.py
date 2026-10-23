@@ -106,10 +106,13 @@ class TestApproveLeaveHandler(IntegrationTestCase):
             patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
             patch(f"{APPROVE_LEAVE_MODULE}.approve_leave", side_effect=RuntimeError("boom")),
             patch(f"{APPROVE_LEAVE_MODULE}.reject_leave"),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.rollback") as mock_rollback,
             patch(f"{APPROVE_LEAVE_MODULE}.generate_error_log") as mock_log,
         ):
             handler(slack=mock_slack, payload=payload)
-        # Logged before the modal: an expired trigger_id must not lose the original error
+        # Rolled back so the database matches the error the approver sees, then logged
+        # before the modal: an expired trigger_id must not lose the original error
+        mock_rollback.assert_called_once()
         mock_log.assert_called_once()
         self.assertEqual(str(mock_log.call_args.kwargs["exception"]), "boom")
         mock_slack.slack_app.client.views_open.assert_called_once()
@@ -133,10 +136,12 @@ class TestApproveLeaveHandler(IntegrationTestCase):
                 patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
                 patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
                 patch(f"{APPROVE_LEAVE_MODULE}.approve_leave", side_effect=deny),
+                patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.rollback") as mock_rollback,
                 patch(f"{APPROVE_LEAVE_MODULE}.generate_error_log"),
             ):
                 handler(slack=mock_slack, payload=payload)
         finally:
             frappe.clear_messages()
+        mock_rollback.assert_called_once()
         view = mock_slack.slack_app.client.views_open.call_args.kwargs["view"]
         self.assertIn("You are not allowed to access this Leave Application record", view["blocks"][2]["text"]["text"])

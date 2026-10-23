@@ -97,6 +97,9 @@ def handler(slack: SlackIntegration, payload: dict):
         clear_messages()
 
     except Exception as e:
+        # Undo a partial save: a hook raising after the insert would otherwise
+        # leave the row behind, since the request commits once this returns
+        frappe.db.rollback()
         # Log before replying: the modal shows the message to the applicant, but
         # nothing else records why a Slack-filed leave was refused
         generate_error_log(title="Error submitting leave request", exception=e)

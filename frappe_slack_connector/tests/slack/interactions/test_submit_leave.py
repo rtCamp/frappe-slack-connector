@@ -153,6 +153,7 @@ class TestSubmitLeaveHandler(IntegrationTestCase):
             ),
             patch(f"{SUBMIT_LEAVE_MODULE}.custom_fields_exist", return_value=False),
             patch(f"{SUBMIT_LEAVE_MODULE}.send_http_response") as mock_response,
+            patch(f"{SUBMIT_LEAVE_MODULE}.frappe.db.rollback") as mock_rollback,
             patch(f"{SUBMIT_LEAVE_MODULE}.generate_error_log") as mock_log,
         ):
             handler(slack=MagicMock(), payload=payload)
@@ -164,6 +165,8 @@ class TestSubmitLeaveHandler(IntegrationTestCase):
         # (the balance lookup on the mock doc logs its own entry first)
         submit_logs = [c for c in mock_log.call_args_list if c.kwargs["title"] == "Error submitting leave request"]
         self.assertEqual(len(submit_logs), 1)
+        # A hook failing after the insert must not leave the row behind
+        mock_rollback.assert_called_once()
         self.assertIs(submit_logs[0].kwargs["exception"], mock_leave_app.save.side_effect)
 
     def test_error_modal_shows_the_frappe_message_when_the_exception_has_none(self):
@@ -186,6 +189,7 @@ class TestSubmitLeaveHandler(IntegrationTestCase):
                 patch(f"{SUBMIT_LEAVE_MODULE}.get_leave_approver", return_value="approver@x.com"),
                 patch(f"{SUBMIT_LEAVE_MODULE}.custom_fields_exist", return_value=False),
                 patch(f"{SUBMIT_LEAVE_MODULE}.send_http_response") as mock_response,
+                patch(f"{SUBMIT_LEAVE_MODULE}.frappe.db.rollback") as mock_rollback,
                 patch(f"{SUBMIT_LEAVE_MODULE}.generate_error_log"),
             ):
                 handler(slack=MagicMock(), payload=payload)
@@ -193,6 +197,7 @@ class TestSubmitLeaveHandler(IntegrationTestCase):
             frappe.clear_messages()
         body = mock_response.call_args.kwargs["body"]
         self.assertIn("You are not allowed to create Leave Application", body["view"]["blocks"][2]["text"]["text"])
+        mock_rollback.assert_called_once()
 
     def test_switches_session_to_applicant_before_saving(self):
         """handler resolves the Frappe user for the Slack user and calls frappe.set_user with it before the Leave Application is saved, so the save and the enqueued notification jobs do not run as Guest."""
@@ -230,6 +235,7 @@ class TestSubmitLeaveHandler(IntegrationTestCase):
             patch(f"{SUBMIT_LEAVE_MODULE}.get_leave_approver", return_value="approver@x.com"),
             patch(f"{SUBMIT_LEAVE_MODULE}.custom_fields_exist", return_value=False),
             patch(f"{SUBMIT_LEAVE_MODULE}.send_http_response") as mock_response,
+            patch(f"{SUBMIT_LEAVE_MODULE}.frappe.db.rollback") as mock_rollback,
             patch(f"{SUBMIT_LEAVE_MODULE}.generate_error_log") as mock_log,
         ):
             handler(slack=MagicMock(), payload=payload)
@@ -239,6 +245,7 @@ class TestSubmitLeaveHandler(IntegrationTestCase):
         body = mock_response.call_args.kwargs["body"]
         self.assertEqual(body["response_action"], "push")
         self.assertIn("No user found for this Slack user", body["view"]["blocks"][2]["text"]["text"])
+        mock_rollback.assert_called_once()
 
     def test_still_saves_when_the_balance_lookup_fails(self):
         """A failed HRMS balance lookup is logged and the leave is still saved (the approver DM computes its own balance)."""
@@ -254,11 +261,14 @@ class TestSubmitLeaveHandler(IntegrationTestCase):
             patch(f"{SUBMIT_LEAVE_MODULE}.frappe.db.commit"),
             patch(f"{SUBMIT_LEAVE_MODULE}.clear_messages"),
             patch(f"{SUBMIT_LEAVE_MODULE}.get_leave_balance_on", side_effect=PermissionError("Not permitted")),
+            patch(f"{SUBMIT_LEAVE_MODULE}.frappe.db.rollback") as mock_rollback,
             patch(f"{SUBMIT_LEAVE_MODULE}.generate_error_log") as mock_log,
         ):
             handler(slack=MagicMock(), payload=payload)
         mock_log.assert_called_once()
         mock_leave_app.save.assert_called_once_with(ignore_permissions=True)
+        # The balance is only a detail on the message; a failed lookup is logged, not a failed submit
+        mock_rollback.assert_not_called()
 
 
 class TestHalfDayCheckboxHandler(IntegrationTestCase):

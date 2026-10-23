@@ -56,6 +56,11 @@ def handler(slack: SlackIntegration, payload: dict):
             blocks=blocks,
         )
     except Exception as e:
+        # Undo whatever the action wrote before it failed: a hook raising after
+        # the submit (another app's on_update) would otherwise leave the leave
+        # approved in the database while the approver is shown an error, since
+        # the request still commits once this handler returns
+        frappe.db.rollback()
         # Log first: the error modal below needs a live trigger_id, and when it
         # fails too the only trace of the original error would be lost
         generate_error_log(title="Error taking action on leave request", exception=e)

@@ -98,7 +98,9 @@ class TestRejectLeave(IntegrationTestCase):
 class TestGetEmployeesOnLeave(IntegrationTestCase):
     """Rows are written with ``db_insert`` so no Leave Application / Employee
     controller validation (allocations, approvers, holiday lists) runs. The
-    function under test only reads the two tables, so that is all it needs."""
+    function under test reads the two tables and resolves each employee's
+    holiday list; that lookup is patched in ``setUp`` (see there), and has its
+    own on-site test in ``test_employee.py``."""
 
     ACTIVE_EMPLOYEE = "_T-FSC-EMP-ACTIVE"
     LEFT_EMPLOYEE = "_T-FSC-EMP-LEFT"
@@ -187,9 +189,7 @@ class TestGetEmployeesOnLeave(IntegrationTestCase):
 
     def test_includes_open_and_approved_leave(self):
         """Leave is approved by default, so both Open (draft) and Approved (submitted) leave covering today is reported."""
-        on_leave = self._employees_on_leave()
-        self.assertIn(self.OPEN_EMPLOYEE, on_leave)
-        self.assertIn(self.ACTIVE_EMPLOYEE, on_leave)
+        self.assertIn(self.OPEN_EMPLOYEE, self._employees_on_leave())
 
     def test_excludes_rejected_leave(self):
         """A submitted leave with status Rejected covering today is not reported, so a rebuilt summary drops the person."""
@@ -212,6 +212,8 @@ class TestGetEmployeesOnLeave(IntegrationTestCase):
         ) as mock_on_holiday:
             on_leave = {row.employee for row in get_employees_on_leave()}
         self.assertNotIn(self.ACTIVE_EMPLOYEE, on_leave)
+        # Positive control: only the employee on holiday is dropped
+        self.assertIn(self.OPEN_EMPLOYEE, on_leave)
         # Only active employees are checked, and against today.
         mock_on_holiday.assert_called_once()
         checked, on_date = mock_on_holiday.call_args.args

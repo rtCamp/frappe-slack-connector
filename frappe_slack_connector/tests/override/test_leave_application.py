@@ -1187,12 +1187,15 @@ class TestFormatLeaveApplicationBlocks(IntegrationTestCase):
         self.assertEqual(blocks[0]["type"], "header")
         self.assertIn("New Leave Application", blocks[0]["text"]["text"])
         self.assertIn("<@U-applicant> has submitted a new leave request.", blocks[1]["text"]["text"])
-        self.assertIn("HR-LAP-0050", blocks[2]["elements"][0]["text"])
+        self.assertEqual(
+            blocks[2]["elements"][0]["text"],
+            "*Leave ID:* <https://erp.example.com/app/leave-application/HR-LAP-0050|HR-LAP-0050>"
+            " • *Submitted On:* Jun 09, 2026 (Tue)",
+        )
 
         field_sections = [b for b in blocks if b.get("type") == "section" and "fields" in b]
         field_texts = [f["text"] for section in field_sections for f in section["fields"]]
         self.assertIn("*Leave Type:*\n:rocket: Casual Leave", field_texts)
-        self.assertIn("*Submitted On:*\n:clock3: Jun 09, 2026 (Tue)", field_texts)
         self.assertIn("*From:*\n:date: Jun 15, 2026 (Mon)", field_texts)
         self.assertIn("*To:*\n:date: Jun 17, 2026 (Wed)", field_texts)
         self.assertIn("*Duration:*\n:hourglass_flowing_sand: Full Day", field_texts)
@@ -1256,6 +1259,7 @@ class TestFormatLeaveSubmissionBlocks(IntegrationTestCase):
         blocks = format_leave_submission_blocks(**self._default_kwargs())
         approver = format_leave_application_blocks(
             leave_id="HR-LAP-0050",
+            leave_link="https://erp.example.com/app/leave-application/HR-LAP-0050",
             employee_name="<@U-applicant>",
             leave_type="Casual Leave",
             leave_submission_date="Jun 09, 2026 (Tue)",
@@ -1270,9 +1274,11 @@ class TestFormatLeaveSubmissionBlocks(IntegrationTestCase):
         self.assertEqual(fields(blocks), fields(approver))
         self.assertEqual(blocks[0]["text"]["text"], ":memo: Leave Request Submitted")
         self.assertIn("Hello<@U-applicant>!", blocks[1]["text"]["text"])
+        self.assertEqual(blocks[2], approver[2])
         self.assertEqual(
             blocks[2]["elements"][0]["text"],
-            "*Leave ID:* <https://erp.example.com/app/leave-application/HR-LAP-0050|HR-LAP-0050>",
+            "*Leave ID:* <https://erp.example.com/app/leave-application/HR-LAP-0050|HR-LAP-0050>"
+            " • *Submitted On:* Jun 09, 2026 (Tue)",
         )
         self.assertEqual(blocks[-1]["text"]["text"], "*Reason:*\n>vacation")
         self.assertNotIn("actions", [b["type"] for b in blocks])
@@ -2123,7 +2129,7 @@ class TestSendLeaveNotificationToApplicant(IntegrationTestCase):
         self.assertIn("*Duration:*\n:hourglass_flowing_sand: Full Day", text)
         self.assertIn("*Requested:*\n3 day(s)", text)
         self.assertIn("*Balance before this request:*\n10 day(s)", text)
-        self.assertIn("*Submitted On:*\n:clock3: Jun 09, 2026 (Tue)", text)
+        self.assertIn("• *Submitted On:* Jun 09, 2026 (Tue)", text)
 
     def test_applicant_dm_shows_the_half_day_period_and_no_balance_for_leave_without_pay(self):
         """A single-day second-half leave reads "Second Half"; a Leave Without Pay type has no allocation, so no balance line."""

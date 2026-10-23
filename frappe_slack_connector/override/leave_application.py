@@ -543,10 +543,25 @@ def message_leave_balance(doc: Document) -> float | None:
     return get_leave_balance(doc)
 
 
+def leave_id_context_block(*, leave_id: str, leave_link: str, leave_submission_date: str) -> dict:
+    """
+    The "Leave ID • Submitted On" context line shared by the approver and
+    applicant DMs. ``leave_submission_date`` arrives formatted
+    """
+    return {
+        "type": "context",
+        "elements": [
+            {
+                "type": "mrkdwn",
+                "text": f"*Leave ID:* <{leave_link}|{leave_id}> • *Submitted On:* {leave_submission_date}",
+            }
+        ],
+    }
+
+
 def leave_detail_blocks(
     *,
     leave_type: str,
-    leave_submission_date: str,
     from_date: str,
     to_date: str,
     duration: str,
@@ -555,29 +570,16 @@ def leave_detail_blocks(
 ) -> list:
     """
     The leave detail field sections shared by the approver DM and the
-    applicant DM: type and submission date, the date range, then the
-    duration with the requested days and the balance before the request
-    when given. Dates and the duration arrive formatted
+    applicant DM: type and duration, the date range, then the requested
+    days and the balance before the request when given. Dates and the
+    duration arrive formatted
     """
-    details = [{"type": "mrkdwn", "text": f"*Duration:*\n:hourglass_flowing_sand: {duration}"}]
-    if total_days is not None:
-        details.append({"type": "mrkdwn", "text": f"*Requested:*\n{flt(total_days, 2):g} day(s)"})
-    if leave_balance is not None:
-        details.append(
-            {
-                "type": "mrkdwn",
-                "text": f"*Balance before this request:*\n{flt(leave_balance, 2):g} day(s)",
-            }
-        )
-    return [
+    blocks = [
         {
             "type": "section",
             "fields": [
                 {"type": "mrkdwn", "text": f"*Leave Type:*\n:rocket: {leave_type}"},
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Submitted On:*\n:clock3: {leave_submission_date}",
-                },
+                {"type": "mrkdwn", "text": f"*Duration:*\n:hourglass_flowing_sand: {duration}"},
             ],
         },
         {
@@ -587,8 +589,20 @@ def leave_detail_blocks(
                 {"type": "mrkdwn", "text": f"*To:*\n:date: {to_date}"},
             ],
         },
-        {"type": "section", "fields": details},
     ]
+    details = []
+    if total_days is not None:
+        details.append({"type": "mrkdwn", "text": f"*Requested:*\n{flt(total_days, 2):g} day(s)"})
+    if leave_balance is not None:
+        details.append(
+            {
+                "type": "mrkdwn",
+                "text": f"*Balance before this request:*\n{flt(leave_balance, 2):g} day(s)",
+            }
+        )
+    if details:
+        blocks.append({"type": "section", "fields": details})
+    return blocks
 
 
 def reason_block(reason: str | None) -> dict:
@@ -651,19 +665,12 @@ def format_leave_submission_blocks(
                 "text": intro,
             },
         },
-        {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Leave ID:* <{leave_link}|{leave_id}>",
-                }
-            ],
-        },
+        leave_id_context_block(
+            leave_id=leave_id, leave_link=leave_link, leave_submission_date=standard_date_fmt(leave_submission_date)
+        ),
         {"type": "divider"},
         *leave_detail_blocks(
             leave_type=leave_type,
-            leave_submission_date=standard_date_fmt(leave_submission_date),
             from_date=standard_date_fmt(from_date),
             to_date=standard_date_fmt(to_date),
             duration=duration,
@@ -1242,19 +1249,10 @@ def format_leave_application_blocks(
                 "text": f"{employee_name} has submitted a new leave request.",
             },
         },
-        {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Leave ID:* <{leave_link}|{leave_id}> ",
-                }
-            ],
-        },
+        leave_id_context_block(leave_id=leave_id, leave_link=leave_link, leave_submission_date=leave_submission_date),
         {"type": "divider"},
         *leave_detail_blocks(
             leave_type=leave_type,
-            leave_submission_date=leave_submission_date,
             from_date=from_date,
             to_date=to_date,
             duration=duration,

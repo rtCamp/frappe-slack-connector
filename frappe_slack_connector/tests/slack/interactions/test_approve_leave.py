@@ -51,6 +51,7 @@ class TestApproveLeaveHandler(IntegrationTestCase):
         with (
             patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
             patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.commit"),
             patch(f"{APPROVE_LEAVE_MODULE}.approve_leave") as mock_approve,
             patch(f"{APPROVE_LEAVE_MODULE}.reject_leave") as mock_reject,
         ):
@@ -65,6 +66,7 @@ class TestApproveLeaveHandler(IntegrationTestCase):
         with (
             patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
             patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.commit"),
             patch(f"{APPROVE_LEAVE_MODULE}.approve_leave"),
             patch(f"{APPROVE_LEAVE_MODULE}.reject_leave"),
         ):
@@ -87,6 +89,7 @@ class TestApproveLeaveHandler(IntegrationTestCase):
         with (
             patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
             patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.commit"),
             patch(f"{APPROVE_LEAVE_MODULE}.approve_leave"),
             patch(f"{APPROVE_LEAVE_MODULE}.reject_leave"),
         ):
@@ -104,6 +107,7 @@ class TestApproveLeaveHandler(IntegrationTestCase):
         with (
             patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
             patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.commit"),
             patch(f"{APPROVE_LEAVE_MODULE}.approve_leave", side_effect=RuntimeError("boom")),
             patch(f"{APPROVE_LEAVE_MODULE}.reject_leave"),
             patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.rollback") as mock_rollback,
@@ -135,6 +139,7 @@ class TestApproveLeaveHandler(IntegrationTestCase):
             with (
                 patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
                 patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
+                patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.commit"),
                 patch(f"{APPROVE_LEAVE_MODULE}.approve_leave", side_effect=deny),
                 patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.rollback") as mock_rollback,
                 patch(f"{APPROVE_LEAVE_MODULE}.generate_error_log"),
@@ -145,3 +150,24 @@ class TestApproveLeaveHandler(IntegrationTestCase):
         mock_rollback.assert_called_once()
         view = mock_slack.slack_app.client.views_open.call_args.kwargs["view"]
         self.assertIn("You are not allowed to access this Leave Application record", view["blocks"][2]["text"]["text"])
+
+    def test_approval_is_committed_before_the_slack_update(self):
+        """A Slack failure while editing the message must not roll back a decision that was already taken."""
+        payload = _build_action_payload(action_id="leave_approve")
+        mock_slack = MagicMock()
+        mock_slack.slack_app.client.chat_update.side_effect = RuntimeError("ratelimited")
+        with (
+            patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.commit") as mock_commit,
+            patch(f"{APPROVE_LEAVE_MODULE}.approve_leave") as mock_approve,
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.rollback") as mock_rollback,
+            patch(f"{APPROVE_LEAVE_MODULE}.generate_error_log") as mock_log,
+        ):
+            handler(slack=mock_slack, payload=payload)
+        mock_approve.assert_called_once()
+        mock_commit.assert_called_once()
+        # The rollback that follows only covers what came after the commit
+        mock_rollback.assert_called_once()
+        mock_log.assert_called_once()
+        mock_slack.slack_app.client.views_open.assert_called_once()

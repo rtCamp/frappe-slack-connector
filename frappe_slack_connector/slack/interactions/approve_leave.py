@@ -1,3 +1,5 @@
+import contextlib
+
 import frappe
 from frappe import _
 
@@ -30,6 +32,9 @@ def handler(slack: SlackIntegration, payload: dict):
             reject_leave(leave_id)
         else:
             frappe.throw(_("Unknown action"))
+        # The decision is final once it is written: a Slack failure while
+        # updating the message below must not roll it back
+        frappe.db.commit()  # nosemgrep
 
         blocks = payload["message"]["blocks"]
 
@@ -60,7 +65,8 @@ def handler(slack: SlackIntegration, payload: dict):
         # the submit (another app's on_update) would otherwise leave the leave
         # approved in the database while the approver is shown an error, since
         # the request still commits once this handler returns
-        frappe.db.rollback()
+        with contextlib.suppress(Exception):  # a lost connection must not hide the log and the modal
+            frappe.db.rollback()
         # Log first: the error modal below needs a live trigger_id, and when it
         # fails too the only trace of the original error would be lost
         generate_error_log(title="Error taking action on leave request", exception=e)

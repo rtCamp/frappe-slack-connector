@@ -1,6 +1,7 @@
 import traceback
 
 import frappe
+from frappe.utils import strip_html_tags
 
 
 def generate_error_log(
@@ -16,11 +17,10 @@ def generate_error_log(
     """
     # The traceback, not just str(exception): frappe.log_error stores the message
     # it is given, and a bare "Not permitted" names no file or line
-    exc = "".join(traceback.format_exception(exception)) if exception else frappe.get_traceback()
-    frappe.log_error(
-        title="Slack: " + title,
-        message=f"{message}\nException:\n{exc}" if exception else message,
-    )
+    if exception:
+        exc = "".join(traceback.format_exception(exception))
+        message = f"{message}\nException:\n{exc}"
+    frappe.log_error(title="Slack: " + title, message=message)
 
     if msgprint:
         frappe.msgprint(
@@ -31,20 +31,39 @@ def generate_error_log(
         )
 
 
+def _clean_message(text) -> str:
+    """
+    Plain text for a Frappe message: lists joined, ``<br>`` kept as line
+    breaks, other HTML stripped
+    """
+    if isinstance(text, list | tuple):
+        text = "\n".join(str(t) for t in text)
+    text = str(text or "")
+    for br in ("<br>", "<br/>", "<br />"):
+        text = text.replace(br, "\n")
+    return strip_html_tags(text).strip()
+
+
 def exception_message(exception: Exception) -> str:
     """
-    Text to show a user for an exception: its own message, or, when it has
-    none, the last message Frappe queued for the client. A failed permission
-    check raises a bare PermissionError and leaves the explanation in
-    frappe.msgprint, so str(exception) alone renders an empty error box
+    Text to show a user for an exception: its own message, or, for a
+    permission failure, the reason Frappe recorded (``flags.error_message``,
+    or the last message it queued for the client), or the exception type.
+    Frappe's permission checks raise a bare PermissionError and leave the
+    explanation in ``msgprint``, so ``str(exception)`` alone renders an
+    empty error box. The queued messages are consulted only for permission
+    errors: an unrelated earlier message ("Email sent to ...") must not be
+    presented as the reason for some other failure
     """
-    from frappe_slack_connector.helpers.str_utils import strip_html_tags
-
-    text = strip_html_tags(str(exception)).strip()
+    text = _clean_message(str(exception))
     if text:
         return text
-    for entry in reversed(frappe.get_message_log()):
-        message = strip_html_tags(str(entry.get("message") or "")).strip()
-        if message:
-            return message
+    if isinstance(exception, frappe.PermissionError):
+        for entry in reversed(frappe.get_message_log()):
+            text = _clean_message(entry.get("message"))
+            if text:
+                return text
+        text = _clean_message(frappe.flags.get("error_message"))
+        if text:
+            return text
     return type(exception).__name__

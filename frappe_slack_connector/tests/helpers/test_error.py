@@ -32,10 +32,35 @@ class TestExceptionMessage(IntegrationTestCase):
     def setUp(self):
         super().setUp()
         frappe.clear_messages()
+        frappe.flags.error_message = None
 
     def tearDown(self):
         frappe.clear_messages()
+        frappe.flags.error_message = None
         super().tearDown()
+
+    def test_queued_messages_are_only_used_for_permission_errors(self):
+        """An unrelated earlier msgprint (HRMS "Email sent to ...") must not be shown as the reason for some other bare exception."""
+        frappe.msgprint("Email sent to someone@example.com")
+        self.assertEqual(exception_message(frappe.ValidationError()), "ValidationError")
+
+    def test_falls_back_to_the_permission_error_flag(self):
+        """Frappe's permission checks record the reason in flags.error_message as well."""
+        frappe.flags.error_message = "You need the 'write' permission on Leave Application HR-LAP-0001"
+        self.assertEqual(
+            exception_message(frappe.PermissionError()),
+            "You need the 'write' permission on Leave Application HR-LAP-0001",
+        )
+
+    def test_keeps_line_breaks_and_joins_list_messages(self):
+        """Permission logs are joined with <br>; as_list messages arrive as lists."""
+        frappe.msgprint("Not allowed for Employee: X<br>User a@b does not have access")
+        self.assertEqual(
+            exception_message(frappe.PermissionError()), "Not allowed for Employee: X\nUser a@b does not have access"
+        )
+        frappe.clear_messages()
+        frappe.msgprint(["line a", "line b"], as_list=True)
+        self.assertEqual(exception_message(frappe.PermissionError()), "line a\nline b")
 
     def test_returns_the_exception_text_without_html(self):
         self.assertEqual(exception_message(ValueError("<b>Not</b> permitted")), "Not permitted")

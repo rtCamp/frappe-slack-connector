@@ -1,8 +1,9 @@
 from unittest.mock import patch
 
+import frappe
 from frappe.tests import IntegrationTestCase
 
-from frappe_slack_connector.helpers.error import generate_error_log
+from frappe_slack_connector.helpers.error import exception_message, generate_error_log
 
 ERROR_MODULE = "frappe_slack_connector.helpers.error"
 
@@ -25,3 +26,32 @@ class TestGenerateErrorLog(IntegrationTestCase):
         with patch(f"{ERROR_MODULE}.frappe.log_error") as mock_log:
             generate_error_log("Payload not found", message="no payload")
         self.assertEqual(mock_log.call_args.kwargs["message"], "no payload")
+
+
+class TestExceptionMessage(IntegrationTestCase):
+    def setUp(self):
+        super().setUp()
+        frappe.clear_messages()
+
+    def tearDown(self):
+        frappe.clear_messages()
+        super().tearDown()
+
+    def test_returns_the_exception_text_without_html(self):
+        self.assertEqual(exception_message(ValueError("<b>Not</b> permitted")), "Not permitted")
+
+    def test_falls_back_to_the_queued_frappe_message_when_the_exception_has_none(self):
+        """A permission failure raises a bare PermissionError and msgprints the reason: show that reason."""
+        frappe.msgprint("You are not allowed to access this Leave Application")
+        self.assertEqual(
+            exception_message(frappe.PermissionError()),
+            "You are not allowed to access this Leave Application",
+        )
+
+    def test_uses_the_last_queued_message(self):
+        frappe.msgprint("older")
+        frappe.msgprint("newer")
+        self.assertEqual(exception_message(frappe.PermissionError()), "newer")
+
+    def test_names_the_exception_type_when_nothing_else_is_known(self):
+        self.assertEqual(exception_message(frappe.PermissionError()), "PermissionError")

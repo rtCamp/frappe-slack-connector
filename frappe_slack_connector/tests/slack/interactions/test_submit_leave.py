@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock, patch
 
+import frappe
 from frappe.tests import IntegrationTestCase
 
 from frappe_slack_connector.slack.interactions.submit_leave import (
@@ -164,6 +165,34 @@ class TestSubmitLeaveHandler(IntegrationTestCase):
         submit_logs = [c for c in mock_log.call_args_list if c.kwargs["title"] == "Error submitting leave request"]
         self.assertEqual(len(submit_logs), 1)
         self.assertIs(submit_logs[0].kwargs["exception"], mock_leave_app.save.side_effect)
+
+    def test_error_modal_shows_the_frappe_message_when_the_exception_has_none(self):
+        """A bare PermissionError from save carries no text; the modal must show the reason Frappe queued."""
+        payload = _build_submission_payload()
+        mock_leave_app = MagicMock()
+
+        def deny(**kwargs):
+            frappe.msgprint("You are not allowed to create Leave Application")
+            raise frappe.PermissionError
+
+        mock_leave_app.save.side_effect = deny
+        frappe.clear_messages()
+        try:
+            with (
+                patch(f"{SUBMIT_LEAVE_MODULE}.frappe.get_doc", return_value=mock_leave_app),
+                patch(f"{SUBMIT_LEAVE_MODULE}.get_employeeid_from_slackid", return_value="EMP-001"),
+                patch(f"{SUBMIT_LEAVE_MODULE}.get_userid_from_slackid", return_value="alice@x.com"),
+                patch(f"{SUBMIT_LEAVE_MODULE}.frappe.set_user"),
+                patch(f"{SUBMIT_LEAVE_MODULE}.get_leave_approver", return_value="approver@x.com"),
+                patch(f"{SUBMIT_LEAVE_MODULE}.custom_fields_exist", return_value=False),
+                patch(f"{SUBMIT_LEAVE_MODULE}.send_http_response") as mock_response,
+                patch(f"{SUBMIT_LEAVE_MODULE}.generate_error_log"),
+            ):
+                handler(slack=MagicMock(), payload=payload)
+        finally:
+            frappe.clear_messages()
+        body = mock_response.call_args.kwargs["body"]
+        self.assertIn("You are not allowed to create Leave Application", body["view"]["blocks"][2]["text"]["text"])
 
     def test_switches_session_to_applicant_before_saving(self):
         """handler resolves the Frappe user for the Slack user and calls frappe.set_user with it before the Leave Application is saved, so the save and the enqueued notification jobs do not run as Guest."""

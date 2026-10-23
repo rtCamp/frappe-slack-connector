@@ -3,8 +3,7 @@ from frappe import _
 
 from frappe_slack_connector.db.leave_application import approve_leave, reject_leave
 from frappe_slack_connector.db.user_meta import get_userid_from_slackid
-from frappe_slack_connector.helpers.error import generate_error_log
-from frappe_slack_connector.helpers.str_utils import strip_html_tags
+from frappe_slack_connector.helpers.error import exception_message, generate_error_log
 from frappe_slack_connector.slack.app import SlackIntegration
 
 
@@ -80,7 +79,7 @@ def handler(slack: SlackIntegration, payload: dict):
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"*Error Details:*\n```{strip_html_tags(str(e))}```",
+                            "text": f"*Error Details:*\n```{exception_message(e)}```",
                         },
                     },
                 ],

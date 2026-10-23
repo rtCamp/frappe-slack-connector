@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock, patch
 
+import frappe
 from frappe.tests import IntegrationTestCase
 
 from frappe_slack_connector.slack.interactions.approve_leave import handler
@@ -116,3 +117,26 @@ class TestApproveLeaveHandler(IntegrationTestCase):
         self.assertEqual(kwargs["trigger_id"], "T-trigger-1")
         self.assertEqual(kwargs["view"]["title"]["text"], "Error")
         mock_slack.slack_app.client.chat_update.assert_not_called()
+
+    def test_error_modal_shows_the_frappe_message_when_the_exception_has_none(self):
+        """A failed permission check raises a bare PermissionError; the modal must show Frappe's reason, not an empty box."""
+        payload = _build_action_payload(action_id="leave_approve")
+        mock_slack = MagicMock()
+
+        def deny(leave_id):
+            frappe.msgprint("You are not allowed to access this Leave Application record")
+            raise frappe.PermissionError
+
+        frappe.clear_messages()
+        try:
+            with (
+                patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
+                patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
+                patch(f"{APPROVE_LEAVE_MODULE}.approve_leave", side_effect=deny),
+                patch(f"{APPROVE_LEAVE_MODULE}.generate_error_log"),
+            ):
+                handler(slack=mock_slack, payload=payload)
+        finally:
+            frappe.clear_messages()
+        view = mock_slack.slack_app.client.views_open.call_args.kwargs["view"]
+        self.assertIn("You are not allowed to access this Leave Application record", view["blocks"][2]["text"]["text"])

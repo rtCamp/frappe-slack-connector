@@ -29,3 +29,22 @@ def generate_error_log(
             indicator="red",
             realtime=realtime,
         )
+
+
+def exception_message(exception: Exception) -> str:
+    """
+    Text to show a user for an exception: its own message, or, when it has
+    none, the last message Frappe queued for the client. A failed permission
+    check raises a bare PermissionError and leaves the explanation in
+    frappe.msgprint, so str(exception) alone renders an empty error box
+    """
+    from frappe_slack_connector.helpers.str_utils import strip_html_tags
+
+    text = strip_html_tags(str(exception)).strip()
+    if text:
+        return text
+    for entry in reversed(frappe.get_message_log()):
+        message = strip_html_tags(str(entry.get("message") or "")).strip()
+        if message:
+            return message
+    return type(exception).__name__

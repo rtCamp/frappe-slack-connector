@@ -87,16 +87,19 @@ def get_attendance_title(slack_settings) -> str:
     return slack_settings.leave_notification_subject or "Employees on Leave"
 
 
-def slack_time_token(moment: datetime) -> str:
+def slack_time_token(moment: datetime, *, with_date: bool = False) -> str:
     """
     Slack date token for ``moment`` (a naive datetime in the site timezone,
     as ``frappe.utils.now_datetime`` returns). Slack renders it in each
     reader's own timezone and clock format; the fallback text, used where
-    tokens are not rendered, is the site time in 12-hour form
+    tokens are not rendered, is the site time in 12-hour form. With
+    ``with_date`` the day is included ("Today at 1:49 AM", "Oct 24, 2026 at 1:49 AM")
     """
     aware = moment.replace(tzinfo=ZoneInfo(get_system_timezone()))
-    fallback = moment.strftime("%I:%M %p").lstrip("0")
-    return f"<!date^{int(aware.timestamp())}^{{time}}|{fallback}>"
+    time_text = moment.strftime("%I:%M %p").lstrip("0")
+    if with_date:
+        return f"<!date^{int(aware.timestamp())}^{{date_short_pretty}} at {{time}}|{moment.strftime('%b %d, %Y')} at {time_text}>"
+    return f"<!date^{int(aware.timestamp())}^{{time}}|{time_text}>"
 
 
 def updated_at_context_block(updated_at: datetime) -> dict:

@@ -72,12 +72,13 @@ class TestApproveLeaveHandler(IntegrationTestCase):
         kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
         self.assertEqual(kwargs["channel"], "C-channel-1")
         self.assertEqual(kwargs["ts"], "1700000000.000100")
-        # leave_actions_block is now a section, and footer_block is removed.
-        block_types = {b.get("type"): b for b in kwargs["blocks"]}
+        # leave_actions_block is now the status line (a context block with the decision time), footer_block is removed
         block_ids = [b.get("block_id") for b in kwargs["blocks"]]
-        self.assertIn("section", block_types)
-        self.assertIn("Approved", block_types["section"]["text"]["text"])
+        self.assertNotIn("leave_actions_block", block_ids)
         self.assertNotIn("footer_block", block_ids)
+        status_line = kwargs["blocks"][2]["elements"][0]["text"]
+        self.assertIn("*Status:* :white_check_mark: *Approved* · _<!date^", status_line)
+        self.assertEqual(kwargs["text"], "Leave request approved")
 
     def test_chat_update_uses_rejected_status_for_reject_action(self):
         """For a leave_reject action, the chat_update status block reads 'Rejected'."""
@@ -91,10 +92,8 @@ class TestApproveLeaveHandler(IntegrationTestCase):
         ):
             handler(slack=mock_slack, payload=payload)
         kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
-        # The replaced block is a fresh section dict with a 'text' key; the original
-        # details_block carried block_id but no text. Filter on text presence.
-        section_text = next(b["text"]["text"] for b in kwargs["blocks"] if b.get("type") == "section" and "text" in b)
-        self.assertIn("Rejected", section_text)
+        status_line = next(b["elements"][0]["text"] for b in kwargs["blocks"] if b.get("type") == "context")
+        self.assertIn("*Status:* :x: *Rejected*", status_line)
 
     def test_opens_error_modal_when_db_update_raises(self):
         """handler opens an error modal via views_open when the approve/reject DB call raises."""

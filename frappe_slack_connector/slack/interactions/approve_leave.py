@@ -5,6 +5,7 @@ from frappe_slack_connector.db.leave_application import approve_leave, reject_le
 from frappe_slack_connector.db.user_meta import get_userid_from_slackid
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.str_utils import strip_html_tags
+from frappe_slack_connector.override.leave_application import decision_blocks, leave_message_payload
 from frappe_slack_connector.slack.app import SlackIntegration
 
 
@@ -34,27 +35,20 @@ def handler(slack: SlackIntegration, payload: dict):
 
         blocks = payload["message"]["blocks"]
 
-        status_text = "Approved :white_check_mark:" if action_id == "leave_approve" else "Rejected :x:"
+        status = "Approved" if action_id == "leave_approve" else "Rejected"
 
-        # Replace the actions block with a status update
+        # Replace the actions block (and the footer prompt) with the decision and when it was taken
+        blocks = [b for b in blocks if b.get("block_id") != "footer_block"]
         for i, block in enumerate(blocks):
             if block.get("block_id") == "leave_actions_block":
-                blocks[i] = {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"*Status:* {status_text}",
-                    },
-                }
-            elif block.get("block_id") == "footer_block":
-                # delete the footer block
-                blocks.pop(i)
+                blocks[i] = decision_blocks(status, decided_at=frappe.utils.now_datetime())[-1]
+                break
 
         # Update the message with the new blocks
         slack.slack_app.client.chat_update(
             channel=payload["channel"]["id"],
             ts=payload["container"]["message_ts"],
-            blocks=blocks,
+            **leave_message_payload(blocks, status=status, text=f"Leave request {status.lower()}"),
         )
     except Exception as e:
         # show an error modal with the exception message

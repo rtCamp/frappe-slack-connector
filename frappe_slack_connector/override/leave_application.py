@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 import frappe
 from frappe.model.document import Document
-from frappe.utils import cint, convert_utc_to_system_timezone, flt, get_url_to_form, getdate, today
+from frappe.utils import cint, convert_utc_to_system_timezone, flt, get_datetime, get_url_to_form, getdate, today
 from frappe.utils.synchronization import filelock
 from hrms.hr.doctype.leave_application.leave_application import get_leave_balance_on
 from slack_sdk.errors import SlackApiError
@@ -21,7 +21,7 @@ from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
 from frappe_slack_connector.helpers.str_utils import escape_slack_text
 from frappe_slack_connector.slack.app import SlackIntegration
-from frappe_slack_connector.tasks.attendance_summary import get_leave_type
+from frappe_slack_connector.tasks.attendance_summary import get_leave_type, slack_time_token
 
 # Custom fields on Leave Application (fixtures/custom_field.json) holding the
 # ts of the reply posted in the attendance summary thread for a same-day leave
@@ -228,6 +228,53 @@ APPLICANT_DECISION_HEADERS = {
     "Rejected": ":x: Leave Request Rejected",
     "Cancelled": ":no_entry_sign: Leave Request Cancelled",
 }
+STATUS_EMOJI = {
+    "Open": ":timer_clock:",
+    "Approved": ":white_check_mark:",
+    "Rejected": ":x:",
+    "Cancelled": ":no_entry_sign:",
+}
+
+
+def leave_message_payload(blocks: list, *, status: str | None, text: str) -> dict:
+    """
+    ``chat.postMessage`` / ``chat.update`` arguments for a leave message:
+    the blocks plus ``text`` as the notification fallback. Top-level blocks
+    on purpose: an attachment would give a coloured bar but Slack collapses
+    tall attachments behind "Show more" and shows ``text`` as a body line
+    """
+    return {"text": text, "blocks": blocks}
+
+
+def open_in_erp_button(leave_link: str) -> dict:
+    """
+    Link button to the Leave Application form. Its action id starts with
+    "ignore": Slack still posts the click, and the interactions endpoint
+    drops those
+    """
+    return {
+        "type": "button",
+        "text": {"type": "plain_text", "emoji": True, "text": ":link: Open in ERP"},
+        "url": leave_link,
+        "action_id": "ignore_open_leave",
+    }
+
+
+def decision_blocks(status: str, status_by: str | None = None, decided_at=None) -> list:
+    """
+    The status line closing a leave message, as a small context line: the
+    status with its emoji, who decided it and when. ``decided_at`` (site
+    time) renders as a Slack date token so each reader sees it in their
+    own clock
+    """
+    text = f"*Status:* {STATUS_EMOJI.get(status, '')} *{status}*".replace("  ", " ")
+    if status_by:
+        text += f" by {status_by}"
+    moment = get_datetime(decided_at) if decided_at else None
+    if moment:
+        text += f" · _{slack_time_token(moment, with_date=True)}_"
+    return [{"type": "divider"}, {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}]
+
 
 # Slack errors meaning the stored applicant DM can no longer be edited
 MISSING_MESSAGE_ERRORS = ("message_not_found", "channel_not_found")
@@ -274,12 +321,14 @@ def _reached_decision(doc: Document) -> bool:
 
 def _decided_by(modified_by: str | None, leave_approver: str | None, status: str | None = None) -> str | None:
     """
-    The user who took the decision: the acting user (Desk, workflow and the
-    Slack handler all set it before the hooks run), falling back to the leave
-    approver when the change was made by Administrator or a background job.
-    A cancellation is not attributed to the approver; it may be anyone's.
+    The user who took the decision: the acting user, which Desk, the
+    workflow and the Slack handler all set before the hooks run. A decision
+    made as Administrator (a scheduled auto-approval, or someone logged in
+    as Administrator) is reported as Administrator rather than attributed
+    to the leave approver, who did not act. ``leave_approver`` is only used
+    when nothing recorded who acted; a cancellation is never attributed
     """
-    if modified_by and modified_by != "Administrator":
+    if modified_by:
         return modified_by
     if status == "Cancelled":
         return None
@@ -377,9 +426,17 @@ def send_leave_notification_to_applicant(doc: Document):
                 return
             response = slack.slack_app.client.chat_postMessage(
                 channel=user_id,
-                text=_applicant_text(status),
-                blocks=_applicant_blocks(
-                    doc, user_id, status=status, status_by=status_by, **message_balance_fields(doc)
+                **leave_message_payload(
+                    _applicant_blocks(
+                        doc,
+                        user_id,
+                        status=status,
+                        status_by=status_by,
+                        decided_at=doc.modified if status else None,
+                        **message_balance_fields(doc),
+                    ),
+                    status=status,
+                    text=_applicant_text(status),
                 ),
             )
             store_applicant_message_ref(doc.name, channel=response.get("channel"), ts=response.get("ts"))
@@ -422,6 +479,7 @@ def send_leave_decision_to_applicant(doc: Document, status: str, decided_by: str
             user_id,
             status=status,
             status_by=_format_decider(slack, decided_by),
+            decided_at=doc.modified,
             **message_balance_fields(doc),
         )
         with _applicant_dm_lock(doc.name):
@@ -432,7 +490,9 @@ def send_leave_decision_to_applicant(doc: Document, status: str, decided_by: str
             channel, ts = get_applicant_message_ref(doc.name)
             if channel and ts and _is_applicant_dm(doc, channel, ts):
                 try:
-                    slack.slack_app.client.chat_update(channel=channel, ts=ts, text=text, blocks=blocks)
+                    slack.slack_app.client.chat_update(
+                        channel=channel, ts=ts, **leave_message_payload(blocks, status=status, text=text)
+                    )
                     return
                 except SlackApiError as e:
                     if e.response.get("error") not in MISSING_MESSAGE_ERRORS:
@@ -441,7 +501,9 @@ def send_leave_decision_to_applicant(doc: Document, status: str, decided_by: str
                         title="Applicant leave DM no longer exists, posting a fresh one",
                         message=f"Leave Application {doc.name}: {e.response.get('error')} for {channel}/{ts}",
                     )
-            response = slack.slack_app.client.chat_postMessage(channel=user_id, text=text, blocks=blocks)
+            response = slack.slack_app.client.chat_postMessage(
+                channel=user_id, **leave_message_payload(blocks, status=status, text=text)
+            )
             store_applicant_message_ref(doc.name, channel=response.get("channel"), ts=response.get("ts"))
             # Commit before the lock is released: the job's own commit only comes
             # after this function returns, and a worker waiting on the lock would
@@ -512,6 +574,7 @@ def _applicant_blocks(
     status_by: str | None = None,
     leave_balance: float | None = None,
     unpaid: bool = False,
+    decided_at=None,
 ):
     """
     Build the applicant DM blocks for the given leave, optionally with a decision
@@ -532,6 +595,7 @@ def _applicant_blocks(
         reason=doc.description,
         status=status,
         status_by=status_by,
+        decided_at=decided_at,
     )
 
 
@@ -555,7 +619,7 @@ def leave_id_context_block(*, leave_id: str, leave_link: str, leave_submission_d
         "elements": [
             {
                 "type": "mrkdwn",
-                "text": f"*Leave ID:* <{leave_link}|{leave_id}> • *Submitted On:* {leave_submission_date}",
+                "text": f":id: <{leave_link}|{leave_id}>  ·  :clock3: Submitted {leave_submission_date}",
             }
         ],
     }
@@ -583,30 +647,32 @@ def leave_detail_blocks(
         {
             "type": "section",
             "fields": [
-                {"type": "mrkdwn", "text": f"*Leave Type:*\n:rocket: {leave_type}"},
-                {"type": "mrkdwn", "text": f"*Duration:*\n:hourglass_flowing_sand: {duration}"},
+                {"type": "mrkdwn", "text": f":label: *Leave Type*\n_{leave_type}_"},
+                {"type": "mrkdwn", "text": f":hourglass_flowing_sand: *Duration*\n_{duration}_"},
             ],
         },
         {
             "type": "section",
             "fields": [
-                {"type": "mrkdwn", "text": f"*From:*\n:date: {from_date}"},
-                {"type": "mrkdwn", "text": f"*To:*\n:date: {to_date}"},
+                {"type": "mrkdwn", "text": f":date: *From*\n_{from_date}_"},
+                {"type": "mrkdwn", "text": f":date: *To*\n_{to_date}_"},
             ],
         },
     ]
     details = []
     if total_days is not None:
-        details.append({"type": "mrkdwn", "text": f"*Requested:*\n{flt(total_days, 2):g} day(s)"})
+        details.append({"type": "mrkdwn", "text": f":bar_chart: *Requested*\n_{flt(total_days, 2):g} day(s)_"})
     if leave_balance is not None:
         details.append(
             {
                 "type": "mrkdwn",
-                "text": f"*Balance before this request:*\n{flt(leave_balance, 2):g} day(s)",
+                "text": f":moneybag: *Balance before this request*\n_{flt(leave_balance, 2):g} day(s)_",
             }
         )
     elif unpaid:
-        details.append({"type": "mrkdwn", "text": "*Balance before this request:*\nNot applicable (unpaid)"})
+        details.append(
+            {"type": "mrkdwn", "text": ":moneybag: *Balance before this request*\n_Not applicable (unpaid)_"}
+        )
     if details:
         blocks.append({"type": "section", "fields": details})
     return blocks
@@ -614,15 +680,11 @@ def leave_detail_blocks(
 
 def reason_block(reason: str | None) -> dict:
     """
-    The quoted reason section, shared by the approver and applicant DMs
+    The reason as an italic quote, shared by the approver and applicant DMs
     """
-    return {
-        "type": "section",
-        "text": {
-            "type": "mrkdwn",
-            "text": f"*Reason:*\n>{reason if reason else 'No reason provided'}",
-        },
-    }
+    lines = [line.strip() for line in (reason or "").splitlines() if line.strip()] or ["No reason provided"]
+    quoted = "\n".join(f"> _{line}_" for line in lines)
+    return {"type": "section", "text": {"type": "mrkdwn", "text": f":speech_balloon: *Reason*\n{quoted}"}}
 
 
 def format_leave_submission_blocks(
@@ -642,6 +704,7 @@ def format_leave_submission_blocks(
     unpaid: bool = False,
     status: str | None = None,
     status_by: str | None = None,
+    decided_at=None,
 ) -> list:
     """
     Format the blocks for the applicant's leave confirmation message, with
@@ -649,7 +712,8 @@ def format_leave_submission_blocks(
     the balance before the request when given).
 
     With ``status`` (Approved, Rejected or Cancelled) the header reflects the
-    decision and a status line, naming ``status_by`` when given, is appended.
+    decision and the closing status line names ``status_by`` and the time it
+    was taken; without one the line reads "Open".
     """
     if status:
         header = APPLICANT_DECISION_HEADERS[status]
@@ -688,17 +752,9 @@ def format_leave_submission_blocks(
         ),
         reason_block(reason),
     ]
-    if status:
-        status_text = f"{status} by {status_by}" if status_by else status
-        blocks.extend(
-            [
-                {"type": "divider"},
-                {
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": f"*Status:* {status_text}"},
-                },
-            ]
-        )
+    # A pending request shows "Open" so the applicant can see a decision is still
+    # due. No ERP button here: the Leave ID in the context line is the link
+    blocks.extend(decision_blocks(status or "Open", status_by, decided_at))
     return blocks
 
 
@@ -861,22 +917,26 @@ def send_leave_notification_bg(doc: Document, announce_in_thread: bool = True):
 
         # Send message to approver
         if approver_slack is not None:
+            approver_blocks = format_leave_application_blocks(
+                leave_id=doc.name,
+                leave_link=get_url_to_form("Leave Application", doc.name),
+                employee_name=mention,
+                leave_type=doc.leave_type,
+                duration=format_leave_duration(doc),
+                leave_submission_date=standard_date_fmt(doc.creation),
+                from_date=standard_date_fmt(doc.from_date),
+                to_date=standard_date_fmt(doc.to_date),
+                reason=doc.description,
+                total_days=flt(doc.total_leave_days),
+                **message_balance_fields(doc),
+            )
             slack.slack_app.client.chat_postMessage(
                 channel=approver_slack,
                 # Fallback for notification previews; the blocks carry the details
-                text=f"New leave application from {escape_slack_text(doc.employee_name)}",
-                blocks=format_leave_application_blocks(
-                    leave_id=doc.name,
-                    leave_link=get_url_to_form("Leave Application", doc.name),
-                    employee_name=mention,
-                    leave_type=doc.leave_type,
-                    duration=format_leave_duration(doc),
-                    leave_submission_date=standard_date_fmt(doc.creation),
-                    from_date=standard_date_fmt(doc.from_date),
-                    to_date=standard_date_fmt(doc.to_date),
-                    reason=doc.description,
-                    total_days=flt(doc.total_leave_days),
-                    **message_balance_fields(doc),
+                **leave_message_payload(
+                    approver_blocks,
+                    status="Open",
+                    text=f"New leave application from {escape_slack_text(doc.employee_name)}",
                 ),
             )
 
@@ -1310,6 +1370,7 @@ def format_leave_application_blocks(
                         "value": leave_id,
                         "action_id": "leave_reject",
                     },
+                    open_in_erp_button(leave_link),
                 ],
             },
             {

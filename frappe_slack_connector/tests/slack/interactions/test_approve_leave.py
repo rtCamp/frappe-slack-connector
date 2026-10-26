@@ -197,3 +197,20 @@ class TestApproveLeaveHandler(IntegrationTestCase):
         mock_commit.assert_not_called()
         view = mock_slack.slack_app.client.views_open.call_args.kwargs["view"]
         self.assertEqual(view["blocks"][0]["text"]["text"], ":warning: Error taking action on leave request")
+
+    def test_a_failing_rollback_is_logged_and_re_raised(self):
+        """A rollback that fails must not let the handler answer normally and have the request commit the partial writes."""
+        payload = _build_action_payload(action_id="leave_approve")
+        mock_slack = MagicMock()
+        with (
+            patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
+            patch(f"{APPROVE_LEAVE_MODULE}.approve_leave", side_effect=RuntimeError("boom")),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.rollback", side_effect=RuntimeError("observer failed")),
+            patch(f"{APPROVE_LEAVE_MODULE}.generate_error_log") as mock_log,
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                handler(slack=mock_slack, payload=payload)
+        self.assertEqual(str(raised.exception), "observer failed")
+        self.assertEqual(mock_log.call_args.kwargs["title"], "Error rolling back the Slack leave action")
+        mock_slack.slack_app.client.views_open.assert_not_called()

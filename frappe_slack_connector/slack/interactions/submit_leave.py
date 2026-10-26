@@ -1,5 +1,3 @@
-import contextlib
-
 import frappe
 from frappe import _, clear_messages
 from hrms.hr.doctype.leave_application.leave_application import get_leave_approver, get_leave_balance_on
@@ -103,8 +101,15 @@ def handler(slack: SlackIntegration, payload: dict):
     except Exception as e:
         # Undo a partial save: a hook raising after the insert would otherwise
         # leave the row behind, since the request commits once this returns
-        with contextlib.suppress(Exception):  # a rollback failure must not pre-empt the log and the modal
+        try:
             frappe.db.rollback()
+        except Exception as rollback_error:
+            # A rollback that fails with the connection alive (a before_rollback
+            # observer raising) would leave the partial writes to be committed
+            # when this handler returns normally: record it and let the request
+            # fail instead, which makes Frappe roll it back
+            generate_error_log(title="Error rolling back the Slack leave action", exception=rollback_error)
+            raise
         # Log before replying: the modal shows the message to the applicant, but
         # nothing else records why a Slack-filed leave was refused
         generate_error_log(title="Error submitting leave request", exception=e)

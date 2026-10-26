@@ -23,8 +23,10 @@ def generate_error_log(
     # message and the exception text as before, not server paths and frames
     log_message = message
     if exception:
-        log_message = f"{message}\nException:\n{''.join(traceback.format_exception(exception))}"
-        message = f"{message}\nException:\n{exception}"
+        exc_text = str(exception) or type(exception).__name__
+        exc_trace = "".join(traceback.format_exception(exception))
+        log_message = "\n".join(part for part in (message, "Exception:", exc_trace) if part)
+        message = "\n".join(part for part in (message, "Exception:", exc_text) if part)
     frappe.log_error(title="Slack: " + title, message=log_message)
 
     if msgprint:
@@ -50,7 +52,12 @@ def _clean_message(text) -> str:
     text = str(text or "")
     for br in ("<br>", "<br/>", "<br />"):
         text = text.replace(br, "\n")
+    # Frappe's msgprint HTML-encodes its text; decode it, then re-encode the
+    # three characters Slack reads as control characters (&, <, >) so a
+    # document name or user string can never become a mention or a link.
+    # Slack decodes those entities for display, so "Tom & Jerry" still reads
     text = html.unescape(strip_html_tags(text)).strip()
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     if len(text) > MESSAGE_MAX_CHARS:
         text = text[: MESSAGE_MAX_CHARS - 1] + "…"
     return text

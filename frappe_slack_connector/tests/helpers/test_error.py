@@ -39,6 +39,18 @@ class TestGenerateErrorLog(IntegrationTestCase):
         self.assertEqual(shown, "Please check the channel ID\nException:\nchannel_not_found")
         self.assertNotIn("Traceback", shown)
 
+    def test_message_shape_without_a_message_or_exception_text(self):
+        try:
+            raise frappe.PermissionError
+        except frappe.PermissionError as e:
+            with (
+                patch(f"{ERROR_MODULE}.frappe.log_error") as mock_log,
+                patch(f"{ERROR_MODULE}.frappe.msgprint") as mock_msgprint,
+            ):
+                generate_error_log("Error taking action on leave request", exception=e, msgprint=True)
+        self.assertTrue(mock_log.call_args.kwargs["message"].startswith("Exception:\nTraceback"))
+        self.assertEqual(mock_msgprint.call_args.kwargs["msg"], "Exception:\nPermissionError")
+
     def test_logs_the_message_alone_without_an_exception(self):
         with patch(f"{ERROR_MODULE}.frappe.log_error") as mock_log:
             generate_error_log("Payload not found", message="no payload")
@@ -80,8 +92,13 @@ class TestExceptionMessage(IntegrationTestCase):
             "You are not allowed to access this Leave Application",
         )
 
-    def test_unescapes_entities_and_caps_the_length(self):
-        self.assertEqual(exception_message(ValueError("Tom &amp; Jerry&nbsp;Ltd")), "Tom & Jerry\xa0Ltd")
+    def test_unescapes_entities_then_escapes_slack_control_characters(self):
+        """msgprint text is HTML-encoded; decoded once, then &, < and > go back as entities so a stray mention or link in a name stays text."""
+        self.assertEqual(exception_message(ValueError("Tom &amp; Jerry&nbsp;Ltd")), "Tom &amp; Jerry\xa0Ltd")
+        # An encoded mention comes back encoded; a raw <...> is an HTML tag to strip_html_tags and is dropped
+        self.assertEqual(exception_message(ValueError("&lt;!channel&gt; <@U1> a &lt; b")), "&lt;!channel&gt;  a &lt; b")
+
+    def test_caps_the_length(self):
         text = exception_message(ValueError("x" * 5000))
         self.assertEqual(len(text), 2900)
         self.assertTrue(text.endswith("…"))

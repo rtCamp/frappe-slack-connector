@@ -1,5 +1,3 @@
-import contextlib
-
 import frappe
 from frappe import _
 
@@ -69,8 +67,15 @@ def handler(slack: SlackIntegration, payload: dict):
         # the submit (another app's on_update) would otherwise leave the leave
         # approved in the database while the approver is shown an error, since
         # the request still commits once this handler returns
-        with contextlib.suppress(Exception):  # a rollback failure must not pre-empt the log and the modal
+        try:
             frappe.db.rollback()
+        except Exception as rollback_error:
+            # A rollback that fails with the connection alive (a before_rollback
+            # observer raising) would leave the partial writes to be committed
+            # when this handler returns normally: record it and let the request
+            # fail instead, which makes Frappe roll it back
+            generate_error_log(title="Error rolling back the Slack leave action", exception=rollback_error)
+            raise
         # Log first: the error modal below needs a live trigger_id, and when it
         # fails too the only trace of the original error would be lost
         generate_error_log(title="Error taking action on leave request", exception=e)

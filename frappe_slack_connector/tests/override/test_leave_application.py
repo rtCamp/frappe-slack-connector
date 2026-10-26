@@ -15,17 +15,23 @@ from frappe_slack_connector.override.leave_application import (
     ATTENDANCE_REPLY_TEXT_FIELD,
     ATTENDANCE_REPLY_TS_FIELD,
     _applicant_dm_lock,
+    _format_decider,
     after_insert,
     format_leave_application_blocks,
+    format_leave_submission_blocks,
+    on_discard_notify_applicant,
+    on_trash_notify_applicant,
     on_trash_refresh_attendance_summary,
     on_trash_withdraw_attendance_reply,
     on_update_notify_applicant,
     on_update_refresh_attendance_summary,
     on_update_withdraw_attendance_reply,
     post_same_day_leave_to_attendance_thread,
+    reason_blocks,
     restore_applicant_message_ref,
     restore_attendance_reply_ts,
     send_leave_decision_to_applicant,
+    send_leave_deleted_to_applicant,
     send_leave_notification_bg,
     send_leave_notification_to_applicant,
     update_attendance_summary,
@@ -81,6 +87,7 @@ def _build_leave_doc(
     docstatus_changed=False,
     in_insert=False,
     modified_by="approver@x.com",
+    modified="2026-06-10 10:00:00",
 ):
     """Build a MagicMock that mimics a Leave Application doc with the fields the override code reads.
 
@@ -114,6 +121,7 @@ def _build_leave_doc(
     doc.get.side_effect = lambda fieldname, default=None: getattr(doc, fieldname, default)
     doc.docstatus = docstatus
     doc.modified_by = modified_by
+    doc.modified = modified
     doc.flags = frappe._dict(in_insert=in_insert)
     changed = {"status": status_changed, "docstatus": docstatus_changed}
     doc.has_value_changed.side_effect = lambda fieldname: changed.get(fieldname, False)
@@ -150,7 +158,17 @@ def _blocks_text(blocks):
         for element in block.get("elements", []):
             if isinstance(element.get("text"), str):
                 parts.append(element["text"])
+            # rich_text block -> rich_text_quote -> text elements
+            for inner in element.get("elements", []):
+                if isinstance(inner.get("text"), str):
+                    parts.append(inner["text"])
     return "\n".join(parts)
+
+
+def _reason_quote(blocks):
+    """The literal text element of the reason quote, with its style."""
+    rich = next(b for b in blocks if b.get("type") == "rich_text")
+    return rich["elements"][0]["elements"][0]
 
 
 def _run_leave_notification_bg(doc, *, custom_fields=False, is_lwp=0, attendance_updates=0, balance_on=10.0):
@@ -919,8 +937,8 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         """The approver DM shows the requested days and the balance before the request for a leave type with an allocation."""
         doc = _build_leave_doc(from_date="2026-06-15", to_date="2026-06-17", total_leave_days=3.0)
         text = _blocks_text(_get_approver_blocks(doc, balance_on=10.0))
-        self.assertIn("*Requested:*\n3 day(s)", text)
-        self.assertIn("*Balance before this request:*\n10 day(s)", text)
+        self.assertIn(":bar_chart: *Requested*\n_3 day(s)_", text)
+        self.assertIn(":moneybag: *Balance before this request*\n_10 day(s)_", text)
 
     def test_approver_dm_warns_when_requested_days_exceed_balance(self):
         """When total_leave_days exceeds the balance HRMS reports, the approver DM carries the insufficient-balance warning with the shortfall and resulting balance."""
@@ -937,7 +955,7 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         doc = _build_leave_doc(from_date="2026-06-15", to_date="2026-06-17", total_leave_days=3.0)
         text = _blocks_text(_get_approver_blocks(doc, balance_on=3.0))
         self.assertNotIn("Insufficient balance", text)
-        self.assertIn("*Balance before this request:*\n3 day(s)", text)
+        self.assertIn(":moneybag: *Balance before this request*\n_3 day(s)_", text)
 
     def test_approver_dm_skips_balance_and_warning_for_leave_without_pay(self):
         """For a Leave Type with is_lwp set, the approver DM shows neither the balance nor the warning, even when the balance is lower than the request."""
@@ -949,9 +967,9 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
             leave_balance=0.0,
         )
         text = _blocks_text(_get_approver_blocks(doc, is_lwp=1))
-        self.assertNotIn("Balance before this request", text)
+        self.assertIn(":moneybag: *Balance before this request*\n_Not applicable (unpaid)_", text)
         self.assertNotIn("Insufficient balance", text)
-        self.assertIn("*Requested:*\n3 day(s)", text)
+        self.assertIn(":bar_chart: *Requested*\n_3 day(s)_", text)
 
     def test_approver_dm_shows_half_for_future_single_day_half_day_leave(self):
         """A future single-day half-day leave is shown with its half (custom first/second half field) rather than as Full Day."""
@@ -964,7 +982,7 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
             total_leave_days=0.5,
         )
         text = _blocks_text(_get_approver_blocks(doc, custom_fields=True))
-        self.assertIn("*Duration:*\n:hourglass_flowing_sand: Second Half", text)
+        self.assertIn(":hourglass_flowing_sand: *Duration*\n_Second Half_", text)
         self.assertNotIn("Full Day", text)
 
     def test_approver_dm_shows_half_day_for_future_single_day_leave_without_custom_fields(self):
@@ -977,7 +995,7 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
             total_leave_days=0.5,
         )
         text = _blocks_text(_get_approver_blocks(doc, custom_fields=False))
-        self.assertIn("*Duration:*\n:hourglass_flowing_sand: Half Day", text)
+        self.assertIn(":hourglass_flowing_sand: *Duration*\n_Half Day_", text)
 
     def test_approver_dm_shows_half_day_date_for_multi_day_leave_with_one_half_day(self):
         """A multi-day leave with one half day shows the half-day date and its half, not Half Day for the whole leave."""
@@ -990,10 +1008,10 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
             total_leave_days=2.5,
         )
         text = _blocks_text(_get_approver_blocks(doc, custom_fields=True))
-        self.assertIn("*Duration:*\n:hourglass_flowing_sand: Half day on Jun 16, 2026 (Tue) — First Half", text)
-        self.assertIn("*Requested:*\n2.5 day(s)", text)
-        self.assertNotIn("*Duration:*\n:hourglass_flowing_sand: Half Day", text)
-        self.assertNotIn("*Duration:*\n:hourglass_flowing_sand: First Half\n", text)
+        self.assertIn(":hourglass_flowing_sand: *Duration*\n_Half day on Jun 16, 2026 (Tue) — First Half_", text)
+        self.assertIn(":bar_chart: *Requested*\n_2.5 day(s)_", text)
+        self.assertNotIn(":hourglass_flowing_sand: *Duration*\n_Half Day_", text)
+        self.assertNotIn(":hourglass_flowing_sand: *Duration*\n_First Half_\n", text)
 
     def test_approver_dm_shows_half_day_date_without_period_when_custom_fields_missing(self):
         """Without the custom half fields, a multi-day leave with one half day shows only the half-day date."""
@@ -1005,7 +1023,7 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
             total_leave_days=2.5,
         )
         text = _blocks_text(_get_approver_blocks(doc, custom_fields=False))
-        self.assertIn("*Duration:*\n:hourglass_flowing_sand: Half day on Jun 16, 2026 (Tue)\n", text)
+        self.assertIn(":hourglass_flowing_sand: *Duration*\n_Half day on Jun 16, 2026 (Tue)_\n", text)
 
     def test_approver_dm_computes_balance_even_when_doc_carries_zero(self):
         """leave_balance is a NOT NULL column, so a server-created leave reads back as 0.0 after any reload before the job runs (a Notification on save reloads the doc): the balance must still come from HRMS, not show 0 with a false warning."""
@@ -1013,7 +1031,7 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         mocks = _run_leave_notification_bg(doc, balance_on=12.0)
         mocks["get_leave_balance_on"].assert_called_once()
         text = _blocks_text(_approver_call(mocks["slack"]).kwargs["blocks"])
-        self.assertIn("*Balance before this request:*\n12 day(s)", text)
+        self.assertIn(":moneybag: *Balance before this request*\n_12 day(s)_", text)
         self.assertNotIn("Insufficient balance", text)
 
     def test_approver_dm_shows_a_real_zero_balance_with_the_warning(self):
@@ -1021,7 +1039,7 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         doc = _build_leave_doc(from_date="2026-06-15", to_date="2026-06-16", total_leave_days=2.0, leave_balance=0.0)
         mocks = _run_leave_notification_bg(doc, balance_on=0.0)
         text = _blocks_text(_approver_call(mocks["slack"]).kwargs["blocks"])
-        self.assertIn("*Balance before this request:*\n0 day(s)", text)
+        self.assertIn(":moneybag: *Balance before this request*\n_0 day(s)_", text)
         self.assertIn("exceeds the available balance by 2 day(s). Approving it will take the balance to -2.", text)
 
     def test_approver_dm_computes_balance_when_not_stored_on_doc(self):
@@ -1037,7 +1055,7 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
             leave_application=doc.name,
         )
         text = _blocks_text(_approver_call(mocks["slack"]).kwargs["blocks"])
-        self.assertIn("*Balance before this request:*\n7 day(s)", text)
+        self.assertIn(":moneybag: *Balance before this request*\n_7 day(s)_", text)
         self.assertNotIn("Insufficient balance", text)
         mocks["generate_error_log"].assert_not_called()
 
@@ -1047,7 +1065,7 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         mocks = _run_leave_notification_bg(doc, balance_on=PermissionError("no leave access"))
         mocks["generate_error_log"].assert_called_once()
         text = _blocks_text(_approver_call(mocks["slack"]).kwargs["blocks"])
-        self.assertIn("*Balance before this request:*\n10 day(s)", text)
+        self.assertIn(":moneybag: *Balance before this request*\n_10 day(s)_", text)
 
     def test_approver_dm_omits_balance_and_logs_when_balance_lookup_fails(self):
         """When get_leave_balance_on raises and nothing usable is stored, the error is logged, the balance block and warning are omitted, and the approver DM is still posted."""
@@ -1059,14 +1077,15 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         text = _blocks_text(_approver_call(mocks["slack"]).kwargs["blocks"])
         self.assertNotIn("Balance before this request", text)
         self.assertNotIn("Insufficient balance", text)
-        self.assertIn("*Requested:*\n3 day(s)", text)
+        self.assertIn(":bar_chart: *Requested*\n_3 day(s)_", text)
 
     def test_approver_dm_always_computes_balance_except_for_lwp(self):
         """get_leave_balance_on is called even when the doc carries leave_balance (the stored value can be stale or a NOT NULL 0), and never for a Leave Without Pay type."""
         stored = _run_leave_notification_bg(_build_leave_doc(leave_balance=10.0), balance_on=9.0)
         stored["get_leave_balance_on"].assert_called_once()
         self.assertIn(
-            "*Balance before this request:*\n9 day(s)", _blocks_text(_approver_call(stored["slack"]).kwargs["blocks"])
+            ":moneybag: *Balance before this request*\n_9 day(s)_",
+            _blocks_text(_approver_call(stored["slack"]).kwargs["blocks"]),
         )
         lwp = _run_leave_notification_bg(_build_leave_doc(leave_type="Leave Without Pay", leave_balance=None), is_lwp=1)
         lwp["get_leave_balance_on"].assert_not_called()
@@ -1084,7 +1103,7 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         doc.docstatus = 1
         doc.status = "Approved"
         text = _blocks_text(_get_approver_blocks(doc, balance_on=7.0))
-        self.assertIn("*Balance before this request:*\n10 day(s)", text)
+        self.assertIn(":moneybag: *Balance before this request*\n_10 day(s)_", text)
         self.assertNotIn("Insufficient balance", text)
 
     def test_approver_dm_does_not_add_the_request_back_for_a_submitted_rejected_leave(self):
@@ -1093,7 +1112,7 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         doc.docstatus = 1
         doc.status = "Rejected"
         text = _blocks_text(_get_approver_blocks(doc, balance_on=7.0))
-        self.assertIn("*Balance before this request:*\n7 day(s)", text)
+        self.assertIn(":moneybag: *Balance before this request*\n_7 day(s)_", text)
 
     def test_attendance_thread_keeps_today_period_for_multi_day_half_day_leave_starting_today(self):
         """For a multi-day leave starting today with the half day today, the attendance thread says _(First-Half)_ while the approver DM carries the full duration text."""
@@ -1112,7 +1131,7 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         self.assertIn("is on leave today. _(First-Half)_", thread_call.kwargs["blocks"][0]["text"]["text"])
         approver_text = _blocks_text(_approver_call(mocks["slack"]).kwargs["blocks"])
         self.assertIn(
-            "*Duration:*\n:hourglass_flowing_sand: Half day on Jun 10, 2026 (Wed) — First Half", approver_text
+            ":hourglass_flowing_sand: *Duration*\n_Half day on Jun 10, 2026 (Wed) — First Half_", approver_text
         )
 
     def test_attendance_thread_says_full_day_when_half_day_date_is_missing(self):
@@ -1152,14 +1171,14 @@ class TestSendLeaveNotificationBg(IntegrationTestCase):
         self.assertIn("is on leave today. _(Full Day)_", thread_call.kwargs["blocks"][0]["text"]["text"])
         approver_text = _blocks_text(_approver_call(mocks["slack"]).kwargs["blocks"])
         self.assertIn(
-            "*Duration:*\n:hourglass_flowing_sand: Half day on Jun 12, 2026 (Fri) — Second Half", approver_text
+            ":hourglass_flowing_sand: *Duration*\n_Half day on Jun 12, 2026 (Fri) — Second Half_", approver_text
         )
 
     def test_approver_dm_shows_full_day_for_leave_without_half_day(self):
         """A leave with half_day unset is labelled Full Day."""
         doc = _build_leave_doc(from_date="2026-06-15", to_date="2026-06-17", half_day=0)
         text = _blocks_text(_get_approver_blocks(doc))
-        self.assertIn("*Duration:*\n:hourglass_flowing_sand: Full Day", text)
+        self.assertIn(":hourglass_flowing_sand: *Duration*\n_Full Day_", text)
 
 
 class TestFormatLeaveApplicationBlocks(IntegrationTestCase):
@@ -1186,33 +1205,41 @@ class TestFormatLeaveApplicationBlocks(IntegrationTestCase):
         self.assertEqual(blocks[0]["type"], "header")
         self.assertIn("New Leave Application", blocks[0]["text"]["text"])
         self.assertIn("<@U-applicant> has submitted a new leave request.", blocks[1]["text"]["text"])
-        self.assertIn("HR-LAP-0050", blocks[2]["elements"][0]["text"])
+        self.assertEqual(
+            blocks[2]["elements"][0]["text"],
+            ":id: <https://erp.example.com/app/leave-application/HR-LAP-0050|HR-LAP-0050>"
+            "  ·  :clock3: Submitted Jun 09, 2026 (Tue)",
+        )
 
         field_sections = [b for b in blocks if b.get("type") == "section" and "fields" in b]
         field_texts = [f["text"] for section in field_sections for f in section["fields"]]
-        self.assertIn("*Leave Type:*\n:rocket: Casual Leave", field_texts)
-        self.assertIn("*Submitted On:*\n:clock3: Jun 09, 2026 (Tue)", field_texts)
-        self.assertIn("*From:*\n:date: Jun 15, 2026 (Mon)", field_texts)
-        self.assertIn("*To:*\n:date: Jun 17, 2026 (Wed)", field_texts)
-        self.assertIn("*Duration:*\n:hourglass_flowing_sand: Full Day", field_texts)
-        self.assertIn("*Requested:*\n3 day(s)", field_texts)
-        self.assertIn("*Balance before this request:*\n10 day(s)", field_texts)
+        self.assertIn(":label: *Leave Type*\n_Casual Leave_", field_texts)
+        self.assertIn(":date: *From*\n_Jun 15, 2026 (Mon)_", field_texts)
+        self.assertIn(":date: *To*\n_Jun 17, 2026 (Wed)_", field_texts)
+        self.assertIn(":hourglass_flowing_sand: *Duration*\n_Full Day_", field_texts)
+        self.assertIn(":bar_chart: *Requested*\n_3 day(s)_", field_texts)
+        self.assertIn(":moneybag: *Balance before this request*\n_10 day(s)_", field_texts)
 
         text = _blocks_text(blocks)
-        self.assertIn("*Reason:*\n>vacation", text)
+        self.assertIn(":speech_balloon: *Reason*", text)
+        self.assertEqual(_reason_quote(blocks), {"type": "text", "text": "vacation", "style": {"italic": True}})
         self.assertNotIn("Insufficient balance", text)
         self.assertNotIn("Half Day:", text)
 
         actions = next(b for b in blocks if b.get("type") == "actions")
         self.assertEqual(actions["block_id"], "leave_actions_block")
-        self.assertEqual([e["action_id"] for e in actions["elements"]], ["leave_approve", "leave_reject"])
-        self.assertTrue(all(e["value"] == "HR-LAP-0050" for e in actions["elements"]))
+        self.assertEqual(
+            [e["action_id"] for e in actions["elements"]], ["leave_approve", "leave_reject", "ignore_open_leave"]
+        )
+        self.assertTrue(all(e["value"] == "HR-LAP-0050" for e in actions["elements"][:2]))
+        # The link button posts a block_action too; "ignore" action ids are dropped by the endpoint
+        self.assertEqual(actions["elements"][2]["url"], "https://erp.example.com/app/leave-application/HR-LAP-0050")
 
     def test_omits_requested_and_balance_fields_when_not_provided(self):
         """When total_days and leave_balance are None, only the duration field is added and no warning appears."""
         blocks = format_leave_application_blocks(**self._default_kwargs(total_days=None, leave_balance=None))
         text = _blocks_text(blocks)
-        self.assertIn("*Duration:*\n:hourglass_flowing_sand: Full Day", text)
+        self.assertIn(":hourglass_flowing_sand: *Duration*\n_Full Day_", text)
         self.assertNotIn("*Requested:*", text)
         self.assertNotIn("Balance before this request", text)
         self.assertNotIn("Insufficient balance", text)
@@ -1228,7 +1255,82 @@ class TestFormatLeaveApplicationBlocks(IntegrationTestCase):
         blocks = format_leave_application_blocks(**self._default_kwargs(total_days=3.0000001, leave_balance=3.0))
         text = _blocks_text(blocks)
         self.assertNotIn("Insufficient balance", text)
-        self.assertIn("*Requested:*\n3 day(s)", text)
+        self.assertIn(":bar_chart: *Requested*\n_3 day(s)_", text)
+
+
+class TestFormatLeaveSubmissionBlocks(IntegrationTestCase):
+    def _default_kwargs(self, **overrides):
+        kwargs = {
+            "leave_id": "HR-LAP-0050",
+            "leave_link": "https://erp.example.com/app/leave-application/HR-LAP-0050",
+            "employee_name": "EMP-001",
+            "leave_type": "Casual Leave",
+            "leave_submission_date": "2026-06-09 09:00:00",
+            "user_slack": "U-applicant",
+            "from_date": "2026-06-15",
+            "to_date": "2026-06-17",
+            "reason": "vacation",
+            "duration": "Full Day",
+            "total_days": 3.0,
+            "leave_balance": 10.0,
+        }
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_shares_the_detail_fields_with_the_approver_message(self):
+        """The applicant DM carries the same type/submitted, from/to and duration/requested/balance fields as the approver DM, then the reason."""
+        blocks = format_leave_submission_blocks(**self._default_kwargs())
+        approver = format_leave_application_blocks(
+            leave_id="HR-LAP-0050",
+            leave_link="https://erp.example.com/app/leave-application/HR-LAP-0050",
+            employee_name="<@U-applicant>",
+            leave_type="Casual Leave",
+            leave_submission_date="Jun 09, 2026 (Tue)",
+            from_date="Jun 15, 2026 (Mon)",
+            to_date="Jun 17, 2026 (Wed)",
+            duration="Full Day",
+            reason="vacation",
+            total_days=3.0,
+            leave_balance=10.0,
+        )
+        fields = lambda bs: [b for b in bs if b.get("type") == "section" and "fields" in b]  # noqa: E731
+        self.assertEqual(fields(blocks), fields(approver))
+        field_texts = [f["text"] for section in fields(blocks) for f in section["fields"]]
+        self.assertEqual(
+            field_texts,
+            [
+                ":label: *Leave Type*\n_Casual Leave_",
+                ":hourglass_flowing_sand: *Duration*\n_Full Day_",
+                ":date: *From*\n_Jun 15, 2026 (Mon)_",
+                ":date: *To*\n_Jun 17, 2026 (Wed)_",
+                ":bar_chart: *Requested*\n_3 day(s)_",
+                ":moneybag: *Balance before this request*\n_10 day(s)_",
+            ],
+        )
+        self.assertEqual(blocks[0]["text"]["text"], ":memo: Leave Request Submitted")
+        self.assertIn("Hello<@U-applicant>!", blocks[1]["text"]["text"])
+        self.assertEqual(blocks[2], approver[2])
+        self.assertEqual(
+            blocks[2]["elements"][0]["text"],
+            ":id: <https://erp.example.com/app/leave-application/HR-LAP-0050|HR-LAP-0050>"
+            "  ·  :clock3: Submitted Jun 09, 2026 (Tue)",
+        )
+        self.assertEqual(blocks[-4]["text"]["text"], ":speech_balloon: *Reason*")
+        self.assertEqual(_reason_quote(blocks), {"type": "text", "text": "vacation", "style": {"italic": True}})
+        # The applicant message closes with a small status line; no buttons on this side
+        self.assertEqual(blocks[-1]["elements"][0]["text"], "*Status:* :stopwatch: *Open*")
+        self.assertNotIn("actions", [b["type"] for b in blocks])
+
+    def test_omits_requested_and_balance_when_not_given_and_appends_the_decision(self):
+        blocks = format_leave_submission_blocks(
+            **self._default_kwargs(total_days=None, leave_balance=None, status="Rejected", status_by="<@U-approver>")
+        )
+        text = _blocks_text(blocks)
+        self.assertIn(":hourglass_flowing_sand: *Duration*\n_Full Day_", text)
+        self.assertNotIn("*Requested:*", text)
+        self.assertNotIn("Balance before this request", text)
+        self.assertEqual(blocks[0]["text"]["text"], ":x: Leave Request Rejected")
+        self.assertEqual(blocks[-1]["elements"][0]["text"], "*Status:* :x: *Rejected* by <@U-approver>")
 
 
 class TestPostSameDayLeaveToAttendanceThread(IntegrationTestCase):
@@ -2049,6 +2151,9 @@ class TestSendLeaveNotificationToApplicant(IntegrationTestCase):
             patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
             patch(f"{LEAVE_OVERRIDE_MODULE}.store_applicant_message_ref"),
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.commit"),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=0),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_balance_on", return_value=10.0),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.custom_fields_exist", return_value=False),
         ):
             send_leave_notification_to_applicant(doc)
         mock_slack.slack_app.client.chat_postMessage.assert_called_once()
@@ -2057,6 +2162,38 @@ class TestSendLeaveNotificationToApplicant(IntegrationTestCase):
         # The submission blocks include a header that reads "Leave Request Submitted".
         header_text = kwargs["blocks"][0]["text"]["text"]
         self.assertIn("Leave Request Submitted", header_text)
+        # The applicant sees the same details as the approver: duration, requested days and balance
+        text = _blocks_text(kwargs["blocks"])
+        self.assertIn(":hourglass_flowing_sand: *Duration*\n_Full Day_", text)
+        self.assertIn(":bar_chart: *Requested*\n_3 day(s)_", text)
+        self.assertIn(":moneybag: *Balance before this request*\n_10 day(s)_", text)
+        self.assertIn(":clock3: Submitted Jun 09, 2026 (Tue)", text)
+
+    def test_applicant_dm_shows_the_half_day_period_and_no_balance_for_leave_without_pay(self):
+        """A single-day second-half leave reads "Second Half"; a Leave Without Pay type has no allocation, so the balance reads "Not applicable"."""
+        doc = _build_leave_doc(
+            from_date="2026-06-10",
+            to_date="2026-06-10",
+            half_day=1,
+            first_half_second_half="Second Half",
+            total_leave_days=0.5,
+        )
+        mock_slack = MagicMock()
+        mock_slack.get_slack_user_id.return_value = TEST_SLACK_USER_ID
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.store_applicant_message_ref"),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.commit"),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=1),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_balance_on", return_value=10.0) as mock_balance,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.custom_fields_exist", return_value=True),
+        ):
+            send_leave_notification_to_applicant(doc)
+        text = _blocks_text(mock_slack.slack_app.client.chat_postMessage.call_args.kwargs["blocks"])
+        self.assertIn(":hourglass_flowing_sand: *Duration*\n_Second Half_", text)
+        self.assertIn(":bar_chart: *Requested*\n_0.5 day(s)_", text)
+        self.assertIn(":moneybag: *Balance before this request*\n_Not applicable (unpaid)_", text)
+        mock_balance.assert_not_called()
 
     def test_stores_dm_channel_and_ts_after_posting(self):
         """After the confirmation DM is posted, the returned channel and ts are stored on the Leave Application."""
@@ -2096,7 +2233,9 @@ class TestSendLeaveNotificationToApplicant(IntegrationTestCase):
             send_leave_notification_to_applicant(doc)
         kwargs = mock_slack.slack_app.client.chat_postMessage.call_args.kwargs
         self.assertEqual(kwargs["blocks"][0]["text"]["text"], ":white_check_mark: Leave Request Approved")
-        self.assertIn("*Status:* Approved by <@U-approver>", kwargs["blocks"][-1]["text"]["text"])
+        self.assertIn(
+            "*Status:* :white_check_mark: *Approved* by <@U-approver>", kwargs["blocks"][-1]["elements"][0]["text"]
+        )
         self.assertEqual(kwargs["text"], "Your leave request has been approved")
         mock_slack.slack_app.client.chat_update.assert_not_called()
 
@@ -2174,6 +2313,8 @@ class TestSendLeaveNotificationToApplicant(IntegrationTestCase):
         mock_slack.slack_app.client.chat_postMessage.side_effect = RuntimeError("slack down")
         with (
             patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=0),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_balance_on", return_value=10.0),
             patch(f"{LEAVE_OVERRIDE_MODULE}.generate_error_log") as mock_log,
         ):
             send_leave_notification_to_applicant(doc)
@@ -2281,16 +2422,22 @@ class TestOnUpdateNotifyApplicant(IntegrationTestCase):
         statuses = [call.kwargs["status"] for call in mock_enqueue.call_args_list]
         self.assertEqual(statuses, ["Approved", "Cancelled"])
 
-    def test_cancelled_by_administrator_is_not_attributed_to_the_approver(self):
-        """A cancellation made by Administrator passes decided_by=None rather than naming the leave approver."""
-        doc = _build_leave_doc(status="Cancelled", docstatus=2, status_changed=True, modified_by="Administrator")
+    def test_cancelled_without_a_recorded_user_is_not_attributed_to_the_approver(self):
+        """A cancellation with no recorded user passes decided_by=None rather than naming the leave approver."""
+        doc = _build_leave_doc(status="Cancelled", docstatus=2, status_changed=True, modified_by=None)
         with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
             on_update_notify_applicant(doc, method="on_cancel")
         self.assertIsNone(mock_enqueue.call_args.kwargs["decided_by"])
 
-    def test_falls_back_to_leave_approver_when_modified_by_is_administrator(self):
-        """When the change was made by Administrator (e.g. a background job), decided_by falls back to the leave approver."""
+    def test_reports_administrator_when_administrator_decided(self):
+        """A decision made as Administrator (a scheduled auto-approval, or someone logged in as Administrator) is attributed to Administrator, not to the approver who did not act."""
         doc = _build_leave_doc(status="Approved", docstatus=1, status_changed=True, modified_by="Administrator")
+        with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
+            on_update_notify_applicant(doc, method="on_update")
+        self.assertEqual(mock_enqueue.call_args.kwargs["decided_by"], "Administrator")
+
+    def test_falls_back_to_leave_approver_when_no_user_was_recorded(self):
+        doc = _build_leave_doc(status="Approved", docstatus=1, status_changed=True, modified_by=None)
         with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue:
             on_update_notify_applicant(doc, method="on_update")
         self.assertEqual(mock_enqueue.call_args.kwargs["decided_by"], "approver@x.com")
@@ -2434,7 +2581,14 @@ class TestSendLeaveDecisionToApplicant(IntegrationTestCase):
             stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.get_applicant_message_ref", return_value=message_ref))
             stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_status", return_value=current_status))
             stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_single_value", return_value=mention_user))
-            stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value="Approver Person"))
+            # Leave Type.is_lwp -> 0 (paid), anything else (the decider's full name) -> "Approver Person"
+            stack.enter_context(
+                patch(
+                    f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value",
+                    side_effect=lambda doctype, *a, **k: 0 if doctype == "Leave Type" else "Approver Person",
+                )
+            )
+            stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_balance_on", return_value=10.0))
             mock_store = stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.store_applicant_message_ref"))
             stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.commit"))
             mock_log = stack.enter_context(patch(f"{LEAVE_OVERRIDE_MODULE}.generate_error_log"))
@@ -2457,8 +2611,13 @@ class TestSendLeaveDecisionToApplicant(IntegrationTestCase):
         self.assertEqual(kwargs["ts"], "1700000000.000001")
         self.assertEqual(kwargs["text"], "Your leave request has been approved")
         self.assertIn("Leave Request Approved", kwargs["blocks"][0]["text"]["text"])
-        status_line = kwargs["blocks"][-1]["text"]["text"]
-        self.assertIn("*Status:* Approved by <@U-approver>", status_line)
+        status_line = kwargs["blocks"][-1]["elements"][0]["text"]
+        self.assertIn("*Status:* :white_check_mark: *Approved* by <@U-approver>", status_line)
+        # The decision time is a Slack date token (reader's own clock), rendered in italics after the decider
+        self.assertIn("by <@U-approver> · _<!date^", status_line)
+        self.assertTrue(status_line.endswith("|Jun 10, 2026 at 10:00 AM>_"))
+        # The rewritten DM carries the balance before the request (an approved, submitted leave adds its days back)
+        self.assertIn(":moneybag: *Balance before this request*\n_13 day(s)_", _blocks_text(kwargs["blocks"]))
 
     def test_desk_reject_updates_applicant_dm_in_place(self):
         """Rejecting from Desk (status changed to Rejected on submit) edits the stored applicant DM and names the approver when mentions are disabled."""
@@ -2474,8 +2633,8 @@ class TestSendLeaveDecisionToApplicant(IntegrationTestCase):
         mock_slack.slack_app.client.chat_postMessage.assert_not_called()
         kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
         self.assertIn("Leave Request Rejected", kwargs["blocks"][0]["text"]["text"])
-        status_line = kwargs["blocks"][-1]["text"]["text"]
-        self.assertIn("*Status:* Rejected by Approver Person", status_line)
+        status_line = kwargs["blocks"][-1]["elements"][0]["text"]
+        self.assertIn("*Status:* :x: *Rejected* by Approver Person", status_line)
 
     def test_cancelled_without_decider_shows_bare_status(self):
         """A cancellation with no attributable user renders the status line as just 'Cancelled'."""
@@ -2485,7 +2644,9 @@ class TestSendLeaveDecisionToApplicant(IntegrationTestCase):
         with self._patched(mock_slack, mention_user=1, current_status="Cancelled"):
             send_leave_decision_to_applicant(doc=doc, status="Cancelled", decided_by=None)
         kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
-        self.assertEqual(kwargs["blocks"][-1]["text"]["text"], "*Status:* Cancelled")
+        self.assertTrue(
+            kwargs["blocks"][-1]["elements"][0]["text"].startswith("*Status:* :no_entry_sign: *Cancelled* · _<!date^")
+        )
 
     def test_cancelled_uses_cancelled_header(self):
         """A cancellation rewrites the header to 'Leave Request Cancelled' and names the user who cancelled."""
@@ -2496,7 +2657,9 @@ class TestSendLeaveDecisionToApplicant(IntegrationTestCase):
             send_leave_decision_to_applicant(doc=doc, status="Cancelled", decided_by="hr@x.com")
         kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
         self.assertEqual(kwargs["blocks"][0]["text"]["text"], ":no_entry_sign: Leave Request Cancelled")
-        self.assertIn("*Status:* Cancelled by Approver Person", kwargs["blocks"][-1]["text"]["text"])
+        self.assertIn(
+            "*Status:* :no_entry_sign: *Cancelled* by Approver Person", kwargs["blocks"][-1]["elements"][0]["text"]
+        )
 
     def test_posts_fresh_dm_when_no_stored_ts(self):
         """A leave with no stored message ts gets a fresh chat_postMessage with the decision instead of chat_update, and the new ref is stored."""
@@ -2536,7 +2699,9 @@ class TestSendLeaveDecisionToApplicant(IntegrationTestCase):
         with self._patched(mock_slack, mention_user=1):
             send_leave_decision_to_applicant(doc=doc, status="Approved", decided_by="approver@x.com")
         kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
-        self.assertIn("*Status:* Approved by Approver Person", kwargs["blocks"][-1]["text"]["text"])
+        self.assertIn(
+            "*Status:* :white_check_mark: *Approved* by Approver Person", kwargs["blocks"][-1]["elements"][0]["text"]
+        )
 
     def test_logs_and_swallows_slack_errors(self):
         """A Slack API failure while updating the DM is logged and does not propagate."""
@@ -2689,5 +2854,188 @@ class TestSendLeaveDecisionToApplicant(IntegrationTestCase):
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value="Tom & Jerry <HR>"),
         ):
             send_leave_decision_to_applicant(doc=doc, status="Approved", decided_by="approver@x.com")
-        status_line = mock_slack.slack_app.client.chat_update.call_args.kwargs["blocks"][-1]["text"]["text"]
-        self.assertIn("Approved by Tom &amp; Jerry &lt;HR&gt;", status_line)
+        status_line = mock_slack.slack_app.client.chat_update.call_args.kwargs["blocks"][-1]["elements"][0]["text"]
+        self.assertIn("*Approved* by Tom &amp; Jerry &lt;HR&gt;", status_line)
+
+
+class TestReasonBlocks(IntegrationTestCase):
+    def test_reason_is_rendered_literally_in_an_italic_quote(self):
+        """mrkdwn control characters and mentions in the applicant's reason stay text: a rich_text quote is not parsed."""
+        blocks = reason_blocks("my_friend's wedding_\n\n*urgent* <!channel> & <https://evil|Approve here>")
+        self.assertEqual(blocks[0]["text"]["text"], ":speech_balloon: *Reason*")
+        self.assertEqual(blocks[1]["type"], "rich_text")
+        self.assertEqual(blocks[1]["elements"][0]["type"], "rich_text_quote")
+        self.assertEqual(
+            _reason_quote(blocks),
+            {
+                "type": "text",
+                "text": "my_friend's wedding_\n\n*urgent* <!channel> & <https://evil|Approve here>",
+                "style": {"italic": True},
+            },
+        )
+
+    def test_empty_reason_reads_no_reason_provided(self):
+        self.assertEqual(_reason_quote(reason_blocks("  \n"))["text"], "No reason provided")
+
+    def test_keeps_paragraph_breaks_and_caps_very_long_reasons(self):
+        self.assertEqual(_reason_quote(reason_blocks("first  \n\nsecond\n"))["text"], "first\n\nsecond")
+        text = _reason_quote(reason_blocks("x" * 3500))["text"]
+        self.assertEqual(len(text), 3000)
+        self.assertTrue(text.endswith("…"))
+
+
+class TestFormatDecider(IntegrationTestCase):
+    def test_administrator_is_named_without_a_slack_lookup(self):
+        """A scheduled auto-approval runs as Administrator, who has no Slack identity: no lookup, no Error Log, just the name."""
+        mock_slack = MagicMock()
+        with patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value="Administrator"):
+            self.assertEqual(_format_decider(mock_slack, "Administrator"), "Administrator")
+        mock_slack.get_slack_user_id.assert_not_called()
+
+
+class TestDiscardAndTrashNotifyApplicant(IntegrationTestCase):
+    def test_discard_queues_a_cancelled_decision_for_the_applicant(self):
+        """Discarding a draft fires only on_discard; the applicant's DM must stop reading Open."""
+        doc = _build_leave_doc(status="Cancelled", docstatus=2)
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.session") as mock_session,
+        ):
+            mock_session.user = "alice@x.com"
+            on_discard_notify_applicant(doc, method="on_discard")
+        kwargs = mock_enqueue.call_args.kwargs
+        self.assertIs(mock_enqueue.call_args.args[0], send_leave_decision_to_applicant)
+        self.assertEqual(kwargs["status"], "Cancelled")
+        self.assertEqual(kwargs["decided_by"], "alice@x.com")
+        self.assertTrue(kwargs["enqueue_after_commit"])
+
+    def test_trash_reads_the_dm_reference_first_and_queues_the_rewrite(self):
+        """The reference and the balance must be read while the row exists; the job gets everything explicitly."""
+        doc = _build_leave_doc()
+        with (
+            patch(
+                f"{LEAVE_OVERRIDE_MODULE}.get_applicant_message_ref", return_value=("D0FSC0001", "1700000000.000001")
+            ),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=0),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_balance_on", return_value=10.0),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.session") as mock_session,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue,
+        ):
+            mock_session.user = "hr@x.com"
+            on_trash_notify_applicant(doc, method="on_trash")
+        kwargs = mock_enqueue.call_args.kwargs
+        self.assertIs(mock_enqueue.call_args.args[0], send_leave_deleted_to_applicant)
+        self.assertEqual((kwargs["channel"], kwargs["ts"]), ("D0FSC0001", "1700000000.000001"))
+        # An open leave is cancelled by whoever deletes it, now
+        self.assertEqual((kwargs["status"], kwargs["decided_by"]), ("Cancelled", "hr@x.com"))
+        self.assertIsNotNone(kwargs["decided_at"])
+        self.assertEqual((kwargs["leave_balance"], kwargs["unpaid"]), (10.0, False))
+
+    def test_trash_of_a_decided_leave_rewrites_with_the_decision_taken(self):
+        """A rejected draft's DM should already read Rejected, but the decision job may still be queued or have failed and
+        cannot run once the row is gone: the rewrite carries the decision, its decider and time, never the deleter."""
+        doc = _build_leave_doc(
+            status="Rejected", docstatus=0, modified_by="approver@x.com", modified="2026-06-11 11:00:00"
+        )
+        with (
+            patch(
+                f"{LEAVE_OVERRIDE_MODULE}.get_applicant_message_ref", return_value=("D0FSC0001", "1700000000.000001")
+            ),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=0),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_balance_on", return_value=10.0),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.session") as mock_session,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue,
+        ):
+            mock_session.user = "hr@x.com"
+            on_trash_notify_applicant(doc, method="on_trash")
+        kwargs = mock_enqueue.call_args.kwargs
+        self.assertEqual(
+            (kwargs["status"], kwargs["decided_by"], kwargs["decided_at"]),
+            ("Rejected", "approver@x.com", "2026-06-11 11:00:00"),
+        )
+        # A cancelled document reads Cancelled whatever its status column says, attributed to its last writer
+        doc = _build_leave_doc(status="Approved", docstatus=2, modified_by="alice@x.com")
+        with (
+            patch(
+                f"{LEAVE_OVERRIDE_MODULE}.get_applicant_message_ref", return_value=("D0FSC0001", "1700000000.000001")
+            ),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=0),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_balance_on", return_value=10.0),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue,
+        ):
+            on_trash_notify_applicant(doc, method="on_trash")
+        kwargs = mock_enqueue.call_args.kwargs
+        self.assertEqual((kwargs["status"], kwargs["decided_by"]), ("Cancelled", "alice@x.com"))
+
+    def test_trash_without_a_stored_dm_queues_nothing(self):
+        doc = _build_leave_doc()
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.get_applicant_message_ref", return_value=(None, None)),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue,
+        ):
+            on_trash_notify_applicant(doc, method="on_trash")
+        mock_enqueue.assert_not_called()
+
+    def test_deleted_leave_dm_is_rewritten_as_cancelled_without_a_balance_lookup(self):
+        """The row is gone: the DM is edited into a cancellation naming the deleter at the deletion time, and HRMS is not asked for a balance."""
+        doc = _build_leave_doc()
+        mock_slack = MagicMock()
+        slack_ids = {"hr@x.com": "U-hr", "approver@x.com": "U-approver"}
+        mock_slack.get_slack_user_id.side_effect = lambda *a, **k: (
+            "U-applicant" if "employee_id" in k else slack_ids.get(k.get("user_email"))
+        )
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=0),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_single_value", return_value=1),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_balance_on") as mock_balance,
+        ):
+            send_leave_deleted_to_applicant(
+                doc,
+                channel="D0FSC0001",
+                ts="1700000000.000001",
+                decided_by="hr@x.com",
+                decided_at=datetime(2026, 6, 12, 9, 30),
+                leave_balance=10.0,
+            )
+        # The hook looked the balance up while the row existed; the job must not ask HRMS again
+        mock_balance.assert_not_called()
+        kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
+        self.assertEqual((kwargs["channel"], kwargs["ts"]), ("D0FSC0001", "1700000000.000001"))
+        self.assertEqual(kwargs["text"], "Your leave request has been cancelled")
+        status_line = kwargs["blocks"][-1]["elements"][0]["text"]
+        self.assertIn("*Status:* :no_entry_sign: *Cancelled* by <@U-hr> · _<!date^", status_line)
+        self.assertTrue(status_line.endswith("|Jun 12, 2026 at 9:30 AM>_"))
+        self.assertIn(":moneybag: *Balance before this request*\n_10 day(s)_", _blocks_text(kwargs["blocks"]))
+
+    def test_deleted_leave_dm_logs_when_the_applicant_has_no_slack_id(self):
+        doc = _build_leave_doc()
+        mock_slack = MagicMock()
+        mock_slack.get_slack_user_id.return_value = None
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.generate_error_log") as mock_log,
+        ):
+            send_leave_deleted_to_applicant(doc, channel="D0FSC0001", ts="1700000000.000001")
+        mock_slack.slack_app.client.chat_update.assert_not_called()
+        self.assertEqual(mock_log.call_args.kwargs["title"], "Applicant Slack ID not found")
+
+    def test_deleted_leave_dm_refuses_a_reference_that_is_not_a_dm(self):
+        """Same guard as the decision job: never edit anything but the applicant's DM."""
+        doc = _build_leave_doc()
+        mock_slack = MagicMock()
+        mock_slack.get_slack_user_id.side_effect = _build_slack_user_lookup()
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=0),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_single_value", return_value=1),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.generate_error_log") as mock_log,
+        ):
+            send_leave_deleted_to_applicant(doc, channel="C0MORNING", ts="1700000000.000001", decided_by="hr@x.com")
+        mock_slack.slack_app.client.chat_update.assert_not_called()
+        mock_log.assert_called_once()
+
+    def test_hooks_register_the_discard_and_trash_notifications(self):
+        leave_events = frappe.get_hooks("doc_events")["Leave Application"]
+        self.assertIn(f"{LEAVE_OVERRIDE_MODULE}.on_discard_notify_applicant", leave_events["on_discard"])
+        self.assertIn(f"{LEAVE_OVERRIDE_MODULE}.on_trash_notify_applicant", leave_events["on_trash"])

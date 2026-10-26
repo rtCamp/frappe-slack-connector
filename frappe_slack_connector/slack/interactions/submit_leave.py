@@ -4,9 +4,8 @@ from hrms.hr.doctype.leave_application.leave_application import get_leave_approv
 
 from frappe_slack_connector.db.leave_application import custom_fields_exist
 from frappe_slack_connector.db.user_meta import get_employeeid_from_slackid, get_userid_from_slackid
-from frappe_slack_connector.helpers.error import generate_error_log
+from frappe_slack_connector.helpers.error import exception_message, generate_error_log
 from frappe_slack_connector.helpers.http_response import send_http_response
-from frappe_slack_connector.helpers.str_utils import strip_html_tags
 from frappe_slack_connector.slack.app import SlackIntegration
 
 
@@ -17,6 +16,8 @@ def handler(slack: SlackIntegration, payload: dict):
     """
     if not payload:
         frappe.throw(_("No payload found"), frappe.ValidationError)
+    # Messages queued before this point belong to earlier work in the request
+    messages_before = len(frappe.get_message_log())
     try:
         # Extract relevant information
         user_info = payload["user"]
@@ -98,6 +99,20 @@ def handler(slack: SlackIntegration, payload: dict):
         clear_messages()
 
     except Exception as e:
+        # Undo a partial save: a hook raising after the insert would otherwise
+        # leave the row behind, since the request commits once this returns
+        try:
+            frappe.db.rollback()
+        except Exception as rollback_error:
+            # A rollback that fails with the connection alive (a before_rollback
+            # observer raising) would leave the partial writes to be committed
+            # when this handler returns normally: record it and let the request
+            # fail instead, which makes Frappe roll it back
+            generate_error_log(title="Error rolling back the Slack leave action", exception=rollback_error)
+            raise
+        # Log before replying: the modal shows the message to the applicant, but
+        # nothing else records why a Slack-filed leave was refused
+        generate_error_log(title="Error submitting leave request", exception=e)
         response = {
             "response_action": "push",
             "view": {
@@ -117,7 +132,7 @@ def handler(slack: SlackIntegration, payload: dict):
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"*Error Details:*\n```{strip_html_tags(str(e))}```",
+                            "text": f"*Error Details:*\n```{exception_message(e, since=messages_before)}```",
                         },
                     },
                 ],

@@ -4,8 +4,7 @@ from frappe.model.workflow import WorkflowTransitionError
 
 from frappe_slack_connector.db.leave_application import approve_leave, effective_leave_status, reject_leave
 from frappe_slack_connector.db.user_meta import get_userid_from_slackid
-from frappe_slack_connector.helpers.error import generate_error_log
-from frappe_slack_connector.helpers.str_utils import strip_html_tags
+from frappe_slack_connector.helpers.error import exception_message, generate_error_log
 from frappe_slack_connector.override.leave_application import (
     _decided_by,
     _format_decider,
@@ -74,6 +73,9 @@ def handler(slack: SlackIntegration, payload: dict):
     rewritten with the decision that was actually taken, by whom and when,
     so the approver sees what happened instead of a workflow error
     """
+    # Messages queued before this point belong to earlier work in the request
+    messages_before = len(frappe.get_message_log())
+    decided = None
     try:
         # Check the user who sent the request
         user_id = payload.get("user", {}).get("id")
@@ -104,6 +106,12 @@ def handler(slack: SlackIntegration, payload: dict):
                     raise
                 # The swallowed error was raised through msgprint; drop its text
                 frappe.clear_messages()
+            else:
+                # The decision is final once it is written: a Slack failure while
+                # updating the message below must not roll it back. A stale click
+                # writes nothing and so commits nothing
+                frappe.db.commit()
+                decided = "approved" if action_id == "leave_approve" else "rejected"
         if decision is None:
             status = "Approved" if action_id == "leave_approve" else "Rejected"
             status_by = None
@@ -129,6 +137,28 @@ def handler(slack: SlackIntegration, payload: dict):
             **leave_message_payload(blocks, text=f"Leave request {status.lower()}"),
         )
     except Exception as e:
+        # Undo whatever the action wrote before it failed: a hook raising after
+        # the submit (another app's on_update) would otherwise leave the leave
+        # approved in the database while the approver is shown an error, since
+        # the request still commits once this handler returns
+        try:
+            frappe.db.rollback()
+        except Exception as rollback_error:
+            # A rollback that fails with the connection alive (a before_rollback
+            # observer raising) would leave the partial writes to be committed
+            # when this handler returns normally: record it and let the request
+            # fail instead, which makes Frappe roll it back
+            generate_error_log(title="Error rolling back the Slack leave action", exception=rollback_error)
+            raise
+        # Log first: the error modal below needs a live trigger_id, and when it
+        # fails too the only trace of the original error would be lost
+        generate_error_log(title="Error taking action on leave request", exception=e)
+        # A decision that was committed stands; say so, or the approver clicks again
+        header = (
+            f":warning: Leave {decided}, but the Slack message could not be updated"
+            if decided
+            else ":warning: Error taking action on leave request"
+        )
         # show an error modal with the exception message
         slack.slack_app.client.views_open(
             trigger_id=payload["trigger_id"],
@@ -140,7 +170,7 @@ def handler(slack: SlackIntegration, payload: dict):
                         "type": "header",
                         "text": {
                             "type": "plain_text",
-                            "text": ":warning: Error taking action on leave request",
+                            "text": header,
                             "emoji": True,
                         },
                     },
@@ -149,7 +179,7 @@ def handler(slack: SlackIntegration, payload: dict):
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"*Error Details:*\n```{strip_html_tags(str(e))}```",
+                            "text": f"*Error Details:*\n```{exception_message(e, since=messages_before)}```",
                         },
                     },
                 ],

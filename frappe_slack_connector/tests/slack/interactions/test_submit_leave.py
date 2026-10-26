@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock, patch
 
+import frappe
 from frappe.tests import IntegrationTestCase
 
 from frappe_slack_connector.slack.interactions.submit_leave import (
@@ -134,7 +135,7 @@ class TestSubmitLeaveHandler(IntegrationTestCase):
         self.assertEqual(mock_leave_app.half_day_date, "2026-06-01")
 
     def test_returns_error_modal_when_save_raises(self):
-        """When the Leave Application save raises, handler returns an HTTP response containing an error modal payload."""
+        """When the Leave Application save raises, handler logs the error and returns an HTTP response containing an error modal payload."""
         payload = _build_submission_payload()
         mock_leave_app = MagicMock()
         mock_leave_app.save.side_effect = RuntimeError("boom")
@@ -152,12 +153,51 @@ class TestSubmitLeaveHandler(IntegrationTestCase):
             ),
             patch(f"{SUBMIT_LEAVE_MODULE}.custom_fields_exist", return_value=False),
             patch(f"{SUBMIT_LEAVE_MODULE}.send_http_response") as mock_response,
+            patch(f"{SUBMIT_LEAVE_MODULE}.frappe.db.rollback") as mock_rollback,
+            patch(f"{SUBMIT_LEAVE_MODULE}.generate_error_log") as mock_log,
         ):
             handler(slack=MagicMock(), payload=payload)
         mock_response.assert_called_once()
         body = mock_response.call_args.kwargs["body"]
         self.assertEqual(body["response_action"], "push")
         self.assertEqual(body["view"]["title"]["text"], "Error")
+        # The failure is recorded server-side, not only shown in the modal
+        # (the balance lookup on the mock doc logs its own entry first)
+        submit_logs = [c for c in mock_log.call_args_list if c.kwargs["title"] == "Error submitting leave request"]
+        self.assertEqual(len(submit_logs), 1)
+        # A hook failing after the insert must not leave the row behind
+        mock_rollback.assert_called_once()
+        self.assertIs(submit_logs[0].kwargs["exception"], mock_leave_app.save.side_effect)
+
+    def test_error_modal_shows_the_frappe_message_when_the_exception_has_none(self):
+        """A bare PermissionError from save carries no text; the modal must show the reason Frappe queued."""
+        payload = _build_submission_payload()
+        mock_leave_app = MagicMock()
+
+        def deny(**kwargs):
+            frappe.msgprint("You are not allowed to create Leave Application")
+            raise frappe.PermissionError
+
+        mock_leave_app.save.side_effect = deny
+        frappe.clear_messages()
+        try:
+            with (
+                patch(f"{SUBMIT_LEAVE_MODULE}.frappe.get_doc", return_value=mock_leave_app),
+                patch(f"{SUBMIT_LEAVE_MODULE}.get_employeeid_from_slackid", return_value="EMP-001"),
+                patch(f"{SUBMIT_LEAVE_MODULE}.get_userid_from_slackid", return_value="alice@x.com"),
+                patch(f"{SUBMIT_LEAVE_MODULE}.frappe.set_user"),
+                patch(f"{SUBMIT_LEAVE_MODULE}.get_leave_approver", return_value="approver@x.com"),
+                patch(f"{SUBMIT_LEAVE_MODULE}.custom_fields_exist", return_value=False),
+                patch(f"{SUBMIT_LEAVE_MODULE}.send_http_response") as mock_response,
+                patch(f"{SUBMIT_LEAVE_MODULE}.frappe.db.rollback") as mock_rollback,
+                patch(f"{SUBMIT_LEAVE_MODULE}.generate_error_log"),
+            ):
+                handler(slack=MagicMock(), payload=payload)
+        finally:
+            frappe.clear_messages()
+        body = mock_response.call_args.kwargs["body"]
+        self.assertIn("You are not allowed to create Leave Application", body["view"]["blocks"][2]["text"]["text"])
+        mock_rollback.assert_called_once()
 
     def test_switches_session_to_applicant_before_saving(self):
         """handler resolves the Frappe user for the Slack user and calls frappe.set_user with it before the Leave Application is saved, so the save and the enqueued notification jobs do not run as Guest."""
@@ -195,13 +235,17 @@ class TestSubmitLeaveHandler(IntegrationTestCase):
             patch(f"{SUBMIT_LEAVE_MODULE}.get_leave_approver", return_value="approver@x.com"),
             patch(f"{SUBMIT_LEAVE_MODULE}.custom_fields_exist", return_value=False),
             patch(f"{SUBMIT_LEAVE_MODULE}.send_http_response") as mock_response,
+            patch(f"{SUBMIT_LEAVE_MODULE}.frappe.db.rollback") as mock_rollback,
+            patch(f"{SUBMIT_LEAVE_MODULE}.generate_error_log") as mock_log,
         ):
             handler(slack=MagicMock(), payload=payload)
         mock_set_user.assert_not_called()
         mock_get_doc.assert_not_called()
+        mock_log.assert_called_once()
         body = mock_response.call_args.kwargs["body"]
         self.assertEqual(body["response_action"], "push")
         self.assertIn("No user found for this Slack user", body["view"]["blocks"][2]["text"]["text"])
+        mock_rollback.assert_called_once()
 
     def test_still_saves_when_the_balance_lookup_fails(self):
         """A failed HRMS balance lookup is logged and the leave is still saved (the approver DM computes its own balance)."""
@@ -217,11 +261,14 @@ class TestSubmitLeaveHandler(IntegrationTestCase):
             patch(f"{SUBMIT_LEAVE_MODULE}.frappe.db.commit"),
             patch(f"{SUBMIT_LEAVE_MODULE}.clear_messages"),
             patch(f"{SUBMIT_LEAVE_MODULE}.get_leave_balance_on", side_effect=PermissionError("Not permitted")),
+            patch(f"{SUBMIT_LEAVE_MODULE}.frappe.db.rollback") as mock_rollback,
             patch(f"{SUBMIT_LEAVE_MODULE}.generate_error_log") as mock_log,
         ):
             handler(slack=MagicMock(), payload=payload)
         mock_log.assert_called_once()
         mock_leave_app.save.assert_called_once_with(ignore_permissions=True)
+        # The balance is only a detail on the message; a failed lookup is logged, not a failed submit
+        mock_rollback.assert_not_called()
 
 
 class TestHalfDayCheckboxHandler(IntegrationTestCase):

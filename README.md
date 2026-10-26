@@ -20,6 +20,8 @@
 
 - **Daily Leave Reminders**: Every working day at the specified time, a Slack message will list all employees currently on leave.
 
+- **Birthday and Work Anniversary Announcements**: Every day at the specified time, a Slack message congratulates the employees whose birthday or work anniversary is today. The message text comes from an **Email Template** (with *Use HTML* on, the Jinja in *Response (HTML)*) linked from Slack Settings; with nothing linked a built-in message is used.
+
 ## Prerequisite
 
 Before you begin, make sure you have following apps installed on your site:

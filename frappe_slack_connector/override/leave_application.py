@@ -1,13 +1,109 @@
+from datetime import UTC, datetime
+
 import frappe
 from frappe.model.document import Document
-from frappe.utils import cint, flt, get_url_to_form, getdate
+from frappe.utils import cint, convert_utc_to_system_timezone, flt, get_datetime, get_url_to_form, getdate, today
+from frappe.utils.synchronization import filelock
 from hrms.hr.doctype.leave_application.leave_application import get_leave_balance_on
+from slack_sdk.errors import SlackApiError
 
-from frappe_slack_connector.db.leave_application import custom_fields_exist
+from frappe_slack_connector.db.employee import get_employees_on_holiday
+from frappe_slack_connector.db.leave_application import (
+    APPLICANT_CHANNEL_FIELD,
+    APPLICANT_MSG_TS_FIELD,
+    custom_fields_exist,
+    effective_leave_status,
+    get_applicant_message_ref,
+    get_leave_status,
+    store_applicant_message_ref,
+)
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
 from frappe_slack_connector.helpers.str_utils import escape_slack_text
 from frappe_slack_connector.slack.app import SlackIntegration
+from frappe_slack_connector.tasks.attendance_summary import get_leave_type, slack_time_token
+
+# Custom fields on Leave Application (fixtures/custom_field.json) holding the
+# ts of the reply posted in the attendance summary thread for a same-day leave
+# and the ID of the channel it was posted in. The ID comes from Slack's
+# response: chat.postMessage accepts a channel name, but chat.update (used to
+# strike the reply through) only accepts an ID
+ATTENDANCE_REPLY_TS_FIELD = "custom_slack_attendance_reply_ts"
+ATTENDANCE_REPLY_CHANNEL_FIELD = "custom_slack_attendance_reply_channel"
+# The reply text as posted, so the strike-through wraps exactly what the
+# channel saw even if the mention setting or the leave changed since
+ATTENDANCE_REPLY_TEXT_FIELD = "custom_slack_attendance_reply_text"
+ATTENDANCE_REPLY_FIELDS = (ATTENDANCE_REPLY_TS_FIELD, ATTENDANCE_REPLY_CHANNEL_FIELD, ATTENDANCE_REPLY_TEXT_FIELD)
+
+# Statuses under which a leave covering today is announced (and listed in
+# the summary)
+ANNOUNCED_STATUSES = ("Open", "Approved")
+
+# The post job and the withdrawal job for one leave run under this lock,
+# so a withdrawal cannot slip between the post's checks and its store
+ATTENDANCE_REPLY_LOCK_PREFIX = "fsc_attendance_reply"
+ATTENDANCE_REPLY_LOCK_TIMEOUT = 60
+
+
+def _attendance_reply_lock(leave_name: str):
+    return filelock(f"{ATTENDANCE_REPLY_LOCK_PREFIX}_{leave_name}", timeout=ATTENDANCE_REPLY_LOCK_TIMEOUT)
+
+
+def _current_leave_state(leave_name: str):
+    """
+    The committed row's status, docstatus and stored reply reference, or
+    None when the row is gone (deleted before the job ran)
+    """
+    return frappe.db.get_value(
+        "Leave Application",
+        leave_name,
+        ["status", "docstatus", *ATTENDANCE_REPLY_FIELDS],
+        as_dict=True,
+        ignore=True,
+    )
+
+
+def _is_announced(state) -> bool:
+    """Whether the committed row still belongs in the summary and the thread"""
+    return bool(state) and state.status in ANNOUNCED_STATUSES and cint(state.docstatus) != 2
+
+
+def _covers(leave, day) -> bool:
+    """Whether the leave's dates include ``day`` (dates may be strings or dates)"""
+    return getdate(leave.from_date) <= day <= getdate(leave.to_date)
+
+
+def _load_leave(leave_name: str):
+    """
+    The committed row with everything the thread reply needs (status,
+    dates, employee, half-day fields, stored reply), or None when it is gone
+    """
+    fields = [
+        "name",
+        "status",
+        "docstatus",
+        "from_date",
+        "to_date",
+        "employee",
+        "employee_name",
+        "half_day",
+        "half_day_date",
+        *ATTENDANCE_REPLY_FIELDS,
+    ]
+    if custom_fields_exist():
+        fields.append("custom_first_halfsecond_half")
+    return frappe.db.get_value("Leave Application", leave_name, fields, as_dict=True, ignore=True)
+
+
+# Appended to a struck-through thread reply. One word for every path
+# (rejected, cancelled, discarded, deleted): the channel only needs to know
+# the leave is off, not who called it off
+WITHDRAWN_LABEL = "Cancelled"
+from frappe_slack_connector.tasks.attendance_summary import update_attendance_summary
+
+# Statuses counted in the attendance summary, and those that take a leave out of it
+SUMMARY_INCLUDED_STATUSES = ("Open", "Approved")
+SUMMARY_EXCLUDED_STATUSES = ("Rejected", "Cancelled")
 
 
 def after_insert(doc, method):
@@ -19,11 +115,17 @@ def after_insert(doc, method):
     user through the Leave Application row, which a worker started before
     the insert commits cannot see
     """
+    # Rows created by Data Import are not announcements. Decide here: the
+    # background job runs with fresh frappe.local, where the flag is reset.
+    # Both jobs wait for the commit: the thread reply and the applicant DM
+    # write their Slack references back to this row, which a fast worker
+    # could otherwise miss (or announce a leave whose insert then rolls back)
     frappe.enqueue(
         send_leave_notification_bg,
         queue="short",
         enqueue_after_commit=True,
         doc=doc,
+        announce_in_thread=not frappe.flags.in_import,
     )
     frappe.enqueue(
         send_leave_notification_to_applicant,
@@ -31,26 +133,679 @@ def after_insert(doc, method):
         enqueue_after_commit=True,
         doc=doc,
     )
+    # A leave applied for after the morning post changes today's count
+    enqueue_attendance_summary_refresh(doc)
+
+
+def on_update_refresh_attendance_summary(doc, method=None):
+    """
+    Refresh today's attendance summary when a leave covering today is
+    rejected or cancelled after the summary has been posted
+
+    Wired to ``on_update`` (Desk and Slack rejection, with or without a
+    workflow), ``on_cancel`` (submitted leave cancelled) and ``on_discard``
+    (draft leave discarded). Only fires when the leave actually leaves the
+    summary, so edits to an already-rejected leave and Rejected -> Cancelled
+    transitions do not rebuild it.
+    """
+    if not _leaves_attendance_summary(doc):
+        return
+    enqueue_attendance_summary_refresh(doc)
+
+
+def on_trash_refresh_attendance_summary(doc, method=None):
+    """
+    Refresh today's attendance summary when a leave that is counted in it
+    is deleted (deleting a draft runs neither ``on_update`` nor
+    ``on_cancel``). The job runs after commit, when the row is gone
+    """
+    if cint(doc.docstatus) == 2 or doc.status not in SUMMARY_INCLUDED_STATUSES:
+        return
+    enqueue_attendance_summary_refresh(doc)
+
+
+def _leaves_attendance_summary(doc) -> bool:
+    """
+    Whether this save takes the leave out of the summary: its status moved
+    from a counted one to Rejected or Cancelled, or the document itself was
+    cancelled. A cancel normally sets Cancelled too (HRMS ``before_cancel``),
+    but ``ignore_validate`` skips that and leaves the status Approved; the
+    summary query drops such a row on docstatus alone, so the hook must too.
+    """
+    cancelled = cint(doc.docstatus) == 2 and doc.has_value_changed("docstatus")
+    withdrawn = doc.status in SUMMARY_EXCLUDED_STATUSES and doc.has_value_changed("status")
+    if not (cancelled or withdrawn):
+        return False
+    previous_status = doc.get_value_before_save("status")
+    # No before-save copy means we cannot tell; refresh rather than go stale
+    return previous_status is None or previous_status in SUMMARY_INCLUDED_STATUSES
+
+
+def should_refresh_attendance_summary(doc) -> bool:
+    """
+    Whether a change to this leave affects today's posted attendance summary
+    True only when attendance updates are enabled, today's summary has
+    already been posted and the leave covers today. If the summary has not
+    been posted yet it will reflect the current state on its own.
+    """
+    slack_settings = frappe.get_single("Slack Settings")
+    if (
+        slack_settings.send_attendance_updates != 1
+        or not slack_settings.last_attendance_msg_ts
+        or not slack_settings.last_attendance_date
+    ):
+        return False
+
+    current_date = getdate(today())
+    if getdate(slack_settings.last_attendance_date) != current_date:
+        return False
+
+    return getdate(doc.from_date) <= current_date <= getdate(doc.to_date)
+
+
+def enqueue_attendance_summary_refresh(doc) -> None:
+    """
+    Enqueue the in-place rebuild of today's attendance summary if the
+    leave affects it
+
+    The job reads the Leave Application table, so it is queued after the
+    current transaction commits; otherwise the worker could rebuild the
+    summary from the state before this change.
+    """
+    if not should_refresh_attendance_summary(doc):
+        return
+    frappe.enqueue(
+        update_attendance_summary,
+        queue="short",
+        enqueue_after_commit=True,
+    )
+
+
+# Leave statuses that count as a decision on the request, and the header the
+# applicant's DM is rewritten with when the leave reaches that status
+APPLICANT_DECISION_HEADERS = {
+    "Approved": ":white_check_mark: Leave Request Approved",
+    "Rejected": ":x: Leave Request Rejected",
+    "Cancelled": ":no_entry_sign: Leave Request Cancelled",
+}
+# Reasons are unbounded Small Text. Slack documents no length for rich text
+# elements; the section text limit (3000) is kept as a safe bound
+REASON_MAX_CHARS = 3000
+STATUS_EMOJI = {
+    "Open": ":stopwatch:",
+    "Approved": ":white_check_mark:",
+    "Rejected": ":x:",
+    "Cancelled": ":no_entry_sign:",
+}
+
+
+def leave_message_payload(blocks: list, *, text: str) -> dict:
+    """
+    ``chat.postMessage`` / ``chat.update`` arguments for a leave message:
+    the blocks plus ``text`` as the notification fallback. Top-level blocks
+    on purpose: an attachment would give a coloured bar but Slack collapses
+    tall attachments behind "Show more" and shows ``text`` as a body line
+    """
+    return {"text": text, "blocks": blocks}
+
+
+def open_in_erp_button(leave_link: str) -> dict:
+    """
+    Link button to the Leave Application form. Its action id starts with
+    "ignore": Slack still posts the click, and the interactions endpoint
+    drops those
+    """
+    return {
+        "type": "button",
+        "text": {"type": "plain_text", "emoji": True, "text": ":link: Open in ERP"},
+        "url": leave_link,
+        "action_id": "ignore_open_leave",
+    }
+
+
+def decision_blocks(status: str, status_by: str | None = None, decided_at=None) -> list:
+    """
+    The status line closing a leave message, as a small context line: the
+    status with its emoji, who decided it and when. ``decided_at`` (site
+    time) renders as a Slack date token so each reader sees it in their
+    own clock
+    """
+    text = f"*Status:* {STATUS_EMOJI.get(status, '')} *{status}*".replace("  ", " ")
+    if status_by:
+        text += f" by {status_by}"
+    moment = get_datetime(decided_at) if decided_at else None
+    if moment:
+        text += f" · _{slack_time_token(moment, with_date=True)}_"
+    return [{"type": "divider"}, {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}]
+
+
+# Slack errors meaning the stored applicant DM can no longer be edited
+MISSING_MESSAGE_ERRORS = ("message_not_found", "channel_not_found")
+
+# The submission DM job and the decision job for one leave can run on
+# different workers at the same time; both take this lock so only one of
+# them ever posts, and the other finds the stored reference
+APPLICANT_DM_LOCK_PREFIX = "fsc_applicant_dm"
+APPLICANT_DM_LOCK_TIMEOUT = 60
+
+
+def _applicant_dm_lock(leave_id: str):
+    return filelock(f"{APPLICANT_DM_LOCK_PREFIX}_{leave_id}", timeout=APPLICANT_DM_LOCK_TIMEOUT)
+
+
+def is_leave_decided(status: str | None, docstatus) -> bool:
+    """
+    Whether the leave has reached a decision worth showing the applicant.
+
+    HRMS only applies an approved leave on submit, so "Approved" counts once
+    the document is submitted; a rejection or cancellation is final as soon
+    as it is set (some workflows keep rejected leaves as drafts).
+    """
+    status = effective_leave_status(status, docstatus)
+    if status in ("Rejected", "Cancelled"):
+        return True
+    return status == "Approved" and cint(docstatus) == 1
+
+
+def _reached_decision(doc: Document) -> bool:
+    """
+    Whether this save is the one that takes the leave to its decision:
+    the submit for an approval (status or docstatus changed), the save that
+    sets Rejected, or the cancel
+    """
+    if doc.flags.in_insert or not is_leave_decided(doc.status, doc.docstatus):
+        return False
+    # Submit and cancel change docstatus; a cancel that skipped the HRMS hook
+    # (ignore_validate) changes nothing else, and still is a decision
+    if cint(doc.docstatus) in (1, 2):
+        return doc.has_value_changed("status") or doc.has_value_changed("docstatus")
+    return doc.has_value_changed("status")
+
+
+def _decided_by(modified_by: str | None, leave_approver: str | None, status: str | None = None) -> str | None:
+    """
+    The user who took the decision: the acting user, which Desk, the
+    workflow and the Slack handler all set before the hooks run. A decision
+    made as Administrator (a scheduled auto-approval, or someone logged in
+    as Administrator) is reported as Administrator rather than attributed
+    to the leave approver, who did not act. ``leave_approver`` is only used
+    when nothing recorded who acted, and never for a cancellation, which
+    may be anyone's
+    """
+    if modified_by:
+        return modified_by
+    if status == "Cancelled":
+        return None
+    return leave_approver
+
+
+def on_update_notify_applicant(doc: Document, method: str | None = None):
+    """
+    Update the applicant's Slack DM when the leave is approved, rejected or
+    cancelled, whether the decision was taken in Desk or from Slack.
+
+    Hooked to ``on_update`` (approve/reject go through save/submit) and
+    ``on_cancel`` (HRMS sets status to Cancelled in ``before_cancel``, and a
+    cancel does not fire ``on_update``). Inserts are skipped: the submission
+    DM already renders the decision when a leave is created as decided.
+    """
+    if not _reached_decision(doc):
+        return
+    status = effective_leave_status(doc.status, doc.docstatus)
+    # A reject that saves and submits in one request fires this twice on the
+    # same document object (status change, then docstatus change); queue the
+    # decision once per status so parallel workers cannot both post a DM
+    if doc.flags.get("fsc_applicant_decision_queued") == status:
+        return
+    doc.flags.fsc_applicant_decision_queued = status
+    frappe.enqueue(
+        send_leave_decision_to_applicant,
+        queue="short",
+        enqueue_after_commit=True,
+        doc=doc,
+        status=status,
+        decided_by=_decided_by(doc.modified_by, doc.leave_approver, status),
+    )
+
+
+def on_discard_notify_applicant(doc: Document, method: str | None = None):
+    """
+    A discarded draft is Cancelled on the row (HRMS ``on_discard`` db_sets
+    the status) but fires neither ``on_update`` nor ``on_cancel``; rewrite
+    the applicant's DM like a cancellation, or it keeps reading "Open"
+    """
+    frappe.enqueue(
+        send_leave_decision_to_applicant,
+        queue="short",
+        enqueue_after_commit=True,
+        doc=doc,
+        status="Cancelled",
+        decided_by=_decided_by(frappe.session.user, doc.leave_approver, "Cancelled"),
+    )
+
+
+def on_trash_notify_applicant(doc: Document, method: str | None = None):
+    """
+    Read the applicant DM reference while the row still exists and queue
+    its rewrite: once deleted, the leave can be neither checked nor looked
+    up, so the job gets everything it needs here
+    """
+    channel, ts = get_applicant_message_ref(doc.name)
+    if not (channel and ts):
+        return
+    if is_leave_decided(doc.status, doc.docstatus):
+        # The DM should already show this outcome, but the decision job may
+        # still be queued or have failed, and after the delete it can no
+        # longer run (the row it checks is gone). Rewrite with the decision
+        # that was taken, by whom and when, not with the deleter
+        status = effective_leave_status(doc.status, doc.docstatus)
+        decided_by, decided_at = _decided_by(doc.modified_by, doc.leave_approver, status), doc.modified
+    else:
+        status, decided_by, decided_at = "Cancelled", frappe.session.user, frappe.utils.now_datetime()
+    frappe.enqueue(
+        send_leave_deleted_to_applicant,
+        queue="short",
+        enqueue_after_commit=True,
+        doc=doc,
+        channel=channel,
+        ts=ts,
+        status=status,
+        decided_by=decided_by,
+        decided_at=decided_at,
+        # Looked up while the row exists; HRMS cannot authorise it afterwards
+        **message_balance_fields(doc),
+    )
+
+
+def send_leave_deleted_to_applicant(
+    doc: Document,
+    channel: str,
+    ts: str,
+    status: str = "Cancelled",
+    decided_by: str | None = None,
+    decided_at=None,
+    leave_balance: float | None = None,
+    unpaid: bool = False,
+):
+    """
+    Rewrite the applicant's DM for a deleted leave: a cancellation by the
+    deleter for an open one, the decision already taken for a decided one.
+    No status check or reference lookup: the row is gone, so everything
+    was read by the hook. Same lock and same-message check as the decision
+    job, so a decision job still in flight cannot put an older status back
+    """
+    try:
+        slack = SlackIntegration()
+        user_id = slack.get_slack_user_id(employee_id=doc.employee)
+        if not user_id:
+            generate_error_log(
+                title="Applicant Slack ID not found",
+                message=f"No Slack user found for employee {doc.employee} (deleted Leave Application {doc.name})",
+            )
+            return
+        blocks = _applicant_blocks(
+            doc,
+            user_id,
+            status=status,
+            status_by=_format_decider(slack, decided_by),
+            decided_at=decided_at or frappe.utils.now_datetime(),
+            leave_balance=leave_balance,
+            unpaid=unpaid,
+        )
+        with _applicant_dm_lock(doc.name):
+            if not _is_applicant_dm(doc, channel, ts):
+                return
+            slack.slack_app.client.chat_update(
+                channel=channel, ts=ts, **leave_message_payload(blocks, text=_applicant_text(status))
+            )
+    except Exception as e:
+        generate_error_log(
+            title="Error updating the applicant DM for a deleted leave",
+            exception=e,
+        )
+
+
+def restore_applicant_message_ref(doc: Document, method: str | None = None):
+    """
+    Keep the DM reference server-owned across every save.
+
+    The fields are hidden and read-only in the form, but Frappe does not
+    enforce that on API writes, and ``db_update`` writes every in-memory
+    column. A client could point the reference at any bot message (such as
+    the attendance summary) and have it overwritten on approval, and a form
+    loaded before the background job stored the reference would wipe it with
+    NULL. So: never accept client values on insert, and on update always
+    replace the in-memory values with the committed ones.
+    """
+    # ``is_new`` relies on ``__islocal``, which only insert() sets; a document
+    # built in memory and never inserted has no name and nothing stored
+    if doc.is_new() or not doc.name:
+        doc.set(APPLICANT_CHANNEL_FIELD, None)
+        doc.set(APPLICANT_MSG_TS_FIELD, None)
+        return
+    # check_if_latest has already loaded the committed row (for update), so
+    # prefer it over a second query
+    previous = doc.get_doc_before_save()
+    if previous is not None:
+        channel, ts = previous.get(APPLICANT_CHANNEL_FIELD), previous.get(APPLICANT_MSG_TS_FIELD)
+    else:
+        # Lock the row until this save commits: a job that stored the
+        # reference just before waits for the save and its write is read here
+        # rather than overwritten by db_update, and a job that wants to store
+        # one waits for the save
+        channel, ts = get_applicant_message_ref(doc.name, for_update=True)
+    doc.set(APPLICANT_CHANNEL_FIELD, channel or None)
+    doc.set(APPLICANT_MSG_TS_FIELD, ts or None)
 
 
 def send_leave_notification_to_applicant(doc: Document):
-    # Send a confirmation message to the user
-    slack = SlackIntegration()
-    user_id = slack.get_slack_user_id(employee_id=doc.employee)
-    slack.slack_app.client.chat_postMessage(
-        channel=user_id,
-        blocks=format_leave_submission_blocks(
-            leave_id=doc.name,
-            employee_name=doc.employee,
-            leave_link=get_url_to_form("Leave Application", doc.name),
-            leave_type=doc.leave_type,
-            leave_submission_date=doc.creation,
-            from_date=doc.from_date,
-            user_slack=user_id,
-            to_date=doc.to_date,
-            reason=doc.description,
-        ),
+    """
+    Send a confirmation message to the applicant and remember the message
+    so it can be updated in place once a decision is taken.
+
+    A leave that is already decided when the DM is sent (created directly as
+    approved, or decided before the job ran) renders the decision right away.
+    If the decision job got there first and already posted the applicant a
+    DM, nothing is posted: the applicant must only ever get one message.
+    """
+    try:
+        slack = SlackIntegration()
+        user_id = slack.get_slack_user_id(employee_id=doc.employee)
+        if not user_id:
+            generate_error_log(
+                title="Applicant Slack ID not found",
+                message=f"No Slack user found for employee {doc.employee} (Leave Application {doc.name})",
+            )
+            return
+        status = (
+            effective_leave_status(doc.status, doc.docstatus) if is_leave_decided(doc.status, doc.docstatus) else None
+        )
+        status_by = _format_decider(slack, _decided_by(doc.modified_by, doc.leave_approver, status)) if status else None
+        with _applicant_dm_lock(doc.name):
+            channel, ts = get_applicant_message_ref(doc.name)
+            if channel and ts:
+                return
+            response = slack.slack_app.client.chat_postMessage(
+                channel=user_id,
+                **leave_message_payload(
+                    _applicant_blocks(
+                        doc,
+                        user_id,
+                        status=status,
+                        status_by=status_by,
+                        decided_at=doc.modified if status else None,
+                        **message_balance_fields(doc),
+                    ),
+                    text=_applicant_text(status),
+                ),
+            )
+            store_applicant_message_ref(doc.name, channel=response.get("channel"), ts=response.get("ts"))
+            # Commit before the lock is released: the job's own commit only comes
+            # after this function returns, and a worker waiting on the lock would
+            # otherwise still read an empty reference and post a second DM
+            frappe.db.commit()  # nosemgrep
+    except Exception as e:
+        generate_error_log(
+            title="Error posting leave confirmation to applicant",
+            exception=e,
+        )
+
+
+def send_leave_decision_to_applicant(doc: Document, status: str, decided_by: str | None = None):
+    """
+    Rewrite the applicant's "Leave Request Submitted" DM with the decision.
+
+    Falls back to posting a fresh DM when no message reference is stored
+    (leaves created before the reference was tracked, or whose first DM
+    failed to post) or when Slack no longer knows the stored message.
+
+    The job renders the status it was queued with. When the leave has moved
+    on since (approved, then cancelled before this job ran) it does nothing:
+    the job queued by the later change renders the current status, and a
+    slow older job must not overwrite it.
+    """
+    try:
+        slack = SlackIntegration()
+        user_id = slack.get_slack_user_id(employee_id=doc.employee)
+        if not user_id:
+            generate_error_log(
+                title="Applicant Slack ID not found",
+                message=f"No Slack user found for employee {doc.employee} (Leave Application {doc.name})",
+            )
+            return
+        text = _applicant_text(status)
+        with _applicant_dm_lock(doc.name):
+            if get_leave_status(doc.name) != status:
+                return
+            # Built only for a decision that still stands: the balance lookup
+            # below is an HRMS query, and may write an Error Log when it fails
+            blocks = _applicant_blocks(
+                doc,
+                user_id,
+                status=status,
+                status_by=_format_decider(slack, decided_by),
+                decided_at=doc.modified,
+                **message_balance_fields(doc),
+            )
+            # Read the reference from the database rather than from ``doc``: the
+            # job receives a snapshot taken before the submission DM was stored
+            channel, ts = get_applicant_message_ref(doc.name)
+            if channel and ts and _is_applicant_dm(doc, channel, ts):
+                try:
+                    slack.slack_app.client.chat_update(
+                        channel=channel, ts=ts, **leave_message_payload(blocks, text=text)
+                    )
+                    return
+                except SlackApiError as e:
+                    if e.response.get("error") not in MISSING_MESSAGE_ERRORS:
+                        raise
+                    generate_error_log(
+                        title="Applicant leave DM no longer exists, posting a fresh one",
+                        message=f"Leave Application {doc.name}: {e.response.get('error')} for {channel}/{ts}",
+                    )
+            response = slack.slack_app.client.chat_postMessage(
+                channel=user_id, **leave_message_payload(blocks, text=text)
+            )
+            store_applicant_message_ref(doc.name, channel=response.get("channel"), ts=response.get("ts"))
+            # Commit before the lock is released: the job's own commit only comes
+            # after this function returns, and a worker waiting on the lock would
+            # otherwise still read an empty reference and post a second DM
+            frappe.db.commit()  # nosemgrep
+    except Exception as e:
+        generate_error_log(
+            title="Error updating leave decision for applicant",
+            exception=e,
+        )
+
+
+def _is_applicant_dm(doc: Document, channel: str, ts: str) -> bool:
+    """
+    Only ever edit a message in a direct-message channel, and never the
+    attendance summary. The reference is server-written, but refuse anyway
+    so a bad value can only cost a fresh DM, never another message.
+    """
+    if not str(channel).startswith("D"):
+        generate_error_log(
+            title="Applicant leave DM reference is not a DM channel",
+            message=f"Leave Application {doc.name}: refusing to update {channel}/{ts}; posting a fresh DM instead",
+        )
+        return False
+    if ts == frappe.db.get_single_value("Slack Settings", "last_attendance_msg_ts"):
+        generate_error_log(
+            title="Applicant leave DM reference points at the attendance summary",
+            message=f"Leave Application {doc.name}: refusing to update {channel}/{ts}; posting a fresh DM instead",
+        )
+        return False
+    return True
+
+
+def _format_decider(slack: SlackIntegration, user_email: str | None) -> str | None:
+    """
+    Render the user who took the decision: a Slack mention when mentions are
+    enabled and the user has a Slack ID, otherwise their full name
+    """
+    if not user_email:
+        return None
+    if user_email == "Administrator":
+        # A scheduled job or the admin account: no Slack identity to look up,
+        # and the lookup would write an Error Log on every auto-approval
+        return escape_slack_text(frappe.db.get_value("User", user_email, "full_name") or user_email)
+    try:
+        slack_id = slack.get_slack_user_id(user_email=user_email)
+    except Exception as e:
+        generate_error_log(
+            title="Error fetching approver slack id",
+            exception=e,
+        )
+        slack_id = None
+    if slack_id and frappe.db.get_single_value("Slack Settings", "mention_user"):
+        return f"<@{slack_id}>"
+    return escape_slack_text(frappe.db.get_value("User", user_email, "full_name") or user_email)
+
+
+def _applicant_text(status: str | None) -> str:
+    """
+    Plain-text fallback for the applicant DM, shown in notification previews
+    """
+    if status:
+        return f"Your leave request has been {status.lower()}"
+    return "Leave request submitted"
+
+
+def _applicant_blocks(
+    doc: Document,
+    user_slack: str,
+    *,
+    status: str | None = None,
+    status_by: str | None = None,
+    leave_balance: float | None = None,
+    unpaid: bool = False,
+    decided_at=None,
+):
+    """
+    Build the applicant DM blocks for the given leave, optionally with a decision
+    """
+    return format_leave_submission_blocks(
+        leave_id=doc.name,
+        employee_name=doc.employee,
+        leave_link=get_url_to_form("Leave Application", doc.name),
+        leave_type=doc.leave_type,
+        leave_submission_date=doc.creation,
+        from_date=doc.from_date,
+        user_slack=user_slack,
+        to_date=doc.to_date,
+        duration=format_leave_duration(doc),
+        total_days=flt(doc.total_leave_days),
+        leave_balance=leave_balance,
+        unpaid=unpaid,
+        reason=doc.description,
+        status=status,
+        status_by=status_by,
+        decided_at=decided_at,
     )
+
+
+def message_balance_fields(doc: Document) -> dict:
+    """
+    ``unpaid`` and ``leave_balance`` for the DM builders. A Leave Without
+    Pay type has no allocation, so no balance is looked up and the message
+    says so instead of showing a number
+    """
+    unpaid = bool(frappe.db.get_value("Leave Type", doc.leave_type, "is_lwp"))
+    return {"unpaid": unpaid, "leave_balance": None if unpaid else get_leave_balance(doc)}
+
+
+def leave_id_context_block(*, leave_id: str, leave_link: str, leave_submission_date: str) -> dict:
+    """
+    The "Leave ID • Submitted On" context line shared by the approver and
+    applicant DMs. ``leave_submission_date`` arrives formatted
+    """
+    return {
+        "type": "context",
+        "elements": [
+            {
+                "type": "mrkdwn",
+                "text": f":id: <{leave_link}|{leave_id}>  ·  :clock3: Submitted {leave_submission_date}",
+            }
+        ],
+    }
+
+
+def leave_detail_blocks(
+    *,
+    leave_type: str,
+    from_date: str,
+    to_date: str,
+    duration: str,
+    total_days: float | None = None,
+    leave_balance: float | None = None,
+    unpaid: bool = False,
+) -> list:
+    """
+    The leave detail field sections shared by the approver DM and the
+    applicant DM: type and duration, the date range, then the requested
+    days and the balance before the request. The balance reads "Not
+    applicable" for an unpaid leave type (no allocation to draw on) and is
+    left out when it could not be looked up. Dates and the duration arrive
+    formatted
+    """
+    blocks = [
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f":label: *Leave Type*\n_{leave_type}_"},
+                {"type": "mrkdwn", "text": f":hourglass_flowing_sand: *Duration*\n_{duration}_"},
+            ],
+        },
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f":date: *From*\n_{from_date}_"},
+                {"type": "mrkdwn", "text": f":date: *To*\n_{to_date}_"},
+            ],
+        },
+    ]
+    details = []
+    if total_days is not None:
+        details.append({"type": "mrkdwn", "text": f":bar_chart: *Requested*\n_{flt(total_days, 2):g} day(s)_"})
+    if leave_balance is not None:
+        details.append(
+            {
+                "type": "mrkdwn",
+                "text": f":moneybag: *Balance before this request*\n_{flt(leave_balance, 2):g} day(s)_",
+            }
+        )
+    elif unpaid:
+        details.append(
+            {"type": "mrkdwn", "text": ":moneybag: *Balance before this request*\n_Not applicable (unpaid)_"}
+        )
+    if details:
+        blocks.append({"type": "section", "fields": details})
+    return blocks
+
+
+def reason_blocks(reason: str | None) -> list:
+    """
+    The reason as an italic quote, shared by the approver and applicant DMs.
+    A ``rich_text`` block renders the applicant's text literally: mrkdwn in
+    a section would let ``_``, ``*``, ``<!channel>`` or a disguised link in
+    the reason format or ping its way into the approver's DM
+    """
+    text = "\n".join(line.rstrip() for line in (reason or "").splitlines()).strip() or "No reason provided"
+    if len(text) > REASON_MAX_CHARS:
+        text = text[: REASON_MAX_CHARS - 1] + "…"
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": ":speech_balloon: *Reason*"}},
+        {
+            "type": "rich_text",
+            "elements": [
+                {
+                    "type": "rich_text_quote",
+                    "elements": [{"type": "text", "text": text, "style": {"italic": True}}],
+                }
+            ],
+        },
+    ]
 
 
 def format_leave_submission_blocks(
@@ -63,17 +818,36 @@ def format_leave_submission_blocks(
     from_date: str,
     to_date: str,
     reason: str,
+    duration: str,
     leave_link: str = "#",
+    total_days: float | None = None,
+    leave_balance: float | None = None,
+    unpaid: bool = False,
+    status: str | None = None,
+    status_by: str | None = None,
+    decided_at=None,
 ) -> list:
     """
-    Format the blocks for the leave application message
+    Format the blocks for the applicant's leave confirmation message, with
+    the same detail fields the approver sees (duration, requested days and
+    the balance before the request when given).
+
+    With ``status`` (Approved, Rejected or Cancelled) the header reflects the
+    decision and the closing status line names ``status_by`` and the time it
+    was taken; without one the line reads "Open".
     """
+    if status:
+        header = APPLICANT_DECISION_HEADERS[status]
+        intro = f"Hello<@{user_slack}>! Your leave request has been {status.lower()}."
+    else:
+        header = ":memo: Leave Request Submitted"
+        intro = f"Hello<@{user_slack}>! Your leave request has been successfully submitted."
     blocks = [
         {
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": ":memo: Leave Request Submitted",
+                "text": header,
                 "emoji": True,
             },
         },
@@ -81,53 +855,163 @@ def format_leave_submission_blocks(
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"Hello<@{user_slack}>! Your leave request has been successfully submitted.",
+                "text": intro,
             },
         },
-        {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Leave ID:* <{leave_link}|{leave_id}> • *Submitted On:* {standard_date_fmt(leave_submission_date)}",
-                }
-            ],
-        },
+        leave_id_context_block(
+            leave_id=leave_id, leave_link=leave_link, leave_submission_date=standard_date_fmt(leave_submission_date)
+        ),
         {"type": "divider"},
-        {
-            "type": "section",
-            "fields": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"*From:*\n:calendar: {standard_date_fmt(from_date)}",
-                },
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Leave Type:*\n:rocket: {leave_type}",
-                },
-            ],
-        },
-        {
-            "type": "section",
-            "fields": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"*To:*\n:calendar: {standard_date_fmt(to_date)}",
-                },
-                {"type": "mrkdwn", "text": f"*Reason:*\n>{reason}"},
-            ],
-        },
+        *leave_detail_blocks(
+            leave_type=leave_type,
+            from_date=standard_date_fmt(from_date),
+            to_date=standard_date_fmt(to_date),
+            duration=duration,
+            total_days=total_days,
+            leave_balance=leave_balance,
+            unpaid=unpaid,
+        ),
+        *reason_blocks(reason),
     ]
+    # A pending request shows "Open" so the applicant can see a decision is still
+    # due. No ERP button here: the Leave ID in the context line is the link
+    blocks.extend(decision_blocks(status or "Open", status_by, decided_at))
     return blocks
 
 
-def send_leave_notification_bg(doc: Document):
+def _same_day_reply_name(slack: SlackIntegration, employee: str, employee_name: str, mention_user) -> str:
+    """Mention when the employee has a Slack id and mentions are on, else the escaped name"""
+    user_slack = slack.get_slack_user_id(employee_id=employee)
+    return f"<@{user_slack}>" if user_slack and mention_user else escape_slack_text(employee_name)
+
+
+def _same_day_reply_text(name: str, day_period: str) -> str:
+    return f"{name} is on leave today. _({day_period})_"
+
+
+def _same_day_reply_block(text: str) -> dict:
+    return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
+
+
+def post_same_day_leave_to_attendance_thread(doc: Document, slack: SlackIntegration | None = None) -> str | None:
+    """
+    Reply in today's attendance summary thread when the leave covers today
+    and the summary has already been posted (a leave applied for before the
+    summary is simply included in the summary itself)
+
+    The reply ``ts`` and channel ID are stored on the Leave Application so
+    the reply can be struck through if the leave is rejected or cancelled
+    later the same day.
+    Returns the ``ts`` of the reply, or None when nothing was posted
+    """
+    # A leave created already decided (e.g. Rejected) is not an announcement
+    if doc.status not in ANNOUNCED_STATUSES:
+        return None
+
+    today = getdate(frappe.utils.today())
+    slack_settings = frappe.get_single("Slack Settings")
+    if (
+        slack_settings.send_attendance_updates != 1
+        or not slack_settings.last_attendance_msg_ts
+        or not slack_settings.last_attendance_date
+        or getdate(slack_settings.last_attendance_date) != today
+    ):
+        return None
+
+    # Cheap pre-check on the queued row; everything is checked again below
+    # from the committed row
+    if not _covers(doc, today):
+        return None
+
+    slack = slack or SlackIntegration()
+    # A celebrations-only install may have no attendance channel configured
+    if not slack.SLACK_CHANNEL_ID:
+        return None
+
+    with _attendance_reply_lock(doc.name):
+        # ``doc`` is the row as it was inserted and may be stale by now: the
+        # leave may have been rejected, cancelled or deleted (the withdrawal
+        # hook found nothing stored then), its dates or half day edited, and
+        # a stored reply means a duplicate job. Every gate and the text come
+        # from the committed row
+        current = _load_leave(doc.name)
+        if (
+            current is None
+            or not _is_announced(current)
+            or current.get(ATTENDANCE_REPLY_TS_FIELD)
+            or not _covers(current, today)
+        ):
+            return None
+
+        # Match the summary, which only lists active employees
+        if frappe.db.get_value("Employee", current.employee, "status") != "Active":
+            return None
+
+        # Same rule as the summary: a leave spanning today is only "leave"
+        # when today is a working day on the employee's own holiday list
+        if current.employee in get_employees_on_holiday([current.employee], today):
+            return None
+
+        name = _same_day_reply_name(slack, current.employee, current.employee_name, slack_settings.mention_user)
+        day_period = get_leave_type(current, on_date=today)
+        reply_text = _same_day_reply_text(name, day_period)
+
+        # The thread lives where the summary was posted. The summary job
+        # stores that channel's ID (when it has the field for it); the
+        # setting is the fallback, and may have been changed since the morning
+        response = slack.slack_app.client.chat_postMessage(
+            channel=slack_settings.get("last_attendance_channel_id") or slack.SLACK_CHANNEL_ID,
+            blocks=[_same_day_reply_block(reply_text)],
+            thread_ts=slack_settings.last_attendance_msg_ts,
+            reply_broadcast=True,
+        )
+        reply_ts = response["ts"]
+        channel = response.get("channel")
+        frappe.db.set_value(
+            "Leave Application",
+            doc.name,
+            {
+                ATTENDANCE_REPLY_TS_FIELD: reply_ts,
+                ATTENDANCE_REPLY_CHANNEL_FIELD: channel,
+                ATTENDANCE_REPLY_TEXT_FIELD: reply_text,
+            },
+            update_modified=False,
+        )
+
+        # Commit under the lock: the withdrawal job for this leave waits on
+        # the lock and must find the reference, and the job's own commit only
+        # comes after this function returns (a manual commit, so the lock
+        # really serialises check, post and store)
+        frappe.db.commit()  # nosemgrep
+
+        # A withdrawal that committed while Slack was posting enqueued a job
+        # that ran before this one stored anything, so take the reply back here
+        state = _current_leave_state(doc.name)
+        if not _is_announced(state):
+            job = dict(
+                leave_name=doc.name,
+                reply_ts=reply_ts,
+                channel=channel,
+                reply_text=reply_text,
+                employee=current.employee,
+                employee_name=current.employee_name,
+                day_period=day_period,
+            )
+            if not _strike_reply(slack, **job) and state is None:
+                # The row is gone (deleted), so nothing keeps the reference for
+                # a later attempt: queue one more withdrawal carrying it
+                frappe.enqueue(withdraw_attendance_reply_bg, queue="short", **job)
+    return reply_ts
+
+
+def send_leave_notification_bg(doc: Document, announce_in_thread: bool = True):
     """
     Send a slack message to the leave approver when
     a new leave application is submitted
 
     Also send a notification to the attendance channel thread if
-    the leave date is today and attendance notification is already sent
+    the leave covers today and attendance notification is already sent
+    (skipped when ``announce_in_thread`` is False, e.g. for imported rows)
     """
     slack = SlackIntegration()
     try:
@@ -139,63 +1023,40 @@ def send_leave_notification_bg(doc: Document):
         )
         approver_slack = None
 
+    if announce_in_thread:
+        try:
+            post_same_day_leave_to_attendance_thread(doc, slack=slack)
+        except Exception as e:
+            generate_error_log(
+                title="Error posting same-day leave to attendance thread",
+                exception=e,
+            )
+
     try:
         user_slack = slack.get_slack_user_id(employee_id=doc.employee)
-        mention_users = frappe.db.get_single_value("Slack Settings", "mention_user")
         mention = f"<@{user_slack}>" if user_slack else doc.employee_name
-        day_period = "Full Day"
-        if doc.half_day and doc.half_day_date and getdate(doc.half_day_date) == getdate(frappe.utils.today()):
-            day_period = doc.custom_first_halfsecond_half if custom_fields_exist() else "Half Day"
-
-        # if leave date is today and attendance notification is already sent,
-        # send notification to attendance channel thread
-        slack_settings = frappe.get_single("Slack Settings")
-        if (
-            doc.from_date == frappe.utils.today()
-            and slack_settings.send_attendance_updates == 1
-            and slack_settings.last_attendance_date is not None
-            and slack_settings.last_attendance_msg_ts is not None
-            and slack_settings.last_attendance_date == frappe.utils.nowdate()
-        ):
-            slack.slack_app.client.chat_postMessage(
-                channel=slack.SLACK_CHANNEL_ID,
-                blocks=[
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"{mention if mention_users else doc.employee_name} requested for leave today. "
-                            + f"_({day_period})_",
-                        },
-                    },
-                ],
-                thread_ts=slack_settings.last_attendance_msg_ts,
-                reply_broadcast=True,
-            )
 
         # Send message to approver
         if approver_slack is not None:
-            # Leave Without Pay types have no allocation, so the balance is meaningless
-            leave_balance = None
-            if not frappe.db.get_value("Leave Type", doc.leave_type, "is_lwp"):
-                leave_balance = get_leave_balance(doc)
-
+            approver_blocks = format_leave_application_blocks(
+                leave_id=doc.name,
+                leave_link=get_url_to_form("Leave Application", doc.name),
+                employee_name=mention,
+                leave_type=doc.leave_type,
+                duration=format_leave_duration(doc),
+                leave_submission_date=standard_date_fmt(doc.creation),
+                from_date=standard_date_fmt(doc.from_date),
+                to_date=standard_date_fmt(doc.to_date),
+                reason=doc.description,
+                total_days=flt(doc.total_leave_days),
+                **message_balance_fields(doc),
+            )
             slack.slack_app.client.chat_postMessage(
                 channel=approver_slack,
                 # Fallback for notification previews; the blocks carry the details
-                text=f"New leave application from {escape_slack_text(doc.employee_name)}",
-                blocks=format_leave_application_blocks(
-                    leave_id=doc.name,
-                    leave_link=get_url_to_form("Leave Application", doc.name),
-                    employee_name=mention,
-                    leave_type=doc.leave_type,
-                    duration=format_leave_duration(doc),
-                    leave_submission_date=standard_date_fmt(doc.creation),
-                    from_date=standard_date_fmt(doc.from_date),
-                    to_date=standard_date_fmt(doc.to_date),
-                    reason=doc.description,
-                    total_days=flt(doc.total_leave_days),
-                    leave_balance=leave_balance,
+                **leave_message_payload(
+                    approver_blocks,
+                    text=f"New leave application from {escape_slack_text(doc.employee_name)}",
                 ),
             )
 
@@ -204,6 +1065,276 @@ def send_leave_notification_bg(doc: Document):
             title="Error posting message to Slack",
             exception=e,
         )
+
+
+def _reply_posted_today(reply_ts: str) -> bool:
+    """
+    Whether a Slack message ``ts`` falls on today's date in the site timezone
+    """
+    # A Slack ts is a Unix epoch in seconds (with a sequence suffix after the
+    # dot), so read it as UTC and shift it into the site timezone before
+    # comparing calendar dates
+    posted_at = convert_utc_to_system_timezone(datetime.fromtimestamp(float(reply_ts), tz=UTC))
+    return getdate(posted_at) == getdate(frappe.utils.today())
+
+
+def get_attendance_reply_ref(leave_name: str, *, for_update: bool = False) -> tuple[str | None, str | None, str | None]:
+    """
+    The stored (ts, channel ID, posted text) of the attendance thread reply
+    for the leave, read from the database; all None when nothing is stored
+    or the row is gone. ``for_update`` locks the row, so a save that started before the
+    post job wrote the reference waits for that write to commit and reads
+    it, instead of putting its stale empty value back
+    """
+    # ignore=True: nothing to restore while the custom fields are not yet
+    # installed (a save between the code upgrade and the fixture sync)
+    stored = frappe.db.get_value(
+        "Leave Application",
+        leave_name,
+        list(ATTENDANCE_REPLY_FIELDS),
+        as_dict=True,
+        ignore=True,
+        **({"for_update": True} if for_update else {}),
+    )
+    if not stored:
+        return None, None, None
+    return (
+        stored.get(ATTENDANCE_REPLY_TS_FIELD) or None,
+        stored.get(ATTENDANCE_REPLY_CHANNEL_FIELD) or None,
+        stored.get(ATTENDANCE_REPLY_TEXT_FIELD) or None,
+    )
+
+
+def restore_attendance_reply_ts(doc: Document, method=None):
+    """
+    Keep the stored reply ts and channel server-owned
+
+    The fields are hidden and read-only, but Frappe does not enforce
+    ``read_only`` on API writes, and the bot edits whatever message is
+    stored here. Only the background jobs may write or clear them with
+    ``db.set_value``, so the values a client sends are never trusted: a new
+    doc gets them blanked, and an existing doc gets the database values put
+    back (this also stops a form loaded before the job ran from erasing them
+    with ``db_update``, which writes every column)
+    """
+    # is_new() only knows about docs going through insert(); a doc built in
+    # memory and never inserted has no name either
+    if doc.is_new() or not doc.name:
+        reply_ts, channel, reply_text = None, None, None
+    else:
+        reply_ts, channel, reply_text = get_attendance_reply_ref(doc.name, for_update=True)
+
+    doc.set(ATTENDANCE_REPLY_TS_FIELD, reply_ts)
+    doc.set(ATTENDANCE_REPLY_CHANNEL_FIELD, channel)
+    doc.set(ATTENDANCE_REPLY_TEXT_FIELD, reply_text)
+
+
+def _enqueue_attendance_reply_withdrawal(doc: Document):
+    """
+    Enqueue marking the attendance thread reply for the leave as withdrawn,
+    when the leave covers today. The job decides from the committed row:
+    the reply may not be posted yet when the withdrawal is saved (the post
+    job for the insert runs after its own commit), so the decision cannot
+    be taken here from what is stored now. Never raises: a bad date or a
+    queue outage must not block the user's action
+    """
+    try:
+        today = getdate(frappe.utils.today())
+        if not (getdate(doc.from_date) <= today <= getdate(doc.to_date)):
+            return
+
+        # Never trust the values on the doc (see restore_attendance_reply_ts):
+        # read what is stored, as the fallback for a row that is gone by the
+        # time the job runs (on_trash)
+        reply_ts, channel, reply_text = get_attendance_reply_ref(doc.name)
+
+        # Only edit once the status change is committed: on_update runs
+        # before on_submit, which can still throw and roll back
+        frappe.enqueue(
+            withdraw_attendance_reply_bg,
+            queue="short",
+            enqueue_after_commit=True,
+            leave_name=doc.name,
+            reply_ts=reply_ts,
+            channel=channel,
+            reply_text=reply_text,
+            employee=doc.employee,
+            employee_name=doc.employee_name,
+            day_period=get_leave_type(doc, on_date=today),
+        )
+    except Exception as e:
+        generate_error_log(
+            title="Error scheduling attendance thread reply withdrawal",
+            exception=e,
+        )
+
+
+def on_update_withdraw_attendance_reply(doc: Document, method=None):
+    """
+    Strike through the same-day attendance thread reply when the leave is
+    rejected or cancelled on the day the reply was posted. The reply stays
+    in the thread as history, marked "(Cancelled)" either way
+
+    Wired to ``on_update``, ``on_update_after_submit``, ``on_cancel`` and
+    ``on_discard``: Frappe only runs ``on_cancel`` for a cancel, HRMS sets
+    status to Cancelled in ``before_cancel`` and ``on_discard``, and a
+    workflow may move a submitted leave to Rejected. A cancel that skips
+    ``before_cancel`` (``ignore_validate``) keeps the status Approved, so a
+    document cancelled outright counts too: the summary drops it on
+    docstatus alone and the reply must follow
+    """
+    withdrawn = doc.has_value_changed("status") and doc.status in ("Rejected", "Cancelled")
+    cancelled = cint(doc.docstatus) == 2 and doc.has_value_changed("docstatus")
+    if not (withdrawn or cancelled):
+        return
+
+    _enqueue_attendance_reply_withdrawal(doc)
+
+
+def on_trash_withdraw_attendance_reply(doc: Document, method=None):
+    """
+    Strike through the same-day attendance thread reply when the leave is
+    deleted (deleting a draft runs neither ``on_update`` nor ``on_cancel``)
+    """
+    _enqueue_attendance_reply_withdrawal(doc)
+
+
+def withdraw_attendance_reply_bg(
+    leave_name: str,
+    reply_ts: str | None = None,
+    *,
+    employee: str,
+    employee_name: str,
+    day_period: str,
+    channel: str | None = None,
+    reply_text: str | None = None,
+):
+    """
+    Edit the attendance thread reply ``reply_ts`` posted for the leave
+    ``leave_name`` so it reads struck through with "(Cancelled)" appended, and
+    clear the stored reference. Nothing is deleted: the thread keeps a record
+    of the leave that was announced and then taken back. Editing a broadcast
+    reply changes it in the thread and in the channel
+
+    ``channel`` is the ID Slack reported when the reply was posted; the
+    attendance channel setting is only a fallback for a reply stored before
+    the ID was, and fails when that setting holds a channel name
+    """
+    with _attendance_reply_lock(leave_name):
+        # The committed row wins (the post job may have stored the reply
+        # after the withdrawal was saved, and commits under this lock); the
+        # values passed in are the fallback for a row that is gone (on_trash)
+        state = _current_leave_state(leave_name)
+        if state is not None:
+            # A later transition put the leave back in the summary (rejected,
+            # then reopened and approved): its reply stands
+            if _is_announced(state):
+                return
+            reply_ts = state.get(ATTENDANCE_REPLY_TS_FIELD) or None
+            channel = state.get(ATTENDANCE_REPLY_CHANNEL_FIELD) or None
+            reply_text = state.get(ATTENDANCE_REPLY_TEXT_FIELD) or None
+        # A reply from an earlier day is history and is left alone
+        try:
+            if not reply_ts or not _reply_posted_today(reply_ts):
+                return
+        except Exception as e:
+            generate_error_log(
+                title="Error marking attendance thread reply as withdrawn",
+                message=f"Leave Application {leave_name} stores an unreadable reply ts {reply_ts!r}",
+                exception=e,
+            )
+            return
+
+        # The bot must only ever edit its own thread replies, never the
+        # summary message the thread hangs off
+        if reply_ts == frappe.db.get_single_value("Slack Settings", "last_attendance_msg_ts"):
+            generate_error_log(
+                title="Refused to edit the attendance summary",
+                message=f"Leave Application {leave_name} stores the summary ts {reply_ts} as its reply ts",
+            )
+            return
+
+        _strike_reply(
+            None,
+            leave_name=leave_name,
+            reply_ts=reply_ts,
+            channel=channel,
+            reply_text=reply_text,
+            employee=employee,
+            employee_name=employee_name,
+            day_period=day_period,
+        )
+
+
+def _strike_reply(
+    slack: SlackIntegration | None,
+    *,
+    leave_name: str,
+    reply_ts: str,
+    channel: str | None,
+    employee: str,
+    employee_name: str,
+    day_period: str,
+    reply_text: str | None = None,
+) -> bool:
+    """
+    Edit the reply into its struck-through form and clear the stored
+    reference; True when the reference was cleared. The reference is
+    cleared after a successful edit, or when Slack says the message is gone
+    for good; a transient failure (rate limit, timeout, outage) is logged
+    and keeps the reference, so a later withdrawal the same day still has a
+    handle on the reply
+
+    ``reply_text`` is the text as posted; the struck-through message wraps
+    exactly that, so a mention setting or leave edited since does not
+    rewrite history. It is rebuilt only for a reply stored before the text
+    was kept
+    """
+    cleared = True
+    try:
+        slack = slack or SlackIntegration()
+        if not reply_text:
+            mention_user = frappe.db.get_single_value("Slack Settings", "mention_user")
+            reply_text = _same_day_reply_text(
+                _same_day_reply_name(slack, employee, employee_name, mention_user), day_period
+            )
+        text = f"~{reply_text}~ ({WITHDRAWN_LABEL})"
+        slack.slack_app.client.chat_update(
+            channel=channel or slack.SLACK_CHANNEL_ID,
+            ts=reply_ts,
+            blocks=[_same_day_reply_block(text)],
+            text=f"{escape_slack_text(employee_name)} is on leave today ({WITHDRAWN_LABEL})",
+        )
+    except SlackApiError as e:
+        # The reply may already be gone (deleted by hand): nothing to keep.
+        # channel_not_found only proves that when the stored channel ID was
+        # used; the setting fallback may be a name, which chat.update rejects
+        # with the same error while the reply is still there
+        error = e.response.get("error")
+        cleared = error == "message_not_found" or (error == "channel_not_found" and bool(channel))
+        generate_error_log(
+            title="Error marking attendance thread reply as withdrawn",
+            message=f"Leave Application {leave_name}: reply {reply_ts} in {channel or 'the attendance channel'}",
+            exception=e,
+        )
+    except Exception as e:
+        cleared = False
+        generate_error_log(
+            title="Error marking attendance thread reply as withdrawn",
+            message=f"Leave Application {leave_name}: reply {reply_ts} in {channel or 'the attendance channel'}",
+            exception=e,
+        )
+
+    if not cleared:
+        return False
+    # A no-op when the leave itself has been deleted
+    frappe.db.set_value(
+        "Leave Application",
+        leave_name,
+        dict.fromkeys(ATTENDANCE_REPLY_FIELDS),
+        update_modified=False,
+    )
+    return True
 
 
 def get_leave_balance(doc: Document) -> float | None:
@@ -281,6 +1412,7 @@ def format_leave_application_blocks(
     leave_link: str = "#",
     total_days: float | None = None,
     leave_balance: float | None = None,
+    unpaid: bool = False,
 ) -> list:
     """
     Format the blocks for the leave application message
@@ -290,17 +1422,6 @@ def format_leave_application_blocks(
     """
     requested = flt(total_days, 2) if total_days is not None else None
     balance = flt(leave_balance, 2) if leave_balance is not None else None
-
-    details = [{"type": "mrkdwn", "text": f"*Duration:*\n:hourglass_flowing_sand: {duration}"}]
-    if requested is not None:
-        details.append({"type": "mrkdwn", "text": f"*Requested:*\n{requested:g} day(s)"})
-    if balance is not None:
-        details.append(
-            {
-                "type": "mrkdwn",
-                "text": f"*Balance before this request:*\n{balance:g} day(s)",
-            }
-        )
 
     blocks = [
         {
@@ -318,34 +1439,17 @@ def format_leave_application_blocks(
                 "text": f"{employee_name} has submitted a new leave request.",
             },
         },
-        {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Leave ID:* <{leave_link}|{leave_id}> ",
-                }
-            ],
-        },
+        leave_id_context_block(leave_id=leave_id, leave_link=leave_link, leave_submission_date=leave_submission_date),
         {"type": "divider"},
-        {
-            "type": "section",
-            "fields": [
-                {"type": "mrkdwn", "text": f"*Leave Type:*\n:rocket: {leave_type}"},
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Submitted On:*\n:clock3: {leave_submission_date}",
-                },
-            ],
-        },
-        {
-            "type": "section",
-            "fields": [
-                {"type": "mrkdwn", "text": f"*From:*\n:date: {from_date}"},
-                {"type": "mrkdwn", "text": f"*To:*\n:date: {to_date}"},
-            ],
-        },
-        {"type": "section", "fields": details},
+        *leave_detail_blocks(
+            leave_type=leave_type,
+            from_date=from_date,
+            to_date=to_date,
+            duration=duration,
+            total_days=total_days,
+            leave_balance=leave_balance,
+            unpaid=unpaid,
+        ),
     ]
 
     # Warn the approver when the request cannot be covered by the recorded balance
@@ -363,15 +1467,7 @@ def format_leave_application_blocks(
             }
         )
 
-    blocks.append(
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*Reason:*\n>{reason if reason else 'No reason provided'}",
-            },
-        }
-    )
+    blocks.extend(reason_blocks(reason))
 
     blocks.extend(
         [
@@ -394,6 +1490,7 @@ def format_leave_application_blocks(
                         "value": leave_id,
                         "action_id": "leave_reject",
                     },
+                    open_in_erp_button(leave_link),
                 ],
             },
             {

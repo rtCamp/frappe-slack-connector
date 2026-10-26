@@ -1,6 +1,12 @@
 import frappe
 from frappe.model.workflow import apply_workflow
-from frappe.utils import today
+from frappe.utils import cint, today
+
+# Custom fields (shipped in fixtures/custom_field.json) that remember the
+# applicant's "Leave Request Submitted" Slack DM so it can be edited in place
+# once the leave is approved, rejected or cancelled.
+APPLICANT_CHANNEL_FIELD = "custom_slack_applicant_channel"
+APPLICANT_MSG_TS_FIELD = "custom_slack_applicant_msg_ts"
 
 from frappe_slack_connector.db.employee import get_employees_on_holiday
 
@@ -13,6 +19,77 @@ def custom_fields_exist() -> bool:
     return frappe.get_meta("Leave Application").has_field("custom_first_halfsecond_half")
 
 
+def applicant_message_fields_exist() -> bool:
+    """
+    Check if the fields that store the applicant's Slack DM reference exist
+    on the Leave Application doctype (they are added by this app's fixtures)
+    """
+    meta = frappe.get_meta("Leave Application")
+    return meta.has_field(APPLICANT_CHANNEL_FIELD) and meta.has_field(APPLICANT_MSG_TS_FIELD)
+
+
+def get_applicant_message_ref(leave_id: str, *, for_update: bool = False) -> tuple[str | None, str | None]:
+    """
+    Return the (channel, ts) of the applicant's Slack DM for the given leave,
+    or (None, None) when nothing is stored, the leave has no name yet, or
+    the row does not exist. ``for_update`` locks the row for the rest of the
+    transaction, so a save that read the reference waits for a background
+    job's write to commit first (and reads it) instead of putting its stale
+    value back, and a job that writes waits for the save to commit
+    """
+    if not leave_id or not applicant_message_fields_exist():
+        return None, None
+    row = frappe.db.get_value(
+        "Leave Application",
+        leave_id,
+        [APPLICANT_CHANNEL_FIELD, APPLICANT_MSG_TS_FIELD],
+        as_dict=True,
+        **({"for_update": True} if for_update else {}),
+    )
+    # get_value returns None (or an empty result) when the row is missing
+    if not row or not isinstance(row, dict):
+        return None, None
+    return row.get(APPLICANT_CHANNEL_FIELD) or None, row.get(APPLICANT_MSG_TS_FIELD) or None
+
+
+def effective_leave_status(status: str | None, docstatus) -> str | None:
+    """
+    The decision a leave's row really expresses: a cancelled document is
+    Cancelled whatever its status column says (a cancel with
+    ``ignore_validate`` skips the HRMS hook that sets it), otherwise the
+    status column
+    """
+    return "Cancelled" if cint(docstatus) == 2 else status
+
+
+def get_leave_status(leave_id: str) -> str | None:
+    """
+    The leave's current decision status straight from the database (see
+    ``effective_leave_status``), or None when the row no longer exists
+    """
+    row = frappe.db.get_value("Leave Application", leave_id, ["status", "docstatus"], as_dict=True)
+    if not row:
+        return None
+    return effective_leave_status(row.status, row.docstatus)
+
+
+def store_applicant_message_ref(leave_id: str, *, channel: str | None, ts: str | None) -> None:
+    """
+    Remember the applicant's Slack DM (channel, ts) on the Leave Application.
+
+    Written directly to the database without touching ``modified`` so that
+    storing the reference does not fire another ``on_update`` doc event.
+    """
+    if not (channel and ts) or not applicant_message_fields_exist():
+        return
+    frappe.db.set_value(
+        "Leave Application",
+        leave_id,
+        {APPLICANT_CHANNEL_FIELD: channel, APPLICANT_MSG_TS_FIELD: ts},
+        update_modified=False,
+    )
+
+
 def get_employees_on_leave() -> list:
     """
     Get all employees on leave today.
@@ -22,6 +99,9 @@ def get_employees_on_leave() -> list:
     leave the organisation before the leave date, so the Employee status is
     checked at query time rather than trusting the Leave Application alone.
 
+    Cancelled documents are excluded by ``docstatus`` as well as by status:
+    a cancel that skips the HRMS controller (``flags.ignore_validate``)
+    leaves ``status`` at Approved while ``docstatus`` becomes 2.
     Employees for whom today is a holiday on their own holiday list are
     not returned either: a multi-day leave spanning a holiday is not a
     day off on that date.
@@ -51,9 +131,12 @@ def get_employees_on_leave() -> list:
                 "in",
                 ["Open", "Approved"],
             ),
+            "docstatus": ("!=", 2),
         },
         fields=fields,
-        order_by="to_date asc",
+        # Deterministic order: the summary content is fingerprinted to skip
+        # no-op edits, so ties must not reorder between two builds
+        order_by="to_date asc, name asc",
     )
 
     if not leave_applications:

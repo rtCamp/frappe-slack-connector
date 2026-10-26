@@ -2910,31 +2910,62 @@ class TestDiscardAndTrashNotifyApplicant(IntegrationTestCase):
         self.assertTrue(kwargs["enqueue_after_commit"])
 
     def test_trash_reads_the_dm_reference_first_and_queues_the_rewrite(self):
-        """The reference must be read while the row exists; the job gets the channel and ts explicitly."""
+        """The reference and the balance must be read while the row exists; the job gets everything explicitly."""
         doc = _build_leave_doc()
         with (
             patch(
                 f"{LEAVE_OVERRIDE_MODULE}.get_applicant_message_ref", return_value=("D0FSC0001", "1700000000.000001")
             ),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=0),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_balance_on", return_value=10.0),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.session") as mock_session,
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue,
         ):
+            mock_session.user = "hr@x.com"
             on_trash_notify_applicant(doc, method="on_trash")
         kwargs = mock_enqueue.call_args.kwargs
         self.assertIs(mock_enqueue.call_args.args[0], send_leave_deleted_to_applicant)
         self.assertEqual((kwargs["channel"], kwargs["ts"]), ("D0FSC0001", "1700000000.000001"))
-        self.assertIsNotNone(kwargs["deleted_at"])
+        # An open leave is cancelled by whoever deletes it, now
+        self.assertEqual((kwargs["status"], kwargs["decided_by"]), ("Cancelled", "hr@x.com"))
+        self.assertIsNotNone(kwargs["decided_at"])
+        self.assertEqual((kwargs["leave_balance"], kwargs["unpaid"]), (10.0, False))
 
-    def test_trash_of_a_decided_leave_leaves_the_dm_alone(self):
-        """A rejected draft or a cancelled leave already shows its real outcome; purging the row must not rewrite it as cancelled by the deleter."""
-        for status, docstatus in (("Rejected", 0), ("Cancelled", 2), ("Approved", 1)):
-            doc = _build_leave_doc(status=status, docstatus=docstatus)
-            with (
-                patch(f"{LEAVE_OVERRIDE_MODULE}.get_applicant_message_ref") as mock_ref,
-                patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue,
-            ):
-                on_trash_notify_applicant(doc, method="on_trash")
-            mock_ref.assert_not_called()
-            mock_enqueue.assert_not_called()
+    def test_trash_of_a_decided_leave_rewrites_with_the_decision_taken(self):
+        """A rejected draft's DM should already read Rejected, but the decision job may still be queued or have failed and
+        cannot run once the row is gone: the rewrite carries the decision, its decider and time, never the deleter."""
+        doc = _build_leave_doc(
+            status="Rejected", docstatus=0, modified_by="approver@x.com", modified="2026-06-11 11:00:00"
+        )
+        with (
+            patch(
+                f"{LEAVE_OVERRIDE_MODULE}.get_applicant_message_ref", return_value=("D0FSC0001", "1700000000.000001")
+            ),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=0),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_balance_on", return_value=10.0),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.session") as mock_session,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue,
+        ):
+            mock_session.user = "hr@x.com"
+            on_trash_notify_applicant(doc, method="on_trash")
+        kwargs = mock_enqueue.call_args.kwargs
+        self.assertEqual(
+            (kwargs["status"], kwargs["decided_by"], kwargs["decided_at"]),
+            ("Rejected", "approver@x.com", "2026-06-11 11:00:00"),
+        )
+        # A cancelled document reads Cancelled whatever its status column says, attributed to its last writer
+        doc = _build_leave_doc(status="Approved", docstatus=2, modified_by="alice@x.com")
+        with (
+            patch(
+                f"{LEAVE_OVERRIDE_MODULE}.get_applicant_message_ref", return_value=("D0FSC0001", "1700000000.000001")
+            ),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=0),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_balance_on", return_value=10.0),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.enqueue") as mock_enqueue,
+        ):
+            on_trash_notify_applicant(doc, method="on_trash")
+        kwargs = mock_enqueue.call_args.kwargs
+        self.assertEqual((kwargs["status"], kwargs["decided_by"]), ("Cancelled", "alice@x.com"))
 
     def test_trash_without_a_stored_dm_queues_nothing(self):
         doc = _build_leave_doc()
@@ -2964,8 +2995,10 @@ class TestDiscardAndTrashNotifyApplicant(IntegrationTestCase):
                 channel="D0FSC0001",
                 ts="1700000000.000001",
                 decided_by="hr@x.com",
-                deleted_at=datetime(2026, 6, 12, 9, 30),
+                decided_at=datetime(2026, 6, 12, 9, 30),
+                leave_balance=10.0,
             )
+        # The hook looked the balance up while the row existed; the job must not ask HRMS again
         mock_balance.assert_not_called()
         kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
         self.assertEqual((kwargs["channel"], kwargs["ts"]), ("D0FSC0001", "1700000000.000001"))
@@ -2973,7 +3006,19 @@ class TestDiscardAndTrashNotifyApplicant(IntegrationTestCase):
         status_line = kwargs["blocks"][-1]["elements"][0]["text"]
         self.assertIn("*Status:* :no_entry_sign: *Cancelled* by <@U-hr> · _<!date^", status_line)
         self.assertTrue(status_line.endswith("|Jun 12, 2026 at 9:30 AM>_"))
-        self.assertNotIn("Balance before this request", _blocks_text(kwargs["blocks"]))
+        self.assertIn(":moneybag: *Balance before this request*\n_10 day(s)_", _blocks_text(kwargs["blocks"]))
+
+    def test_deleted_leave_dm_logs_when_the_applicant_has_no_slack_id(self):
+        doc = _build_leave_doc()
+        mock_slack = MagicMock()
+        mock_slack.get_slack_user_id.return_value = None
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
+            patch(f"{LEAVE_OVERRIDE_MODULE}.generate_error_log") as mock_log,
+        ):
+            send_leave_deleted_to_applicant(doc, channel="D0FSC0001", ts="1700000000.000001")
+        mock_slack.slack_app.client.chat_update.assert_not_called()
+        self.assertEqual(mock_log.call_args.kwargs["title"], "Applicant Slack ID not found")
 
     def test_deleted_leave_dm_refuses_a_reference_that_is_not_a_dm(self):
         """Same guard as the decision job: never edit anything but the applicant's DM."""

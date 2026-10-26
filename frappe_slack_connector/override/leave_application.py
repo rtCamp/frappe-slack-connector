@@ -228,7 +228,8 @@ APPLICANT_DECISION_HEADERS = {
     "Rejected": ":x: Leave Request Rejected",
     "Cancelled": ":no_entry_sign: Leave Request Cancelled",
 }
-# Reasons are unbounded Small Text; Slack caps a text element around 3000 characters
+# Reasons are unbounded Small Text. Slack documents no length for rich text
+# elements; the section text limit (3000) is kept as a safe bound
 REASON_MAX_CHARS = 3000
 STATUS_EMOJI = {
     "Open": ":stopwatch:",
@@ -389,13 +390,18 @@ def on_trash_notify_applicant(doc: Document, method: str | None = None):
     its rewrite: once deleted, the leave can be neither checked nor looked
     up, so the job gets everything it needs here
     """
-    # A decided leave's DM already shows its real outcome, who took it and
-    # when; purging the row must not overwrite that with the deleter
-    if is_leave_decided(doc.status, doc.docstatus):
-        return
     channel, ts = get_applicant_message_ref(doc.name)
     if not (channel and ts):
         return
+    if is_leave_decided(doc.status, doc.docstatus):
+        # The DM should already show this outcome, but the decision job may
+        # still be queued or have failed, and after the delete it can no
+        # longer run (the row it checks is gone). Rewrite with the decision
+        # that was taken, by whom and when, not with the deleter
+        status = effective_leave_status(doc.status, doc.docstatus)
+        decided_by, decided_at = _decided_by(doc.modified_by, doc.leave_approver, status), doc.modified
+    else:
+        status, decided_by, decided_at = "Cancelled", frappe.session.user, frappe.utils.now_datetime()
     frappe.enqueue(
         send_leave_deleted_to_applicant,
         queue="short",
@@ -403,34 +409,48 @@ def on_trash_notify_applicant(doc: Document, method: str | None = None):
         doc=doc,
         channel=channel,
         ts=ts,
-        decided_by=frappe.session.user,
-        deleted_at=frappe.utils.now_datetime(),
+        status=status,
+        decided_by=decided_by,
+        decided_at=decided_at,
+        # Looked up while the row exists; HRMS cannot authorise it afterwards
+        **message_balance_fields(doc),
     )
 
 
 def send_leave_deleted_to_applicant(
-    doc: Document, channel: str, ts: str, decided_by: str | None = None, deleted_at=None
+    doc: Document,
+    channel: str,
+    ts: str,
+    status: str = "Cancelled",
+    decided_by: str | None = None,
+    decided_at=None,
+    leave_balance: float | None = None,
+    unpaid: bool = False,
 ):
     """
-    Rewrite the applicant's DM for a deleted open leave as a cancellation.
-    No status check or reference lookup: the row is gone. No balance
-    either, HRMS cannot authorise the lookup for a leave that no longer
-    exists. Same lock and same-message check as the decision job, so a
-    decision job still in flight cannot put an older status back
+    Rewrite the applicant's DM for a deleted leave: a cancellation by the
+    deleter for an open one, the decision already taken for a decided one.
+    No status check or reference lookup: the row is gone, so everything
+    was read by the hook. Same lock and same-message check as the decision
+    job, so a decision job still in flight cannot put an older status back
     """
     try:
         slack = SlackIntegration()
         user_id = slack.get_slack_user_id(employee_id=doc.employee)
         if not user_id:
+            generate_error_log(
+                title="Applicant Slack ID not found",
+                message=f"No Slack user found for employee {doc.employee} (deleted Leave Application {doc.name})",
+            )
             return
-        status = "Cancelled"
         blocks = _applicant_blocks(
             doc,
             user_id,
             status=status,
-            status_by=_format_decider(slack, _decided_by(decided_by, doc.leave_approver, status)),
-            decided_at=deleted_at or frappe.utils.now_datetime(),
-            unpaid=bool(frappe.db.get_value("Leave Type", doc.leave_type, "is_lwp")),
+            status_by=_format_decider(slack, decided_by),
+            decided_at=decided_at or frappe.utils.now_datetime(),
+            leave_balance=leave_balance,
+            unpaid=unpaid,
         )
         with _applicant_dm_lock(doc.name):
             if not _is_applicant_dm(doc, channel, ts):

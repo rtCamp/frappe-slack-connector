@@ -25,7 +25,11 @@ def _patch_leave(row=None, *, get_value=None, transitions=()):
     (``transitions``) and pin the site timezone: patching frappe.db.get_value globally would otherwise break
     the timezone lookup behind the decision-time token."""
     with contextlib.ExitStack() as stack:
-        stack.enter_context(patch(f"{APPROVE_LEAVE_MODULE}.frappe.get_all", return_value=list(transitions)))
+        # Workflow comments, filtered by the state text the handler asks for (``content``)
+        def comments(doctype, filters=None, **kwargs):
+            return [t for t in transitions if t.get("content") == (filters or {}).get("content")]
+
+        stack.enter_context(patch(f"{APPROVE_LEAVE_MODULE}.frappe.get_all", side_effect=comments))
         if get_value is not None:
             stack.enter_context(patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.get_value", side_effect=get_value))
         else:
@@ -200,10 +204,13 @@ class TestApproveLeaveHandler(IntegrationTestCase):
             patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
             _patch_leave(get_value=lambda *a, **k: next(rows)),
             patch(f"{APPROVE_LEAVE_MODULE}.frappe.db.rollback") as mock_rollback,
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.clear_messages") as mock_clear,
             patch(f"{APPROVE_LEAVE_MODULE}.approve_leave", side_effect=error),
             patch(f"{APPROVE_LEAVE_MODULE}._format_decider", return_value="<@U-bob>"),
         ):
             handler(slack=mock_slack, payload=payload)
+        # The swallowed error was raised through msgprint; its text must not ride along in the response
+        mock_clear.assert_called_once()
         # The second read must come after the transaction ends: under REPEATABLE READ it would otherwise
         # see the same snapshot as the first one and never the decision that won the race
         mock_rollback.assert_called_once()
@@ -229,7 +236,7 @@ class TestApproveLeaveHandler(IntegrationTestCase):
         payload = _build_action_payload(action_id="leave_approve")
         mock_slack = MagicMock()
         row = _leave_row(status="Rejected", docstatus=0, modified_by="editor@x.com", modified="2026-06-20 08:00:00")
-        transition = frappe._dict(owner="bob@x.com", creation="2026-06-12 09:00:00")
+        transition = frappe._dict(owner="bob@x.com", creation="2026-06-12 09:00:00", content="Rejected")
         with (
             patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
             patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
@@ -243,6 +250,26 @@ class TestApproveLeaveHandler(IntegrationTestCase):
         kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
         status_line = next(b["elements"][0]["text"] for b in kwargs["blocks"] if b.get("type") == "context")
         self.assertTrue(status_line.endswith("|Jun 12, 2026 at 9:00 AM>_"), status_line)
+
+    def test_stale_click_ignores_a_workflow_comment_for_another_state(self):
+        """A leave cancelled outside the workflow still has its older "Approved" comment: the cancel's writer and time win."""
+        payload = _build_action_payload(action_id="leave_approve")
+        mock_slack = MagicMock()
+        row = _leave_row(status="Cancelled", docstatus=2, modified_by="canceller@x.com", modified="2026-06-13 17:46:00")
+        approval = frappe._dict(owner="approver@x.com", creation="2026-06-13 17:43:00", content="Approved")
+        with (
+            patch(f"{APPROVE_LEAVE_MODULE}.get_userid_from_slackid", return_value=TEST_USER),
+            patch(f"{APPROVE_LEAVE_MODULE}.frappe.set_user"),
+            _patch_leave(row, transitions=[approval]),
+            patch(f"{APPROVE_LEAVE_MODULE}.approve_leave"),
+            patch(f"{APPROVE_LEAVE_MODULE}._format_decider", return_value="Canceller") as mock_decider,
+        ):
+            handler(slack=mock_slack, payload=payload)
+        mock_decider.assert_called_once_with(mock_slack, "canceller@x.com")
+        kwargs = mock_slack.slack_app.client.chat_update.call_args.kwargs
+        status_line = next(b["elements"][0]["text"] for b in kwargs["blocks"] if b.get("type") == "context")
+        self.assertIn("*Cancelled* by Canceller", status_line)
+        self.assertTrue(status_line.endswith("|Jun 13, 2026 at 5:46 PM>_"), status_line)
 
     def test_race_that_leaves_the_leave_open_still_raises(self):
         """A workflow error on a leave that is still open is a real error: the modal shows it."""

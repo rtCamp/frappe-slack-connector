@@ -35,12 +35,20 @@ def _current_decision(leave_id: str) -> dict | None:
         return None
     status = effective_leave_status(row.status, row.docstatus)
     # modified_by / modified are the last writer and write, which a later edit
-    # of a decided leave can move. The workflow records who took the last
-    # transition and when as a "Workflow" comment; prefer that when present
+    # of a decided leave can move. The workflow records who took a transition
+    # and when as a "Workflow" comment whose text is the state reached; prefer
+    # the latest one for the current state. A decision taken outside the
+    # workflow (a cancel, the scheduled auto-approval) leaves no such comment,
+    # and an older one for another state must not be mistaken for it
     decided_by, decided_at = row.modified_by, row.modified
     transitions = frappe.get_all(
         "Comment",
-        filters={"reference_doctype": "Leave Application", "reference_name": leave_id, "comment_type": "Workflow"},
+        filters={
+            "reference_doctype": "Leave Application",
+            "reference_name": leave_id,
+            "comment_type": "Workflow",
+            "content": status,
+        },
         fields=["owner", "creation"],
         order_by="creation desc",
         limit=1,
@@ -94,6 +102,8 @@ def handler(slack: SlackIntegration, payload: dict):
                 decision = _current_decision(leave_id)
                 if decision is None:
                     raise
+                # The swallowed error was raised through msgprint; drop its text
+                frappe.clear_messages()
         if decision is None:
             status = "Approved" if action_id == "leave_approve" else "Rejected"
             status_by = None

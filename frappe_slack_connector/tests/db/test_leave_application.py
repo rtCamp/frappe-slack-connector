@@ -188,7 +188,8 @@ class TestGetEmployeesOnLeave(IntegrationTestCase):
         self.assertNotIn(self.LEFT_EMPLOYEE, self._employees_on_leave())
 
     def test_includes_open_and_approved_leave(self):
-        """Leave is approved by default, so both Open (draft) and Approved (submitted) leave covering today is reported."""
+        """Leave is approved by default, so both Open (draft) and Approved (submitted) leave covering today is reported
+        (the Approved employee is the positive control inside ``_employees_on_leave``)."""
         self.assertIn(self.OPEN_EMPLOYEE, self._employees_on_leave())
 
     def test_excludes_rejected_leave(self):

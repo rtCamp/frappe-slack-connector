@@ -121,7 +121,7 @@ class TestGetEmployeesOnHolidayOnSite(IntegrationTestCase):
         if not frappe.db.exists("DocType", "Holiday List Assignment"):
             raise unittest.SkipTest("Holiday List Assignment needs HRMS v16")
         company = frappe.defaults.get_global_default("company")
-        day = today()
+        cls.day = today()
         for name in (cls.LIST_WITH_TODAY, cls.LIST_WITHOUT_TODAY):
             frappe.get_doc(
                 {
@@ -140,7 +140,7 @@ class TestGetEmployeesOnHolidayOnSite(IntegrationTestCase):
                 "parenttype": "Holiday List",
                 "parentfield": "holidays",
                 "idx": 1,
-                "holiday_date": day,
+                "holiday_date": cls.day,
                 "description": "test holiday",
             }
         ).db_insert()
@@ -171,9 +171,13 @@ class TestGetEmployeesOnHolidayOnSite(IntegrationTestCase):
             ).db_insert()
 
     def test_resolves_each_employees_own_assignment_and_reads_the_holiday_rows(self):
-        """The employee whose assigned list marks today a holiday is returned; the one on a list without today is not."""
-        on_holiday = get_employees_on_holiday([self.ON_HOLIDAY, self.WORKING], today())
+        """The employee whose assigned list marks the day a holiday is returned; the one on a list without it is not.
+
+        Discriminating in both directions: ignoring the employee-level assignments would resolve both to the company
+        list (both or neither), and a failed resolution would return nobody."""
+        on_holiday = get_employees_on_holiday([self.ON_HOLIDAY, self.WORKING], self.day)
         self.assertEqual(on_holiday, {self.ON_HOLIDAY})
 
-    def test_another_date_is_not_a_holiday_for_either(self):
+    def test_the_holiday_date_filter_excludes_other_days(self):
+        """Only the date filter is under test here: resolution still succeeds (the lists cover 2020), the lists just have no row for that day."""
         self.assertEqual(get_employees_on_holiday([self.ON_HOLIDAY, self.WORKING], "2020-06-15"), set())

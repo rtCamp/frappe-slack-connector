@@ -35,27 +35,8 @@ def install_property_setters() -> None:
     # Tag every property setter with the app's module, as the custom fields are.
     for ps in property_setters:
         ps["module"] = MODULE
-    wanted = {_property_setter_name(ps): ps for ps in property_setters}
 
-    # Wanted and existing setters are matched by module: only the ones already tagged with this app's module
-    # count as installed. One with the same name but another module (or none) is rewritten below with the module.
-    existing = {
-        row.name: row
-        for row in frappe.get_all(
-            "Property Setter",
-            filters={"module": MODULE},
-            fields=["name", "value", "property_type", "module"],
-        )
-    }
-
-    for name, ps in wanted.items():
-        current = existing.get(name)
-        if current and (current.module, current.value or "", current.property_type) == (
-            ps["module"],
-            ps["value"],
-            ps["property_type"],
-        ):
-            continue
+    for ps in property_setters:
         doc = frappe.get_doc(
             {
                 "doctype": "Property Setter",
@@ -71,10 +52,6 @@ def install_property_setters() -> None:
         # Runs from after_install / after_migrate, not from a user request: these are the app's own
         # customisations, so they are applied regardless of who runs the install or migrate.
         doc.flags.ignore_permissions = True
-        # A new Property Setter's validate() deletes the old one with the same name, so this also updates it.
-        doc.insert()
-
-
-def _property_setter_name(ps: dict) -> str:
-    """Return the name PropertySetter.autoname() gives this entry."""
-    return f"{ps['doctype']}-{ps.get('fieldname') or 'main'}-{ps['property']}"
+        # A new Property Setter's validate() deletes the existing one with the same name, so this replaces it
+        # with the value and module above.
+        doc.insert(ignore_if_duplicate=True)

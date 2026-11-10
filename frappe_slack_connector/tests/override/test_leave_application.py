@@ -326,7 +326,7 @@ def _leave_override_env(
             return employee_status
         if doctype == "Leave Application" and fieldname == list(ATTENDANCE_REPLY_FIELDS):
             assert kwargs.get("as_dict"), "the reply reference is read as a dict"
-            assert kwargs.get("ignore"), "a missing column (fixtures not yet synced) must not break a save"
+            assert kwargs.get("ignore"), "a missing column (custom fields not yet installed) must not break a save"
             return frappe._dict(
                 {
                     ATTENDANCE_REPLY_TS_FIELD: stored_ts,
@@ -1963,8 +1963,8 @@ class TestRestoreAttendanceReplyTs(IntegrationTestCase):
         self.assertIsNone(doc.get(ATTENDANCE_REPLY_TS_FIELD))
         self.assertIsNone(doc.get(ATTENDANCE_REPLY_CHANNEL_FIELD))
 
-    def test_reply_reference_fields_are_installed_from_fixtures(self):
-        """The field names the code reads and writes exist on Leave Application: every other test mocks the database, so this is the one check that the constants match the fixture."""
+    def test_reply_reference_fields_are_installed_from_setup(self):
+        """The field names the code reads and writes exist on Leave Application: every other test mocks the database, so this is the one check that the constants match setup/custom_fields.json."""
         meta = frappe.get_meta("Leave Application")
         for fieldname in ATTENDANCE_REPLY_FIELDS:
             self.assertTrue(meta.has_field(fieldname), fieldname)

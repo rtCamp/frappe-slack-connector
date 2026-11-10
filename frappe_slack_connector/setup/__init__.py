@@ -47,8 +47,8 @@ def install_property_setters() -> None:
                 "value": ps["value"],
                 "property_type": ps["property_type"],
                 "module": ps["module"],
-                # Shipped by the app, not made by Frappe: as make_property_setter(is_system_generated=False).
-                "is_system_generated": False,
+                # Created by the app's install code, not by a user: as make_property_setter() does by default.
+                "is_system_generated": True,
             }
         )
         # Runs from after_install / after_migrate, not from a user request: these are the app's own

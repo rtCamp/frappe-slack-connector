@@ -47,11 +47,16 @@ def install_property_setters() -> None:
                 "value": ps["value"],
                 "property_type": ps["property_type"],
                 "module": ps["module"],
+                # Shipped by the app, not made by Frappe: as make_property_setter(is_system_generated=False).
+                "is_system_generated": False,
             }
         )
         # Runs from after_install / after_migrate, not from a user request: these are the app's own
         # customisations, so they are applied regardless of who runs the install or migrate.
         doc.flags.ignore_permissions = True
+        # Same as make_property_setter(validate_fields_for_doctype=False): the target DocType is not re-validated
+        # for each setter.
+        doc.flags.validate_fields_for_doctype = False
         # A new Property Setter's validate() deletes the existing one with the same name, so this replaces it
         # with the value and module above.
         doc.insert(ignore_if_duplicate=True)

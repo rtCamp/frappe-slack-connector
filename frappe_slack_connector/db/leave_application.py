@@ -82,12 +82,17 @@ def store_applicant_message_ref(leave_id: str, *, channel: str | None, ts: str |
     """
     if not (channel and ts) or not applicant_message_fields_exist():
         return
-    frappe.db.set_value(
-        "Leave Application",
-        leave_id,
-        {APPLICANT_CHANNEL_FIELD: channel, APPLICANT_MSG_TS_FIELD: ts},
-        update_modified=False,
-    )
+    write_slack_reference(leave_id, {APPLICANT_CHANNEL_FIELD: channel, APPLICANT_MSG_TS_FIELD: ts})
+
+
+def write_slack_reference(leave_id: str, values: dict) -> None:
+    """
+    Write a Slack reference to the leave in a transaction of its own (background jobs only): the job read the
+    row before calling Slack, and MariaDB refuses the write (error 1020) once another job has changed the row
+    """
+    frappe.db.commit()  # nosemgrep
+    frappe.db.set_value("Leave Application", leave_id, values, update_modified=False)
+    frappe.db.commit()  # nosemgrep
 
 
 def get_employees_on_leave() -> list:

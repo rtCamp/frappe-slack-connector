@@ -7,8 +7,7 @@ from frappe.utils import cint, today
 # once the leave is approved, rejected or cancelled.
 APPLICANT_CHANNEL_FIELD = "custom_slack_applicant_channel"
 APPLICANT_MSG_TS_FIELD = "custom_slack_applicant_msg_ts"
-# How many times a background job tries to write a Slack reference that the
-# database refuses (see ``write_slack_reference``)
+# Attempts at a Slack reference write the database refuses (see ``write_slack_reference``)
 SLACK_REFERENCE_WRITE_ATTEMPTS = 3
 
 from frappe_slack_connector.db.employee import get_employees_on_holiday
@@ -90,25 +89,8 @@ def store_applicant_message_ref(leave_id: str, *, channel: str | None, ts: str |
 
 def write_slack_reference(leave_id: str, values: dict) -> None:
     """
-    Write a Slack message reference to the Leave Application from a
-    background job, in a transaction of its own. Only for background jobs:
-    it commits whatever the caller has pending.
-
-    The job read the row before it called Slack, and under REPEATABLE READ
-    that read fixes the version of the row the transaction may change. Two
-    jobs write to a new leave (the attendance thread reply and the
-    applicant's DM), and MariaDB refuses the second write with error 1020
-    ("Record has changed since last read", ``innodb_snapshot_isolation``)
-    when the first has committed in between. Committing first lets the
-    write start from the row as it is now; committing after makes the
-    reference visible to a job waiting on the per-leave lock.
-
-    The write can still be refused when something is read between that
-    commit and the write (``set_value`` reloads the DocType when its cache
-    was cleared meanwhile) while another write to the row is in flight, so
-    a refused write is tried again. Slack is not called again, and the
-    error must not be left to the job runner: its own retry would run the
-    whole job, and post the message, a second time.
+    Write a Slack reference to the leave in a transaction of its own (background jobs only): the job read the
+    row before calling Slack, and MariaDB refuses the write (error 1020) once another job has changed the row
     """
     for attempt in range(1, SLACK_REFERENCE_WRITE_ATTEMPTS + 1):
         frappe.db.commit()  # nosemgrep
@@ -116,6 +98,7 @@ def write_slack_reference(leave_id: str, values: dict) -> None:
             frappe.db.set_value("Leave Application", leave_id, values, update_modified=False)
             break
         except frappe.QueryDeadlockError:
+            # Retried here: the job runner's own retry would run the whole job and post to Slack again
             frappe.db.rollback()
             if attempt == SLACK_REFERENCE_WRITE_ATTEMPTS:
                 raise

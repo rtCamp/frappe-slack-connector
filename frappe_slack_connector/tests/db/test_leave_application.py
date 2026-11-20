@@ -237,7 +237,7 @@ class TestGetEmployeesOnLeave(IntegrationTestCase):
 
 class TestApplicantMessageRef(IntegrationTestCase):
     def test_store_writes_channel_and_ts_without_touching_modified(self):
-        """store_applicant_message_ref writes both custom fields via db.set_value with update_modified=False so no doc event fires, in a transaction of its own (committed before and after)."""
+        """store_applicant_message_ref writes both custom fields with update_modified=False, committing before and after the write."""
         order = []
         with (
             patch(f"{LEAVE_DB_MODULE}.applicant_message_fields_exist", return_value=True),
@@ -255,56 +255,28 @@ class TestApplicantMessageRef(IntegrationTestCase):
         )
         self.assertEqual(order, ["commit", "write", "commit"])
 
-    def test_write_runs_in_a_transaction_of_its_own(self):
-        """write_slack_reference commits before the write, so it starts from the row as it is now and not from what the job read before calling Slack (MariaDB refuses that write with error 1020 once another job has changed the row), and commits after it, so a job waiting on the per-leave lock reads the reference."""
-        order = []
-        with (
-            patch(f"{LEAVE_DB_MODULE}.frappe.db.set_value", side_effect=lambda *a, **k: order.append("write")),
-            patch(f"{LEAVE_DB_MODULE}.frappe.db.commit", side_effect=lambda: order.append("commit")),
-        ):
-            write_slack_reference("HR-LAP-0013", {APPLICANT_MSG_TS_FIELD: "1700000000.000001"})
-        self.assertEqual(order, ["commit", "write", "commit"])
-
-    def test_write_is_tried_again_when_the_database_refuses_it(self):
-        """A write refused with error 1020 (something was read after the commit while another write to the row was in flight) is rolled back and tried again from a new transaction, without raising: the job must not fail after Slack has the message."""
-        order = []
-        refusals = [frappe.QueryDeadlockError(1020, "Record has changed since last read")]
-
-        def write(*args, **kwargs):
-            order.append("write")
-            if refusals:
-                raise refusals.pop()
-
-        with (
-            patch(f"{LEAVE_DB_MODULE}.frappe.db.set_value", side_effect=write),
-            patch(f"{LEAVE_DB_MODULE}.frappe.db.commit", side_effect=lambda: order.append("commit")),
-            patch(f"{LEAVE_DB_MODULE}.frappe.db.rollback", side_effect=lambda: order.append("rollback")),
-        ):
-            write_slack_reference("HR-LAP-0014", {APPLICANT_MSG_TS_FIELD: "1700000000.000001"})
-        self.assertEqual(order, ["commit", "write", "rollback", "commit", "write", "commit"])
-
-    def test_write_gives_up_after_the_last_attempt(self):
-        """A write the database keeps refusing raises after the last attempt, rolled back, so the caller logs it; other database errors are not retried."""
-        with (
-            patch(
-                f"{LEAVE_DB_MODULE}.frappe.db.set_value", side_effect=frappe.QueryDeadlockError(1020, "changed")
-            ) as mock_set_value,
-            patch(f"{LEAVE_DB_MODULE}.frappe.db.commit"),
-            patch(f"{LEAVE_DB_MODULE}.frappe.db.rollback") as mock_rollback,
-        ):
-            with self.assertRaises(frappe.QueryDeadlockError):
-                write_slack_reference("HR-LAP-0015", {APPLICANT_MSG_TS_FIELD: "1700000000.000001"})
-        self.assertEqual(mock_set_value.call_count, SLACK_REFERENCE_WRITE_ATTEMPTS)
-        self.assertEqual(mock_rollback.call_count, SLACK_REFERENCE_WRITE_ATTEMPTS)
-
-        with (
-            patch(f"{LEAVE_DB_MODULE}.frappe.db.set_value", side_effect=frappe.DoesNotExistError) as mock_set_value,
-            patch(f"{LEAVE_DB_MODULE}.frappe.db.commit"),
-            patch(f"{LEAVE_DB_MODULE}.frappe.db.rollback"),
-        ):
-            with self.assertRaises(frappe.DoesNotExistError):
-                write_slack_reference("HR-LAP-0015", {APPLICANT_MSG_TS_FIELD: "1700000000.000001"})
-        mock_set_value.assert_called_once()
+    def test_refused_write_is_retried_then_raised(self):
+        """A write refused with error 1020 is rolled back and retried, and raises after the last attempt; other errors are not retried."""
+        refused = frappe.QueryDeadlockError(1020, "Record has changed since last read")
+        attempts = SLACK_REFERENCE_WRITE_ATTEMPTS
+        # set_value outcome, error raised, writes, rollbacks
+        cases = (
+            ([refused, None], None, 2, 1),
+            (refused, frappe.QueryDeadlockError, attempts, attempts),
+            (KeyError, KeyError, 1, 0),
+        )
+        for outcome, error, writes, rollbacks in cases:
+            with (
+                self.subTest(error=error, writes=writes),
+                patch(f"{LEAVE_DB_MODULE}.frappe.db.set_value", side_effect=outcome) as mock_set_value,
+                patch(f"{LEAVE_DB_MODULE}.frappe.db.commit"),
+                patch(f"{LEAVE_DB_MODULE}.frappe.db.rollback") as mock_rollback,
+            ):
+                if error:
+                    self.assertRaises(error, write_slack_reference, "HR-LAP-0013", {})
+                else:
+                    write_slack_reference("HR-LAP-0013", {})
+                self.assertEqual((mock_set_value.call_count, mock_rollback.call_count), (writes, rollbacks))
 
     def test_store_skips_when_response_has_no_ts(self):
         """store_applicant_message_ref does nothing when channel or ts is missing."""

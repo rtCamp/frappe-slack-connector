@@ -50,11 +50,8 @@ ATTENDANCE_REPLY_LOCK_TIMEOUT = 60
 @contextmanager
 def _job_lock(name: str, timeout: int):
     """
-    Hold a lock for a background job, with the job's transaction restarted
-    once the lock is held. Under REPEATABLE READ a job keeps reading the
-    rows as they were at its first query, which is before it waited here:
-    without the restart it would not see what the previous holder committed,
-    the very thing the lock is taken to wait for
+    Hold a lock for a background job and restart its transaction once held: under REPEATABLE READ it would
+    otherwise keep reading the rows as they were before the wait, not what the previous holder committed
     """
     with filelock(name, timeout=timeout):
         frappe.db.commit()  # nosemgrep
@@ -555,9 +552,7 @@ def send_leave_notification_to_applicant(doc: Document):
                     text=_applicant_text(status),
                 ),
             )
-            # Stored and committed before the lock is released: a worker waiting
-            # on the lock would otherwise still read an empty reference and post
-            # a second DM
+            # Committed before the lock is released, or a waiting worker reads an empty reference and posts again
             store_applicant_message_ref(doc.name, channel=response.get("channel"), ts=response.get("ts"))
     except Exception as e:
         generate_error_log(
@@ -621,9 +616,7 @@ def send_leave_decision_to_applicant(doc: Document, status: str, decided_by: str
             response = slack.slack_app.client.chat_postMessage(
                 channel=user_id, **leave_message_payload(blocks, text=text)
             )
-            # Stored and committed before the lock is released: a worker waiting
-            # on the lock would otherwise still read an empty reference and post
-            # a second DM
+            # Committed before the lock is released, or a waiting worker reads an empty reference and posts again
             store_applicant_message_ref(doc.name, channel=response.get("channel"), ts=response.get("ts"))
     except Exception as e:
         generate_error_log(
@@ -981,9 +974,7 @@ def post_same_day_leave_to_attendance_thread(doc: Document, slack: SlackIntegrat
         )
         reply_ts = response["ts"]
         channel = response.get("channel")
-        # Stored and committed under the lock: the withdrawal job for this
-        # leave waits on the lock and must find the reference (so the lock
-        # really serialises check, post and store)
+        # Committed under the lock: the withdrawal job waits on it and must find the reference
         write_slack_reference(
             doc.name,
             {

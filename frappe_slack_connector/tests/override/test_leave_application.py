@@ -397,7 +397,7 @@ def _leave_override_env(
             side_effect=lambda employees, on_date: set(employees) if employee_on_holiday else set(),
         ) as mock_on_holiday,
     ):
-        # One parent for the write and the commit, so a test can read the order they ran in
+        # One parent for both mocks, so a test can read the order they ran in
         db_calls = MagicMock()
         db_calls.attach_mock(mock_set_value, "write")
         db_calls.attach_mock(mock_commit, "commit")
@@ -1362,8 +1362,7 @@ class TestPostSameDayLeaveToAttendanceThread(IntegrationTestCase):
             },
             update_modified=False,
         )
-        # The transaction restarts once the lock is held, and the reference is written in a transaction of
-        # its own: the row was read before Slack was called, and the applicant DM job writes to it meanwhile
+        # Restart under the lock, then the write in a transaction of its own
         self.assertEqual(mocks.db_order(), ["commit", "commit", "write", "commit"])
         mocks.error_log.assert_not_called()
 
@@ -2036,8 +2035,7 @@ class TestWithdrawAttendanceReplyBg(IntegrationTestCase):
             {ATTENDANCE_REPLY_TS_FIELD: None, ATTENDANCE_REPLY_CHANNEL_FIELD: None, ATTENDANCE_REPLY_TEXT_FIELD: None},
             update_modified=False,
         )
-        # Restart under the lock (the post job may have stored the reply while this job waited), then the
-        # clearing write in a transaction of its own
+        # Restart under the lock, then the clearing write in a transaction of its own
         self.assertEqual(mocks.db_order(), ["commit", "commit", "write", "commit"])
 
     def test_keeps_the_reference_on_a_transient_slack_failure(self):
@@ -2267,7 +2265,7 @@ class TestSendLeaveNotificationToApplicant(IntegrationTestCase):
         mock_store.assert_not_called()
 
     def test_posts_and_stores_under_the_per_leave_lock(self):
-        """The reference check, the post and the store (which commits the reference itself) all happen while the per-leave lock is held, so the decision job cannot interleave or read an empty reference."""
+        """The reference check, the post and the store all happen while the per-leave lock is held, so the decision job cannot interleave."""
         doc = _build_leave_doc()
         mock_slack = MagicMock()
         mock_slack.get_slack_user_id.return_value = TEST_SLACK_USER_ID
@@ -2860,7 +2858,7 @@ class TestSendLeaveDecisionToApplicant(IntegrationTestCase):
             self.assertEqual(call.kwargs["timeout"], APPLICANT_DM_LOCK_TIMEOUT)
 
     def test_job_transaction_restarts_once_a_per_leave_lock_is_held(self):
-        """Both per-leave locks commit right after they are acquired and before the job reads anything under them: a job keeps reading the rows as they were at its first query (REPEATABLE READ), so without the restart it would miss what the previous holder of the lock committed."""
+        """Both per-leave locks commit once acquired, before the job reads under them, so it sees what the previous holder committed."""
         for lock in (_applicant_dm_lock, _attendance_reply_lock):
             with self.subTest(lock=lock.__name__):
                 order = []

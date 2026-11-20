@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from datetime import UTC, datetime
 
 import frappe
@@ -16,6 +17,7 @@ from frappe_slack_connector.db.leave_application import (
     get_applicant_message_ref,
     get_leave_status,
     store_applicant_message_ref,
+    write_slack_reference,
 )
 from frappe_slack_connector.helpers.error import generate_error_log
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
@@ -45,8 +47,22 @@ ATTENDANCE_REPLY_LOCK_PREFIX = "fsc_attendance_reply"
 ATTENDANCE_REPLY_LOCK_TIMEOUT = 60
 
 
+@contextmanager
+def _job_lock(name: str, timeout: int):
+    """
+    Hold a lock for a background job, with the job's transaction restarted
+    once the lock is held. Under REPEATABLE READ a job keeps reading the
+    rows as they were at its first query, which is before it waited here:
+    without the restart it would not see what the previous holder committed,
+    the very thing the lock is taken to wait for
+    """
+    with filelock(name, timeout=timeout):
+        frappe.db.commit()  # nosemgrep
+        yield
+
+
 def _attendance_reply_lock(leave_name: str):
-    return filelock(f"{ATTENDANCE_REPLY_LOCK_PREFIX}_{leave_name}", timeout=ATTENDANCE_REPLY_LOCK_TIMEOUT)
+    return _job_lock(f"{ATTENDANCE_REPLY_LOCK_PREFIX}_{leave_name}", ATTENDANCE_REPLY_LOCK_TIMEOUT)
 
 
 def _current_leave_state(leave_name: str):
@@ -290,7 +306,7 @@ APPLICANT_DM_LOCK_TIMEOUT = 60
 
 
 def _applicant_dm_lock(leave_id: str):
-    return filelock(f"{APPLICANT_DM_LOCK_PREFIX}_{leave_id}", timeout=APPLICANT_DM_LOCK_TIMEOUT)
+    return _job_lock(f"{APPLICANT_DM_LOCK_PREFIX}_{leave_id}", APPLICANT_DM_LOCK_TIMEOUT)
 
 
 def is_leave_decided(status: str | None, docstatus) -> bool:
@@ -539,11 +555,10 @@ def send_leave_notification_to_applicant(doc: Document):
                     text=_applicant_text(status),
                 ),
             )
+            # Stored and committed before the lock is released: a worker waiting
+            # on the lock would otherwise still read an empty reference and post
+            # a second DM
             store_applicant_message_ref(doc.name, channel=response.get("channel"), ts=response.get("ts"))
-            # Commit before the lock is released: the job's own commit only comes
-            # after this function returns, and a worker waiting on the lock would
-            # otherwise still read an empty reference and post a second DM
-            frappe.db.commit()  # nosemgrep
     except Exception as e:
         generate_error_log(
             title="Error posting leave confirmation to applicant",
@@ -606,11 +621,10 @@ def send_leave_decision_to_applicant(doc: Document, status: str, decided_by: str
             response = slack.slack_app.client.chat_postMessage(
                 channel=user_id, **leave_message_payload(blocks, text=text)
             )
+            # Stored and committed before the lock is released: a worker waiting
+            # on the lock would otherwise still read an empty reference and post
+            # a second DM
             store_applicant_message_ref(doc.name, channel=response.get("channel"), ts=response.get("ts"))
-            # Commit before the lock is released: the job's own commit only comes
-            # after this function returns, and a worker waiting on the lock would
-            # otherwise still read an empty reference and post a second DM
-            frappe.db.commit()  # nosemgrep
     except Exception as e:
         generate_error_log(
             title="Error updating leave decision for applicant",
@@ -967,22 +981,17 @@ def post_same_day_leave_to_attendance_thread(doc: Document, slack: SlackIntegrat
         )
         reply_ts = response["ts"]
         channel = response.get("channel")
-        frappe.db.set_value(
-            "Leave Application",
+        # Stored and committed under the lock: the withdrawal job for this
+        # leave waits on the lock and must find the reference (so the lock
+        # really serialises check, post and store)
+        write_slack_reference(
             doc.name,
             {
                 ATTENDANCE_REPLY_TS_FIELD: reply_ts,
                 ATTENDANCE_REPLY_CHANNEL_FIELD: channel,
                 ATTENDANCE_REPLY_TEXT_FIELD: reply_text,
             },
-            update_modified=False,
         )
-
-        # Commit under the lock: the withdrawal job for this leave waits on
-        # the lock and must find the reference, and the job's own commit only
-        # comes after this function returns (a manual commit, so the lock
-        # really serialises check, post and store)
-        frappe.db.commit()  # nosemgrep
 
         # A withdrawal that committed while Slack was posting enqueued a job
         # that ran before this one stored anything, so take the reply back here
@@ -1328,12 +1337,7 @@ def _strike_reply(
     if not cleared:
         return False
     # A no-op when the leave itself has been deleted
-    frappe.db.set_value(
-        "Leave Application",
-        leave_name,
-        dict.fromkeys(ATTENDANCE_REPLY_FIELDS),
-        update_modified=False,
-    )
+    write_slack_reference(leave_name, dict.fromkeys(ATTENDANCE_REPLY_FIELDS))
     return True
 
 

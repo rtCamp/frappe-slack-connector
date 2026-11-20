@@ -7,7 +7,6 @@ from frappe.utils import today
 from frappe_slack_connector.db.leave_application import (
     APPLICANT_CHANNEL_FIELD,
     APPLICANT_MSG_TS_FIELD,
-    SLACK_REFERENCE_WRITE_ATTEMPTS,
     approve_leave,
     effective_leave_status,
     get_applicant_message_ref,
@@ -15,7 +14,6 @@ from frappe_slack_connector.db.leave_application import (
     get_leave_status,
     reject_leave,
     store_applicant_message_ref,
-    write_slack_reference,
 )
 
 LEAVE_DB_MODULE = "frappe_slack_connector.db.leave_application"
@@ -254,29 +252,6 @@ class TestApplicantMessageRef(IntegrationTestCase):
             update_modified=False,
         )
         self.assertEqual(order, ["commit", "write", "commit"])
-
-    def test_refused_write_is_retried_then_raised(self):
-        """A write refused with error 1020 is rolled back and retried, and raises after the last attempt; other errors are not retried."""
-        refused = frappe.QueryDeadlockError(1020, "Record has changed since last read")
-        attempts = SLACK_REFERENCE_WRITE_ATTEMPTS
-        # set_value outcome, error raised, writes, rollbacks
-        cases = (
-            ([refused, None], None, 2, 1),
-            (refused, frappe.QueryDeadlockError, attempts, attempts),
-            (KeyError, KeyError, 1, 0),
-        )
-        for outcome, error, writes, rollbacks in cases:
-            with (
-                self.subTest(error=error, writes=writes),
-                patch(f"{LEAVE_DB_MODULE}.frappe.db.set_value", side_effect=outcome) as mock_set_value,
-                patch(f"{LEAVE_DB_MODULE}.frappe.db.commit"),
-                patch(f"{LEAVE_DB_MODULE}.frappe.db.rollback") as mock_rollback,
-            ):
-                if error:
-                    self.assertRaises(error, write_slack_reference, "HR-LAP-0013", {})
-                else:
-                    write_slack_reference("HR-LAP-0013", {})
-                self.assertEqual((mock_set_value.call_count, mock_rollback.call_count), (writes, rollbacks))
 
     def test_store_skips_when_response_has_no_ts(self):
         """store_applicant_message_ref does nothing when channel or ts is missing."""

@@ -7,8 +7,6 @@ from frappe.utils import cint, today
 # once the leave is approved, rejected or cancelled.
 APPLICANT_CHANNEL_FIELD = "custom_slack_applicant_channel"
 APPLICANT_MSG_TS_FIELD = "custom_slack_applicant_msg_ts"
-# Attempts at a Slack reference write the database refuses (see ``write_slack_reference``)
-SLACK_REFERENCE_WRITE_ATTEMPTS = 3
 
 from frappe_slack_connector.db.employee import get_employees_on_holiday
 
@@ -92,16 +90,8 @@ def write_slack_reference(leave_id: str, values: dict) -> None:
     Write a Slack reference to the leave in a transaction of its own (background jobs only): the job read the
     row before calling Slack, and MariaDB refuses the write (error 1020) once another job has changed the row
     """
-    for attempt in range(1, SLACK_REFERENCE_WRITE_ATTEMPTS + 1):
-        frappe.db.commit()  # nosemgrep
-        try:
-            frappe.db.set_value("Leave Application", leave_id, values, update_modified=False)
-            break
-        except frappe.QueryDeadlockError:
-            # Retried here: the job runner's own retry would run the whole job and post to Slack again
-            frappe.db.rollback()
-            if attempt == SLACK_REFERENCE_WRITE_ATTEMPTS:
-                raise
+    frappe.db.commit()  # nosemgrep
+    frappe.db.set_value("Leave Application", leave_id, values, update_modified=False)
     frappe.db.commit()  # nosemgrep
 
 

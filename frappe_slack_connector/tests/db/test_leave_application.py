@@ -235,10 +235,14 @@ class TestGetEmployeesOnLeave(IntegrationTestCase):
 
 class TestApplicantMessageRef(IntegrationTestCase):
     def test_store_writes_channel_and_ts_without_touching_modified(self):
-        """store_applicant_message_ref writes both custom fields via db.set_value with update_modified=False so no doc event fires."""
+        """store_applicant_message_ref writes both custom fields with update_modified=False, committing before and after the write."""
+        order = []
         with (
             patch(f"{LEAVE_DB_MODULE}.applicant_message_fields_exist", return_value=True),
-            patch(f"{LEAVE_DB_MODULE}.frappe.db.set_value") as mock_set_value,
+            patch(
+                f"{LEAVE_DB_MODULE}.frappe.db.set_value", side_effect=lambda *a, **k: order.append("write")
+            ) as mock_set_value,
+            patch(f"{LEAVE_DB_MODULE}.frappe.db.commit", side_effect=lambda: order.append("commit")),
         ):
             store_applicant_message_ref("HR-LAP-0010", channel="D0FSC0001", ts="1700000000.000001")
         mock_set_value.assert_called_once_with(
@@ -247,6 +251,7 @@ class TestApplicantMessageRef(IntegrationTestCase):
             {APPLICANT_CHANNEL_FIELD: "D0FSC0001", APPLICANT_MSG_TS_FIELD: "1700000000.000001"},
             update_modified=False,
         )
+        self.assertEqual(order, ["commit", "write", "commit"])
 
     def test_store_skips_when_response_has_no_ts(self):
         """store_applicant_message_ref does nothing when channel or ts is missing."""

@@ -15,6 +15,7 @@ from frappe_slack_connector.override.leave_application import (
     ATTENDANCE_REPLY_TEXT_FIELD,
     ATTENDANCE_REPLY_TS_FIELD,
     _applicant_dm_lock,
+    _attendance_reply_lock,
     _format_decider,
     after_insert,
     format_leave_application_blocks,
@@ -396,10 +397,15 @@ def _leave_override_env(
             side_effect=lambda employees, on_date: set(employees) if employee_on_holiday else set(),
         ) as mock_on_holiday,
     ):
+        # One parent for both mocks, so a test can read the order they ran in
+        db_calls = MagicMock()
+        db_calls.attach_mock(mock_set_value, "write")
+        db_calls.attach_mock(mock_commit, "commit")
         yield SimpleNamespace(
             get_value=mock_get_value,
             set_value=mock_set_value,
             commit=mock_commit,
+            db_order=lambda: [call[0] for call in db_calls.mock_calls],
             error_log=mock_error_log,
             on_holiday=mock_on_holiday,
         )
@@ -1356,6 +1362,8 @@ class TestPostSameDayLeaveToAttendanceThread(IntegrationTestCase):
             },
             update_modified=False,
         )
+        # Restart under the lock, then the write in a transaction of its own
+        self.assertEqual(mocks.db_order(), ["commit", "commit", "write", "commit"])
         mocks.error_log.assert_not_called()
 
     def test_posts_reply_in_the_channel_stored_by_the_morning_post(self):
@@ -2027,6 +2035,8 @@ class TestWithdrawAttendanceReplyBg(IntegrationTestCase):
             {ATTENDANCE_REPLY_TS_FIELD: None, ATTENDANCE_REPLY_CHANNEL_FIELD: None, ATTENDANCE_REPLY_TEXT_FIELD: None},
             update_modified=False,
         )
+        # Restart under the lock, then the clearing write in a transaction of its own
+        self.assertEqual(mocks.db_order(), ["commit", "commit", "write", "commit"])
 
     def test_keeps_the_reference_on_a_transient_slack_failure(self):
         """A rate limit, timeout or outage is logged but the stored reference is kept, so a later withdrawal the same day still has a handle on the reply."""
@@ -2208,12 +2218,11 @@ class TestSendLeaveNotificationToApplicant(IntegrationTestCase):
         with (
             patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
             patch(f"{LEAVE_OVERRIDE_MODULE}.store_applicant_message_ref") as mock_store,
-            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.commit") as mock_commit,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.commit"),
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=None),
         ):
             send_leave_notification_to_applicant(doc)
         mock_store.assert_called_once_with(doc.name, channel="D0FSC0001", ts="1700000000.000001")
-        mock_commit.assert_called_once()
         self.assertEqual(
             mock_slack.slack_app.client.chat_postMessage.call_args.kwargs["text"], "Leave request submitted"
         )
@@ -2248,16 +2257,15 @@ class TestSendLeaveNotificationToApplicant(IntegrationTestCase):
             patch(f"{LEAVE_OVERRIDE_MODULE}.SlackIntegration", return_value=mock_slack),
             patch(f"{LEAVE_OVERRIDE_MODULE}.get_applicant_message_ref", return_value=("D0FSC0001", "9.9")),
             patch(f"{LEAVE_OVERRIDE_MODULE}.store_applicant_message_ref") as mock_store,
-            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.commit") as mock_commit,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.commit"),
         ):
             send_leave_notification_to_applicant(doc)
         mock_slack.slack_app.client.chat_postMessage.assert_not_called()
         mock_slack.slack_app.client.chat_update.assert_not_called()
         mock_store.assert_not_called()
-        mock_commit.assert_not_called()
 
     def test_posts_and_stores_under_the_per_leave_lock(self):
-        """The reference check, the post, the store and its commit all happen while the per-leave lock is held, so the decision job cannot interleave or read an empty reference."""
+        """The reference check, the post and the store all happen while the per-leave lock is held, so the decision job cannot interleave."""
         doc = _build_leave_doc()
         mock_slack = MagicMock()
         mock_slack.get_slack_user_id.return_value = TEST_SLACK_USER_ID
@@ -2277,7 +2285,6 @@ class TestSendLeaveNotificationToApplicant(IntegrationTestCase):
                 f"{LEAVE_OVERRIDE_MODULE}.store_applicant_message_ref",
                 side_effect=lambda *a, **k: order.append("store"),
             ),
-            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.commit", side_effect=lambda: order.append("commit")),
         ):
             mock_slack.slack_app.client.chat_postMessage.side_effect = lambda **k: (
                 order.append("post")
@@ -2289,8 +2296,8 @@ class TestSendLeaveNotificationToApplicant(IntegrationTestCase):
             )
             send_leave_notification_to_applicant(doc)
         mock_lock.assert_called_once_with(doc.name)
-        # The reference is committed before the lock is released, or a waiting worker still reads it empty
-        self.assertEqual(order, ["lock", "ref", "post", "store", "commit", "unlock"])
+        # The reference is stored before the lock is released, or a waiting worker still reads it empty
+        self.assertEqual(order, ["lock", "ref", "post", "store", "unlock"])
 
     def test_skips_dm_and_logs_when_employee_has_no_slack_id(self):
         """When the employee has no Slack ID, no chat_postMessage is attempted and the failure is logged."""
@@ -2316,6 +2323,7 @@ class TestSendLeaveNotificationToApplicant(IntegrationTestCase):
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=0),
             patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_balance_on", return_value=10.0),
             patch(f"{LEAVE_OVERRIDE_MODULE}.generate_error_log") as mock_log,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.commit"),
         ):
             send_leave_notification_to_applicant(doc)
         mock_log.assert_called_once()
@@ -2836,13 +2844,34 @@ class TestSendLeaveDecisionToApplicant(IntegrationTestCase):
 
     def test_lock_name_is_per_leave(self):
         """Each leave gets its own lock so unrelated leaves never wait on each other."""
-        with patch(f"{LEAVE_OVERRIDE_MODULE}.filelock") as mock_filelock:
-            _applicant_dm_lock("HR-LAP-0050")
-            _applicant_dm_lock("HR-LAP-0051")
+        with (
+            patch(f"{LEAVE_OVERRIDE_MODULE}.filelock") as mock_filelock,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.commit"),
+        ):
+            with _applicant_dm_lock("HR-LAP-0050"):
+                pass
+            with _applicant_dm_lock("HR-LAP-0051"):
+                pass
         names = [call.args[0] for call in mock_filelock.call_args_list]
         self.assertEqual(names, ["fsc_applicant_dm_HR-LAP-0050", "fsc_applicant_dm_HR-LAP-0051"])
         for call in mock_filelock.call_args_list:
             self.assertEqual(call.kwargs["timeout"], APPLICANT_DM_LOCK_TIMEOUT)
+
+    def test_job_transaction_restarts_once_a_per_leave_lock_is_held(self):
+        """Both per-leave locks commit once acquired, before the job reads under them, so it sees what the previous holder committed."""
+        for lock in (_applicant_dm_lock, _attendance_reply_lock):
+            with self.subTest(lock=lock.__name__):
+                order = []
+                held = MagicMock()
+                held.__enter__ = MagicMock(side_effect=lambda *a: order.append("acquire"))
+                held.__exit__ = MagicMock(side_effect=lambda *a: order.append("release"))
+                with (
+                    patch(f"{LEAVE_OVERRIDE_MODULE}.filelock", return_value=held),
+                    patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.commit", side_effect=lambda: order.append("commit")),
+                ):
+                    with lock("HR-LAP-0052"):
+                        order.append("read")
+                self.assertEqual(order, ["acquire", "commit", "read", "release"])
 
     def test_escapes_mrkdwn_control_characters_in_full_name(self):
         """A decider's full name containing &, < or > is escaped before being placed in the mrkdwn status line."""
@@ -2989,6 +3018,7 @@ class TestDiscardAndTrashNotifyApplicant(IntegrationTestCase):
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=0),
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_single_value", return_value=1),
             patch(f"{LEAVE_OVERRIDE_MODULE}.get_leave_balance_on") as mock_balance,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.commit"),
         ):
             send_leave_deleted_to_applicant(
                 doc,
@@ -3030,6 +3060,7 @@ class TestDiscardAndTrashNotifyApplicant(IntegrationTestCase):
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_value", return_value=0),
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.get_single_value", return_value=1),
             patch(f"{LEAVE_OVERRIDE_MODULE}.generate_error_log") as mock_log,
+            patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.commit"),
         ):
             send_leave_deleted_to_applicant(doc, channel="C0MORNING", ts="1700000000.000001", decided_by="hr@x.com")
         mock_slack.slack_app.client.chat_update.assert_not_called()

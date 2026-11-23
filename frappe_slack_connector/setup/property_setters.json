@@ -1,0 +1,9 @@
+[
+  {
+    "doctype": "Leave Application",
+    "fieldname": "leave_approver_name",
+    "property": "fetch_from",
+    "value": "leave_approver.full_name",
+    "property_type": "Small Text"
+  }
+]

@@ -39,19 +39,8 @@ doctype_js = {
 
 # Fixtures
 # ----------
-fixtures = [
-    {
-        "dt": "Custom Field",
-        "filters": [
-            [
-                "module",
-                "in",
-                ["Frappe Slack Connector"],
-            ]
-        ],
-    },
-    {"dt": "Property Setter", "filters": [["doc_type", "=", "Leave Application"]]},
-]
+# Custom fields and property setters are installed from setup/ (see after_migrate).
+fixtures = []
 
 
 # Svg Icons
@@ -89,7 +78,11 @@ fixtures = [
 # ------------
 
 # before_install = "frappe_slack_connector.install.before_install"
-# after_install = "frappe_slack_connector.install.after_install"
+after_install = "frappe_slack_connector.install.after_install"
+
+# Custom fields and property setters live in setup/. create_custom_fields(..., update=True) and
+# install_property_setters() are idempotent, so they are safe to run on every migrate.
+after_migrate = "frappe_slack_connector.setup.install"
 
 # Uninstallation
 # ------------

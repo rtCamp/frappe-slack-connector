@@ -1,0 +1,81 @@
+{
+  "User Meta": [
+    {
+      "fieldname": "custom_slack_information",
+      "fieldtype": "Section Break",
+      "insert_after": "github_auth_token",
+      "label": "Slack Information"
+    },
+    {
+      "fieldname": "custom_slack_userid",
+      "fieldtype": "Data",
+      "insert_after": "custom_slack_information",
+      "label": "Slack UserID",
+      "read_only": 1,
+      "translatable": 1
+    },
+    {
+      "fieldname": "custom_slack_username",
+      "fieldtype": "Data",
+      "insert_after": "custom_slack_userid",
+      "label": "Slack Username",
+      "read_only": 1,
+      "translatable": 1
+    }
+  ],
+  "Leave Application": [
+    {
+      "fieldname": "custom_slack_attendance_reply_ts",
+      "fieldtype": "Data",
+      "hidden": 1,
+      "insert_after": "amended_from",
+      "label": "Slack Attendance Reply TS",
+      "no_copy": 1,
+      "print_hide": 1,
+      "read_only": 1,
+      "report_hide": 1
+    },
+    {
+      "description": "Slack reference of the applicant's leave DM, kept so the message can be updated in place.",
+      "fieldname": "custom_slack_applicant_channel",
+      "fieldtype": "Data",
+      "hidden": 1,
+      "insert_after": "leave_approver_name",
+      "label": "Slack Applicant Channel",
+      "no_copy": 1,
+      "read_only": 1
+    },
+    {
+      "description": "Slack reference of the applicant's leave DM, kept so the message can be updated in place.",
+      "fieldname": "custom_slack_applicant_msg_ts",
+      "fieldtype": "Data",
+      "hidden": 1,
+      "insert_after": "custom_slack_applicant_channel",
+      "label": "Slack Applicant Message TS",
+      "no_copy": 1,
+      "read_only": 1
+    },
+    {
+      "fieldname": "custom_slack_attendance_reply_channel",
+      "fieldtype": "Data",
+      "hidden": 1,
+      "insert_after": "custom_slack_attendance_reply_ts",
+      "label": "Slack Attendance Reply Channel",
+      "no_copy": 1,
+      "print_hide": 1,
+      "read_only": 1,
+      "report_hide": 1
+    },
+    {
+      "fieldname": "custom_slack_attendance_reply_text",
+      "fieldtype": "Small Text",
+      "hidden": 1,
+      "insert_after": "custom_slack_attendance_reply_channel",
+      "label": "Slack Attendance Reply Text",
+      "no_copy": 1,
+      "print_hide": 1,
+      "read_only": 1,
+      "report_hide": 1
+    }
+  ]
+}

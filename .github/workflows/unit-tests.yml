@@ -58,12 +58,9 @@ jobs:
         run: |
           bench get-app erpnext --branch v16.53.0
           bench get-app hrms --branch v16.53.0
-          # Optional integration: installed so the Gmail thread mirror tests run instead of being skipped
-          bench get-app frappe_gmail_thread https://github.com/rtCamp/frappe-gmail-thread --branch v1.3.1
           bench get-app frappe_slack_connector $GITHUB_WORKSPACE
           bench new-site --db-root-password root --admin-password admin --no-mariadb-socket --install-app erpnext --install-app hrms test_site
           bench --site test_site install-app frappe_slack_connector
-          bench --site test_site install-app frappe_gmail_thread
         env:
           CI: "Yes"
 
@@ -72,3 +69,14 @@ jobs:
         run: |
           bench --site test_site set-config allow_tests true
           bench --site test_site run-tests --app frappe_slack_connector
+
+      # The Gmail Thread app is optional. The run above covers a site without it (the
+      # Gmail thread mirror tests are skipped there); this one runs them against the real DocType
+      - name: Run tests with the Gmail Thread app
+        working-directory: /home/runner/frappe-bench
+        run: |
+          bench get-app frappe_gmail_thread https://github.com/rtCamp/frappe-gmail-thread --branch v1.3.1
+          bench --site test_site install-app frappe_gmail_thread
+          bench --site test_site run-tests --app frappe_slack_connector
+        env:
+          CI: "Yes"

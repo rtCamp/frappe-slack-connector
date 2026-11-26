@@ -123,7 +123,7 @@ def build_slack_client_mock(**overrides):
 
     Configures the methods the FSC source code reaches for: chat.postMessage,
     chat.update, views.open, views.update, views.push, users.lookupByEmail,
-    users.list, conversations.list. Default returns are empty/successful;
+    users.list, conversations.list, conversations.info. Default returns are empty/successful;
     pass overrides as keyword args (e.g. users_lookupByEmail={"user": {...}})
     to set per-method return values.
     """
@@ -140,6 +140,16 @@ def build_slack_client_mock(**overrides):
         },
         "users_list": {"ok": True, "members": []},
         "conversations_list": {"ok": True, "channels": []},
+        "conversations_info": {
+            "ok": True,
+            "channel": {
+                "id": TEST_SLACK_CHANNEL_ID,
+                "is_member": True,
+                "is_archived": False,
+                "is_ext_shared": False,
+                "is_pending_ext_shared": False,
+            },
+        },
     }
     defaults.update(overrides)
     for method_name, return_value in defaults.items():

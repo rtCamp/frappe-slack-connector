@@ -87,34 +87,47 @@ class TestParentBlocks(IntegrationTestCase):
         self.assertNotIn("<!channel>", parent_text(_thread(subject_of_first_mail=hostile)))
 
 
+def _header(blocks):
+    """The elements of a reply's first block: the sender line, as literal rich text."""
+    block = blocks[0]
+    assert block["type"] == "rich_text", block
+    return block["elements"][0]["elements"]
+
+
+def _header_text(blocks):
+    return "".join(element["text"] for element in _header(blocks))
+
+
 class TestReplyBlocks(IntegrationTestCase):
     def test_fresh_email_shows_the_name_alone(self):
         blocks = reply_blocks(_email(), now=NOW)
-        self.assertEqual(_texts(blocks, "mrkdwn"), ["*Ann Lee*"])
+        self.assertEqual(_header(blocks), [{"type": "text", "text": "Ann Lee", "style": {"bold": True}}])
         self.assertIn("Hello there", _texts(blocks, "plain_text"))
 
     def test_email_older_than_an_hour_shows_its_date(self):
         blocks = reply_blocks(_email(date_and_time="2026-01-03 17:58:00"), now=NOW)
-        self.assertEqual(_texts(blocks, "mrkdwn"), ["*Ann Lee*  ·  3 Jan 2026, 17:58"])
+        self.assertEqual(
+            _header(blocks),
+            [
+                {"type": "text", "text": "Ann Lee", "style": {"bold": True}},
+                {"type": "text", "text": "  ·  3 Jan 2026, 17:58"},
+            ],
+        )
 
     def test_no_link_on_a_reply(self):
         self.assertNotIn("http", json.dumps(reply_blocks(_email(), now=NOW)))
 
-    def test_sender_falls_back_to_the_address(self):
-        self.assertEqual(_texts(reply_blocks(_email(sender_full_name=None), now=NOW), "mrkdwn"), ["*ann@example.com*"])
+    def test_sender_falls_back_to_the_address_unchanged(self):
+        blocks = reply_blocks(_email(sender="no_reply@example.com", sender_full_name=None), now=NOW)
+        self.assertEqual(_header_text(blocks), "no_reply@example.com")
 
     def test_hostile_text_cannot_mention_or_format(self):
-        hostile = "<!channel> <@U123> *bold* <https://evil.example|click>"
+        """Nothing from an email reaches an object Slack parses: no mrkdwn anywhere in a reply."""
+        hostile = "<!channel> <@U123> *bold* :tada: <https://evil.example|click>"
         blocks = reply_blocks(_email(sender_full_name=hostile, plain_content=hostile), now=NOW)
-        header = _texts(blocks, "mrkdwn")[0]
-        self.assertNotIn("<!channel>", header)
-        self.assertNotIn("<@U123>", header)
-        self.assertNotIn("*bold*", header)
-        # the body is shown literally, in an object Slack does not parse
+        self.assertEqual(_header(blocks), [{"type": "text", "text": hostile, "style": {"bold": True}}])
         self.assertIn(hostile, _texts(blocks, "plain_text"))
-        for obj in _objects(blocks):
-            if obj["type"] == "mrkdwn":
-                self.assertIs(obj["verbatim"], True)
+        self.assertNotIn("mrkdwn", json.dumps(blocks))
         self.assertNotIn("<!channel>", reply_text(_email(sender_full_name=hostile, plain_content=hostile)))
 
     def test_empty_body(self):
@@ -125,7 +138,7 @@ class TestReplyBlocks(IntegrationTestCase):
 
     def test_missing_sender_and_date(self):
         blocks = reply_blocks(_email(sender=None, sender_full_name=None, date_and_time=None), now=NOW)
-        self.assertEqual(_texts(blocks, "mrkdwn")[0], "*Unknown sender*")
+        self.assertEqual(_header_text(blocks), "Unknown sender")
 
     def test_long_body_is_cut(self):
         body = _texts(reply_blocks(_email(plain_content="x" * 5000), now=NOW), "plain_text")[0]

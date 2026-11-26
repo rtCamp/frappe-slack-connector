@@ -2,9 +2,9 @@
 Slack messages for a mirrored email thread.
 
 Text taken from an email (subject, names, addresses, body, file names) is
-untrusted: it goes into ``plain_text`` objects, which Slack does not parse, or
-into ``mrkdwn`` only after escaping and with ``verbatim`` set, so it can never
-become a mention, a link or formatting.
+untrusted: it goes into ``plain_text`` objects or rich-text ``text`` elements,
+neither of which Slack parses, or into ``mrkdwn`` only after escaping and with
+``verbatim`` set, so it can never become a mention, a link or formatting.
 """
 
 from datetime import datetime
@@ -46,12 +46,12 @@ def _sender_name(email) -> str:
     return (email.sender_full_name or email.sender or "").strip() or "Unknown sender"
 
 
-def _bold_safe(text: str) -> str:
-    """Escaped text with the formatting characters removed, safe between two asterisks."""
-    cleaned = escape_slack_text(text)
-    for char in "*_~`":
-        cleaned = cleaned.replace(char, "")
-    return cleaned.strip() or "Unknown sender"
+def _rich_text(text: str, bold: bool = False) -> dict:
+    """A rich-text element: Slack shows its text as it is, whatever characters it holds."""
+    element = {"type": "text", "text": text}
+    if bold:
+        element["style"] = {"bold": True}
+    return element
 
 
 def _body(email) -> str:
@@ -130,11 +130,11 @@ def reply_text(email) -> str:
 
 
 def reply_blocks(email, now: datetime | None = None) -> list[dict]:
-    header = f"*{_bold_safe(_sender_name(email))}*"
+    header = [_rich_text(_sender_name(email), bold=True)]
     if _is_old(email, now or now_datetime()):
-        header += SEPARATOR + format_datetime(email.date_and_time, DATE_FORMAT)
+        header.append(_rich_text(SEPARATOR + format_datetime(email.date_and_time, DATE_FORMAT)))
     blocks = [
-        {"type": "section", "text": _mrkdwn(header)},
+        {"type": "rich_text", "elements": [{"type": "rich_text_section", "elements": header}]},
         {"type": "section", "text": _plain(_body(email))},
     ]
     names = _attachment_names(email)

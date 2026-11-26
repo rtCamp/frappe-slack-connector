@@ -41,7 +41,9 @@
   "column_break_cele",
   "birthday_message_template",
   "anniversary_message_template",
-  "last_celebrations_date"
+  "last_celebrations_date",
+  "gmail_mirror_section",
+  "enable_gmail_thread_mirroring"
  ],
  "fields": [
   {
@@ -284,12 +286,24 @@
    "hidden": 1,
    "label": "Last Celebrations Date",
    "read_only": 1
+  },
+  {
+   "description": "Mirror email threads from the Frappe Gmail Thread app into Slack channels. Has no effect unless that app is installed.",
+   "fieldname": "gmail_mirror_section",
+   "fieldtype": "Section Break",
+   "label": "Gmail Thread Mirroring"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_gmail_thread_mirroring",
+   "fieldtype": "Check",
+   "label": "Enable Gmail Thread Mirroring"
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-10-10 12:00:00.000000",
+ "modified": "2026-11-26 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Slack Connector",
  "name": "Slack Settings",

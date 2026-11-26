@@ -1,0 +1,119 @@
+{
+ "actions": [],
+ "autoname": "SLACK-MIRROR-.#####",
+ "creation": "2026-11-26 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "gmail_thread",
+  "status",
+  "column_break_channel",
+  "channel_name",
+  "channel_id",
+  "thread_ts",
+  "section_break_state",
+  "retry_count",
+  "last_error",
+  "section_break_messages",
+  "messages"
+ ],
+ "fields": [
+  {
+   "description": "Name of the mirrored Gmail Thread",
+   "fieldname": "gmail_thread",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Gmail Thread",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "default": "Active",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Active\nStopped\nFailed",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "column_break_channel",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "channel_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Channel Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "channel_id",
+   "fieldtype": "Data",
+   "label": "Channel ID",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "description": "Timestamp of the parent message in Slack",
+   "fieldname": "thread_ts",
+   "fieldtype": "Data",
+   "label": "Slack Thread",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_state",
+   "fieldtype": "Section Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "retry_count",
+   "fieldtype": "Int",
+   "label": "Failed Runs in a Row",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_error",
+   "fieldtype": "Small Text",
+   "label": "Last Error",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_messages",
+   "fieldtype": "Section Break",
+   "label": "Posted Emails"
+  },
+  {
+   "fieldname": "messages",
+   "fieldtype": "Table",
+   "label": "Messages",
+   "options": "Slack Thread Mirror Message",
+   "read_only": 1
+  }
+ ],
+ "in_create": 1,
+ "links": [],
+ "modified": "2026-11-26 12:10:00.000000",
+ "modified_by": "Administrator",
+ "module": "Frappe Slack Connector",
+ "name": "Slack Thread Mirror",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "delete": 1,
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager"
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "gmail_thread"
+}

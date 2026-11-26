@@ -41,6 +41,7 @@ from frappe_slack_connector.override.leave_application import (
 from frappe_slack_connector.tests import TEST_SLACK_CHANNEL_ID, TEST_SLACK_USER_ID
 
 LEAVE_OVERRIDE_MODULE = "frappe_slack_connector.override.leave_application"
+LOCKS_MODULE = "frappe_slack_connector.helpers.locks"
 ATTENDANCE_MODULE = "frappe_slack_connector.tasks.attendance_summary"
 
 TODAY = "2026-06-10"
@@ -2845,7 +2846,7 @@ class TestSendLeaveDecisionToApplicant(IntegrationTestCase):
     def test_lock_name_is_per_leave(self):
         """Each leave gets its own lock so unrelated leaves never wait on each other."""
         with (
-            patch(f"{LEAVE_OVERRIDE_MODULE}.filelock") as mock_filelock,
+            patch(f"{LOCKS_MODULE}.filelock") as mock_filelock,
             patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.commit"),
         ):
             with _applicant_dm_lock("HR-LAP-0050"):
@@ -2866,7 +2867,7 @@ class TestSendLeaveDecisionToApplicant(IntegrationTestCase):
                 held.__enter__ = MagicMock(side_effect=lambda *a: order.append("acquire"))
                 held.__exit__ = MagicMock(side_effect=lambda *a: order.append("release"))
                 with (
-                    patch(f"{LEAVE_OVERRIDE_MODULE}.filelock", return_value=held),
+                    patch(f"{LOCKS_MODULE}.filelock", return_value=held),
                     patch(f"{LEAVE_OVERRIDE_MODULE}.frappe.db.commit", side_effect=lambda: order.append("commit")),
                 ):
                     with lock("HR-LAP-0052"):

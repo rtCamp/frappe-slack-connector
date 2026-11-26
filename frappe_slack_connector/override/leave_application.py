@@ -1,10 +1,8 @@
-from contextlib import contextmanager
 from datetime import UTC, datetime
 
 import frappe
 from frappe.model.document import Document
 from frappe.utils import cint, convert_utc_to_system_timezone, flt, get_datetime, get_url_to_form, getdate, today
-from frappe.utils.synchronization import filelock
 from hrms.hr.doctype.leave_application.leave_application import get_leave_balance_on
 from slack_sdk.errors import SlackApiError
 
@@ -20,6 +18,7 @@ from frappe_slack_connector.db.leave_application import (
     write_slack_reference,
 )
 from frappe_slack_connector.helpers.error import generate_error_log
+from frappe_slack_connector.helpers.locks import job_lock as _job_lock
 from frappe_slack_connector.helpers.standard_date import standard_date_fmt
 from frappe_slack_connector.helpers.str_utils import escape_slack_text
 from frappe_slack_connector.slack.app import SlackIntegration
@@ -45,17 +44,6 @@ ANNOUNCED_STATUSES = ("Open", "Approved")
 # so a withdrawal cannot slip between the post's checks and its store
 ATTENDANCE_REPLY_LOCK_PREFIX = "fsc_attendance_reply"
 ATTENDANCE_REPLY_LOCK_TIMEOUT = 60
-
-
-@contextmanager
-def _job_lock(name: str, timeout: int):
-    """
-    Hold a lock for a background job and restart its transaction once held: under REPEATABLE READ it would
-    otherwise keep reading the rows as they were before the wait, not what the previous holder committed
-    """
-    with filelock(name, timeout=timeout):
-        frappe.db.commit()  # nosemgrep
-        yield
 
 
 def _attendance_reply_lock(leave_name: str):

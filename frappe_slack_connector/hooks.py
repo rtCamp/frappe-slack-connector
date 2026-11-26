@@ -32,6 +32,8 @@ required_apps = ["frappe/erpnext", "frappe/hrms"]
 doctype_js = {
     "User Meta": "public/js/user_meta.js",
     "User": "public/js/user_doctype.js",
+    # Inert unless the Frappe Gmail Thread app is installed
+    "Gmail Thread": "public/js/gmail_thread.js",
 }
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}

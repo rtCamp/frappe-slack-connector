@@ -22,6 +22,8 @@
 
 - **Birthday and Work Anniversary Announcements**: Every day at the specified time, a Slack message congratulates the employees whose birthday or work anniversary is today. The message text comes from an **Email Template** (with *Use HTML* on, the Jinja in *Response (HTML)*) linked from Slack Settings; with nothing linked a built-in message is used.
 
+- **Gmail Thread Mirroring**: Send an email thread from the [Frappe Gmail Thread](https://github.com/rtCamp/frappe-gmail-thread) app to a Slack channel from its form. The thread appears as one Slack thread, one reply per email, and new emails are added as they sync. Needs that app installed, **Enable Gmail Thread Mirroring** switched on in Slack Settings, and the bot invited to the channel.
+
 ## Prerequisite
 
 Before you begin, make sure you have following apps installed on your site:

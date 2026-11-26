@@ -137,6 +137,10 @@ after_migrate = "frappe_slack_connector.setup.install"
 # Hook on document methods and events
 
 doc_events = {
+    # Inert unless the Frappe Gmail Thread app is installed
+    "Gmail Thread": {
+        "on_update": "frappe_slack_connector.gmail_mirror.events.on_thread_update",
+    },
     "Leave Application": {
         "after_insert": "frappe_slack_connector.override.leave_application.after_insert",
         "before_validate": [
@@ -187,6 +191,9 @@ scheduler_events = {
         ],
         "0 8 * * *": [
             "frappe_slack_connector.tasks.workload_reminder.send_daily_workload_reminder",
+        ],
+        "*/10 * * * *": [
+            "frappe_slack_connector.gmail_mirror.job.retry_pending",
         ],
     },
     "all": [

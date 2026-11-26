@@ -6,7 +6,13 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils.file_lock import LockTimeoutError
 
 from frappe_slack_connector.gmail_mirror import MIRROR, MIRROR_MESSAGE
-from frappe_slack_connector.gmail_mirror.job import MAX_RETRIES, POST_INTERVAL_SECONDS, post_missing, retry_pending
+from frappe_slack_connector.gmail_mirror.job import (
+    LOCK_TIMEOUT,
+    MAX_RETRIES,
+    POST_INTERVAL_SECONDS,
+    post_missing,
+    retry_pending,
+)
 from frappe_slack_connector.tests import TEST_SLACK_CHANNEL_ID, build_slack_client_mock
 from frappe_slack_connector.tests.gmail_mirror import (
     add_test_email,
@@ -153,6 +159,52 @@ class TestPostMissing(_JobTestCase):
         self.client.chat_postMessage.assert_not_called()
         self.generate_error_log.assert_not_called()
 
+    def test_stop_during_the_pause_between_replies_is_noticed_before_the_next_post(self):
+        thread = make_test_thread("fsc-job-stop-pause", emails=3)
+        mirror = make_test_mirror(thread.name)
+        self.sleep.side_effect = lambda seconds: frappe.db.set_value(MIRROR, mirror.name, "status", "Stopped")
+        post_missing(mirror.name)
+        self.assertEqual(_posted_keys(mirror.name), ["fsc-job-stop-pause-m1"])
+
+    def test_status_is_read_in_a_fresh_transaction_before_each_post(self):
+        """A Stop committed by the form's request is only visible to a transaction started after it."""
+        thread = make_test_thread("fsc-job-fresh", emails=2)
+        mirror = make_test_mirror(thread.name, thread_ts="9.1")
+        order = []
+        self.commit.side_effect = lambda: order.append("commit")
+        self.client.chat_postMessage.side_effect = lambda **kwargs: order.append("post") or {"ok": True, "ts": "9.2"}
+        post_missing(mirror.name)
+        # per email: a commit to start afresh, the post, the commit that records it
+        self.assertEqual(order, ["commit", "post", "commit"] * 2)
+
+    def test_email_that_syncs_during_a_run_is_posted_by_that_run(self):
+        thread = make_test_thread("fsc-job-pickup", emails=1)
+        mirror = make_test_mirror(thread.name)
+        added = []
+
+        def post(**kwargs):
+            if "thread_ts" in kwargs and not added:
+                added.append(add_test_email(thread, 2))
+            return {"ok": True, "ts": f"8.{len(self.calls())}"}
+
+        self.client.chat_postMessage.side_effect = post
+        post_missing(mirror.name)
+        self.assertEqual(_posted_keys(mirror.name), ["fsc-job-pickup-m1", "fsc-job-pickup-m2"])
+
+    def test_runs_under_a_lock_named_after_the_mirror(self):
+        thread = make_test_thread("fsc-job-lockname", emails=1)
+        mirror = make_test_mirror(thread.name)
+        names = []
+
+        @contextlib.contextmanager
+        def lock(name, timeout):
+            names.append((name, timeout))
+            yield
+
+        with patch(f"{JOB}.job_lock", lock):
+            post_missing(mirror.name)
+        self.assertEqual(names, [(f"gmail_mirror_{mirror.name}", LOCK_TIMEOUT)])
+
     def test_stop_during_a_run_leaves_the_rest_unposted(self):
         thread = make_test_thread("fsc-job-stop", emails=3)
         mirror = make_test_mirror(thread.name)
@@ -204,13 +256,34 @@ class TestFailures(_JobTestCase):
         self.assertEqual(_state(mirror.name).thread_ts, "3.1")
         self.assertEqual(_posted_keys(mirror.name), ["fsc-job-parent-m1"])
 
-    def test_last_allowed_failed_run_in_a_row_fails_the_mirror(self):
+    def test_last_allowed_failed_retry_fails_the_mirror(self):
         thread = make_test_thread("fsc-job-giveup", emails=1)
         mirror = make_test_mirror(thread.name, retry_count=MAX_RETRIES - 1)
         self.client.chat_postMessage.side_effect = api_error("internal_error")
-        post_missing(mirror.name)
+        post_missing(mirror.name, scheduled=True)
         state = _state(mirror.name)
         self.assertEqual((state.status, state.retry_count), ("Failed", MAX_RETRIES))
+
+    def test_only_scheduled_retries_use_up_the_retry_budget(self):
+        """Several emails arriving during a short Slack outage must not fail the mirror within seconds."""
+        thread = make_test_thread("fsc-job-burst", emails=1)
+        mirror = make_test_mirror(thread.name)
+        self.client.chat_postMessage.side_effect = api_error("internal_error")
+        for _ in range(MAX_RETRIES + 2):
+            post_missing(mirror.name)
+        state = _state(mirror.name)
+        self.assertEqual((state.status, state.retry_count), ("Active", 1))
+        post_missing(mirror.name, scheduled=True)
+        self.assertEqual(_state(mirror.name).retry_count, 2)
+
+    def test_waiting_too_long_for_the_lock_does_not_use_up_the_retry_budget(self):
+        """The lock is held by a run that is alive; this one only asks to be run again."""
+        thread = make_test_thread("fsc-job-lock-budget", emails=1)
+        mirror = make_test_mirror(thread.name, retry_count=MAX_RETRIES - 1)
+        with patch(f"{JOB}.job_lock", side_effect=LockTimeoutError):
+            post_missing(mirror.name, scheduled=True)
+        state = _state(mirror.name)
+        self.assertEqual((state.status, state.retry_count), ("Active", MAX_RETRIES - 1))
 
     def test_permanent_slack_error_fails_at_once_with_a_readable_reason(self):
         thread = make_test_thread("fsc-job-fatal", emails=1)
@@ -283,6 +356,7 @@ class TestRetryPending(_JobTestCase):
         # other tests of this class leave mirrors behind in the same transaction, so only these four are judged
         queued = [c.args[0] for c in enqueue.call_args_list]
         self.assertEqual(queued.count(waiting.name), 1)
+        self.assertTrue(all(c.kwargs == {"scheduled": True} for c in enqueue.call_args_list))
         self.assertFalse(set(queued) & {other.name for other in others})
 
     def test_queues_nothing_when_the_feature_is_off(self):
@@ -299,5 +373,9 @@ class TestRetryPending(_JobTestCase):
         with patch(f"{JOB}.frappe.enqueue") as enqueue:
             enqueue_post("SLACK-MIRROR-00001", after_commit=True)
         enqueue.assert_called_once_with(
-            f"{JOB}.post_missing", queue="long", mirror="SLACK-MIRROR-00001", enqueue_after_commit=True
+            f"{JOB}.post_missing",
+            queue="long",
+            mirror="SLACK-MIRROR-00001",
+            scheduled=False,
+            enqueue_after_commit=True,
         )

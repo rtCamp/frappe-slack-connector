@@ -45,9 +45,10 @@ class _ApiTestCase(IntegrationTestCase):
             ("enqueue_post", {}),
             ("job_lock", {"new": _no_lock}),
             ("generate_error_log", {}),
+            ("frappe.db.commit", {}),
         ):
             patcher = patch(f"{API}.{name}", **replacement)
-            setattr(self, name, patcher.start())
+            setattr(self, name.rsplit(".", 1)[-1], patcher.start())
             self.addCleanup(patcher.stop)
 
     def mirrors_of(self, thread):
@@ -64,7 +65,7 @@ class TestStart(_ApiTestCase):
             (row.gmail_thread, row.channel_id, row.channel_name, row.status),
             (thread.name, TEST_SLACK_CHANNEL_ID, CHANNEL, "Active"),
         )
-        self.enqueue_post.assert_called_once_with(name, after_commit=True)
+        self.enqueue_post.assert_called_once_with(name)
         self.client.chat_postMessage.assert_not_called()
 
     def test_second_start_is_refused(self):
@@ -73,6 +74,23 @@ class TestStart(_ApiTestCase):
         with self.assertRaisesRegex(frappe.ValidationError, "already mirrored in #test-fsc"):
             start(thread.name, CHANNEL)
         self.assertEqual(self.mirrors_of(thread), 1)
+
+    def test_the_new_mirror_is_committed_before_the_lock_is_released(self):
+        """A second request that takes the lock next must find this mirror, or two Slack threads would start."""
+        thread = make_test_thread("fsc-api-lock")
+        order = []
+
+        @contextlib.contextmanager
+        def lock(name, timeout):
+            order.append(f"acquire {name}")
+            yield
+            order.append("release")
+
+        self.commit.side_effect = lambda: order.append("commit")
+        self.enqueue_post.side_effect = lambda *args, **kwargs: order.append("enqueue")
+        with patch(f"{API}.job_lock", lock):
+            start(thread.name, CHANNEL)
+        self.assertEqual(order, [f"acquire gmail_mirror_start_{thread.name}", "commit", "release", "enqueue"])
 
     def test_refused_while_a_failed_mirror_exists(self):
         """A failed mirror is retried or stopped, never bypassed: a failure must not lead to a second Slack thread."""
@@ -153,7 +171,7 @@ class TestSendAgain(_ApiTestCase):
         note = self.client.chat_postMessage.call_args.kwargs
         self.assertEqual((note["channel"], note["thread_ts"]), (TEST_SLACK_CHANNEL_ID, "7.1"))
         self.assertIn("resumed", note["text"])
-        self.enqueue_post.assert_called_once_with(mirror.name, after_commit=True)
+        self.enqueue_post.assert_called_once_with(mirror.name)
 
     def test_resume_survives_a_failed_note(self):
         thread = make_test_thread("fsc-api-resume-note")
@@ -201,6 +219,25 @@ class TestStopAndRetry(_ApiTestCase):
         note = self.client.chat_postMessage.call_args.kwargs
         self.assertEqual((note["channel"], note["thread_ts"]), (TEST_SLACK_CHANNEL_ID, "5.1"))
         self.assertIn("stopped", note["text"])
+
+    def test_stop_is_committed_before_the_note_is_posted(self):
+        """The running job only sees a committed Stop; a slow Slack call must not let it keep posting."""
+        thread = make_test_thread("fsc-api-stop-order")
+        make_test_mirror(thread.name, thread_ts="5.1")
+        order = []
+        self.commit.side_effect = lambda: order.append("commit")
+        self.client.chat_postMessage.side_effect = lambda **kwargs: order.append("note") or {"ok": True, "ts": "5.2"}
+        stop(thread.name)
+        self.assertEqual(order, ["commit", "note"])
+
+    def test_stop_with_a_pending_temporary_error_can_still_be_resumed(self):
+        """Only a mirror stopped while failed keeps its error; a passing error must not cost the Slack thread."""
+        thread = make_test_thread("fsc-api-stop-pending")
+        mirror = make_test_mirror(thread.name, thread_ts="5.1", retry_count=2, last_error="Slack error: internal_error")
+        stop(thread.name)
+        row = frappe.db.get_value(MIRROR, mirror.name, ["status", "retry_count", "last_error"], as_dict=True)
+        self.assertEqual((row.status, row.retry_count, row.last_error or ""), ("Stopped", 0, ""))
+        self.assertEqual(start(thread.name, CHANNEL), mirror.name)
 
     def test_stop_survives_a_slack_failure(self):
         thread = make_test_thread("fsc-api-stop-fail")

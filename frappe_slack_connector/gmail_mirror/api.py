@@ -92,6 +92,7 @@ def start(thread: str, channel: str) -> str:
     if problem:
         frappe.throw(_(PROBLEM_MESSAGES[problem]).format(channel))
 
+    resumed = None
     try:
         # Two clicks at once must not both pass the "already mirrored" check
         with job_lock(f"gmail_mirror_start_{thread}", START_LOCK_TIMEOUT):
@@ -100,10 +101,15 @@ def start(thread: str, channel: str) -> str:
                 frappe.throw(
                     _("This thread is already mirrored in #{0}. Stop that mirror first.").format(live.channel_name)
                 )
-            name = _resume(thread, channel, channel_id) or _create(thread, channel, channel_id)
+            resumed = _resume(thread, channel, channel_id)
+            name = resumed.name if resumed else _create(thread, channel, channel_id)
+            # Committed while the lock is held: the next request to take it must find this mirror
+            frappe.db.commit()  # nosemgrep
     except LockTimeoutError:
         frappe.throw(_("Another request for this thread is in progress. Try again in a moment."))
-    enqueue_post(name, after_commit=True)
+    if resumed:
+        _post_note(resumed, RESUMED_TEXT, resumed_blocks(get_fullname(frappe.session.user)))
+    enqueue_post(name)
     return name
 
 
@@ -121,11 +127,12 @@ def _create(thread: str, channel: str, channel_id: str) -> str:
     return mirror.name
 
 
-def _resume(thread: str, channel: str, channel_id: str) -> str | None:
+def _resume(thread: str, channel: str, channel_id: str):
     """
-    Reactivate the thread's last mirror in this channel, if it can be continued:
-    it has a Slack thread and no recorded error. A mirror stopped while failed
-    keeps its error, so Stop then Send again starts afresh when a Slack thread is gone.
+    Reactivate the thread's last mirror in this channel, if it can be continued,
+    and return its row: it has a Slack thread and no recorded error. A mirror
+    stopped while failed keeps its error, so Stop then Send again starts afresh
+    when a Slack thread is gone.
     """
     rows = frappe.get_all(
         MIRROR,
@@ -138,18 +145,23 @@ def _resume(thread: str, channel: str, channel_id: str) -> str | None:
         return None
     mirror = rows[0]
     frappe.db.set_value(MIRROR, mirror.name, {"status": "Active", "retry_count": 0, "channel_name": channel})
-    _post_note(mirror, RESUMED_TEXT, resumed_blocks(get_fullname(frappe.session.user)))
-    return mirror.name
+    return mirror
 
 
 @frappe.whitelist(methods=["POST"])
 def stop(thread: str) -> None:
     """Stop the thread's mirror. Messages already in Slack stay; a note says no more will follow."""
     frappe.has_permission("Gmail Thread", "write", doc=thread, throw=True)
-    mirror = _live_mirror(thread, ["name", "channel_id", "thread_ts"])
+    mirror = _live_mirror(thread, ["name", "status", "channel_id", "thread_ts"])
     if not mirror:
         frappe.throw(_("This thread is not mirrored."))
-    frappe.db.set_value(MIRROR, mirror.name, "status", "Stopped")
+    values = {"status": "Stopped"}
+    if mirror.status == "Active":
+        # A passing error that was still being retried is not a reason to refuse a later resume
+        values.update(retry_count=0, last_error="")
+    frappe.db.set_value(MIRROR, mirror.name, values)
+    # Committed before Slack is called: a job that is posting only sees a committed Stop
+    frappe.db.commit()  # nosemgrep
     if mirror.thread_ts:
         _post_note(mirror, STOPPED_TEXT, stopped_blocks(get_fullname(frappe.session.user)))
 

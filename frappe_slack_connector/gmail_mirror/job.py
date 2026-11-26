@@ -45,10 +45,10 @@ class MirrorCannotContinue(Exception):
     """A condition that trying again will not change; the message is shown to the user."""
 
 
-def enqueue_post(mirror: str, after_commit: bool = False) -> None:
+def enqueue_post(mirror: str, after_commit: bool = False, scheduled: bool = False) -> None:
     # No job id: the lock serialises runs and a surplus run finds nothing to do, while
     # dropping a duplicate would lose an email that arrives during a run
-    frappe.enqueue(POST_JOB, queue="long", mirror=mirror, enqueue_after_commit=after_commit)
+    frappe.enqueue(POST_JOB, queue="long", mirror=mirror, scheduled=scheduled, enqueue_after_commit=after_commit)
 
 
 def retry_pending() -> None:
@@ -56,11 +56,15 @@ def retry_pending() -> None:
     if not is_enabled():
         return
     for mirror in frappe.get_all(MIRROR, filters={"status": "Active", "retry_count": [">", 0]}, pluck="name"):
-        enqueue_post(mirror)
+        enqueue_post(mirror, scheduled=True)
 
 
-def post_missing(mirror: str) -> None:
-    """Post to Slack whatever the mirror's thread is missing. Never raises: a failure is recorded on the mirror."""
+def post_missing(mirror: str, scheduled: bool = False) -> None:
+    """
+    Post to Slack whatever the mirror's thread is missing. Never raises: a
+    failure is recorded on the mirror. ``scheduled`` marks a run started by the
+    retry schedule; only those count towards MAX_RETRIES.
+    """
     if not is_enabled():
         return
     try:
@@ -69,7 +73,7 @@ def post_missing(mirror: str) -> None:
     except Exception as exc:
         frappe.db.rollback()
         try:
-            _record_failure(mirror, exc)
+            _record_failure(mirror, exc, scheduled)
         except Exception as record_exc:
             generate_error_log("Gmail thread mirror: could not record a failure", exception=record_exc)
 
@@ -113,11 +117,11 @@ def _post_missing(mirror: str) -> None:
         if not missing:
             break
         for email in missing:
-            # Stop may have been pressed since the last post
-            if frappe.db.get_value(MIRROR, mirror, "status") != "Active":
-                return
             if posted_in_this_run:
                 time.sleep(POST_INTERVAL_SECONDS)
+            # Stop may have been pressed since the last post, the pause included
+            if not _is_active(mirror):
+                return
             response = client.chat_postMessage(
                 channel=state.channel_id,
                 thread_ts=thread_ts,
@@ -149,11 +153,20 @@ def _post_missing(mirror: str) -> None:
         frappe.db.commit()  # nosemgrep
 
 
-def _record_failure(mirror: str, exc: Exception) -> None:
+def _is_active(mirror: str) -> bool:
+    # A new transaction first: the one in progress cannot see a Stop committed after it began
+    frappe.db.commit()  # nosemgrep
+    return frappe.db.get_value(MIRROR, mirror, "status") == "Active"
+
+
+def _record_failure(mirror: str, exc: Exception, scheduled: bool) -> None:
     """
     Note a failed run on the mirror. A failure that trying again cannot fix
-    fails the mirror at once; any other is counted, and the retry schedule
-    runs the mirror again until MAX_RETRIES runs in a row have failed.
+    fails the mirror at once. Any other marks the mirror for the retry
+    schedule, which runs it again until MAX_RETRIES of its runs in a row have
+    failed. Runs started by an arriving email do not count: several emails
+    during a short outage must not use up the retries within seconds. Nor does
+    a run that waited too long for the lock, since the run holding it is alive.
     """
     generate_error_log("Gmail thread mirror: posting to Slack failed", message=f"Mirror {mirror}", exception=exc)
     state = frappe.db.get_value(MIRROR, mirror, ["status", "retry_count", "channel_name"], as_dict=True)
@@ -163,10 +176,12 @@ def _record_failure(mirror: str, exc: Exception) -> None:
     values = {"last_error": _error_text(exc, state.channel_name)}
     if isinstance(exc, MirrorCannotContinue) or slack_error_code(exc) in FATAL_ERRORS:
         values["status"] = "Failed"
-    else:
+    elif scheduled and not isinstance(exc, LockTimeoutError):
         values["retry_count"] = cint(state.retry_count) + 1
         if values["retry_count"] >= MAX_RETRIES:
             values["status"] = "Failed"
+    else:
+        values["retry_count"] = max(cint(state.retry_count), 1)
     frappe.db.set_value(MIRROR, mirror, values, update_modified=False)
     frappe.db.commit()  # nosemgrep
 
